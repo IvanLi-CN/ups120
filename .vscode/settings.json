@@ -1,0 +1,14 @@
+{
+  "cSpell.words": [
+    "defmt",
+    "Eload",
+    "Exti",
+    "husb",
+    "pmic"
+  ],
+  "rust-analyzer.check.allTargets": false,
+  "rust-analyzer.check.extraArgs": [
+      "--target",
+      "thumbv7em-none-eabihf"
+  ],
+}
