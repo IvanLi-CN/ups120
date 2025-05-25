@@ -51,6 +51,8 @@ libm = "0.2.8" # Add libm dependency
 embedded-io-async = { version = "0.6.1" }
 
 bq769x0-async-rs = { version = "0.1.1", path = "./bq76920", features = ["async", "bq76920", "defmt"] } # Enable defmt feature
+bq25730-async-rs = { version = "0.1.1", path = "./bq25730", features = ["async", "bq25730", "defmt"] } # Add bq25730 driver
+uom = { version = "0.37", default-features = false, features = ["si", "i32"] }
 
 # cargo build/run
 [profile.dev]
@@ -64,7 +66,8 @@ overflow-checks = true  # <-
 # cargo build/run --release
 [profile.release]
 codegen-units = 1
-debug = 2
+debug = 0
+strip = "symbols"
 debug-assertions = false # <-
 incremental = false
 lto = 'fat'

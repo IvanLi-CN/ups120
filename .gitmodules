@@ -4,3 +4,6 @@
 [submodule "bq76920"]
 	path = bq76920
 	url = git@github.com:IvanLi-CN/bq769x0-async-rs.git
+[submodule "bq25730"]
+	path = bq25730
+	url = git@github.com:IvanLi-CN/bq25730-rs.git
