@@ -83,7 +83,7 @@ let i2c_instance = embassy_stm32::i2c::I2c::new(
     // BQ25730 I2C address (7-bit)
     let bq25730_address = 0x6B; // Confirmed from bq25730.pdf
 // Pass the I2C peripheral instance by value, wrapped in I2cAsynch
-let mut bq: Bq769x0<_, bq769x0_async_rs::Enabled> = {
+let mut bq: Bq769x0<_, bq769x0_async_rs::Enabled, 5> = {
     let i2c_bus = I2cDevice::new(i2c_bus_mutex);
     Bq769x0::new(i2c_bus, bq76920_address)
 };
@@ -231,7 +231,7 @@ let mut ina226 = {
         }
 
         // Read Cell Voltages
-        match bq.read_cell_voltages::<5>().await {
+        match bq.read_cell_voltages().await {
             Ok(voltages) => {
                 info!("Cell Voltages (mV):");
                 // BQ76920 supports up to 5 cells
