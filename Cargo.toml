@@ -14,7 +14,7 @@ embassy-stm32 = { version = "0.2.0", path = "./embassy/embassy-stm32", features 
   "unstable-pac",
   "exti",
 ] }
-embassy-sync = { version = "0.6.2", path = "./embassy/embassy-sync", features = [
+embassy-sync = { version = "0.7.0", path = "./embassy/embassy-sync", features = [
   "defmt",
 ] }
 embassy-executor = { version = "0.7.0", path = "./embassy/embassy-executor", features = [
@@ -55,6 +55,9 @@ bq25730-async-rs = { version = "0.1.1", path = "./bq25730", features = ["async",
 uom = { version = "0.37", default-features = false, features = ["si", "i32"] }
 
 # cargo build/run
+
+ina226 = { version = "0.3.0", features = ["async"] }
+
 [profile.dev]
 codegen-units = 1
 debug = 2

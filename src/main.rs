@@ -29,6 +29,9 @@ use bq769x0_async_rs::{BatteryConfig, Bq769x0, RegisterAccess};
 // Import the BQ25730 driver crate
 use bq25730_async_rs::Bq25730;
 
+// Import the INA226 driver crate
+use ina226::INA226;
+
 // For sharing I2C bus
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex;
@@ -89,6 +92,13 @@ let mut bq25730 = {
     Bq25730::new(i2c_bus, bq25730_address)
 };
 
+// INA226 I2C address (7-bit)
+let ina226_address = 0x40;
+let mut ina226 = {
+    let i2c_bus = I2cDevice::new(i2c_bus_mutex);
+    INA226::new(i2c_bus, ina226_address)
+};
+
     info!("BQ76920 driver instance created.");
 
     // --- BQ76920 Initialization Sequence ---
@@ -138,6 +148,33 @@ let mut bq25730 = {
             error!("Failed to enable CC_EN: {:?}", e);
         }
         info!("CC_EN enable attempt complete.");
+
+        // --- Reading INA226 Data ---
+        info!("--- Reading INA226 Data ---");
+
+        match ina226.bus_voltage_millivolts().await {
+            Ok(voltage) => {
+                info!("INA226 Voltage: {} mV", voltage);
+            }
+            Err(e) => {
+                error!("Failed to read INA226 voltage: {:?}", e);
+            }
+        }
+
+
+        match ina226.current_amps().await {
+            Ok(current) => {
+                if let Some(current_amps) = current {
+                    let current_ma = current_amps * 1000.0; // Convert to mA
+                    info!("INA226 Current: {} mA", current_ma);
+                } else {
+                    info!("INA226 Current: None");
+                }
+            }
+            Err(e) => {
+                error!("Failed to read INA226 current: {:?}", e);
+            }
+        }
 
         // --- Reading BQ25730 Data ---
         info!("--- Reading BQ25730 Data ---");
@@ -194,7 +231,7 @@ let mut bq25730 = {
         }
 
         // Read Cell Voltages
-        match bq.read_cell_voltages().await {
+        match bq.read_cell_voltages::<5>().await {
             Ok(voltages) => {
                 info!("Cell Voltages (mV):");
                 // BQ76920 supports up to 5 cells
