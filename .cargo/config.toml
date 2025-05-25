@@ -1,6 +1,5 @@
 [target.'cfg(all(target_arch = "arm", target_os = "none"))']
-# Change this runner as required for your MCU.
-runner = "probe-rs run --chip STM32G031C8Ux" # to list chips, run `probe-rs chip list.`
+runner = "probe-rs run --chip STM32G431CBUx" # to list chips, run `probe-rs chip list.`
 
 rustflags = [
   "-C", "link-arg=-Tlink.x",
@@ -11,16 +10,7 @@ rustflags = [
 ]
 
 [build]
-# Change this target as required for your MCU.
-target = "thumbv6m-none-eabi"    # Cortex-M0 and Cortex-M0+ (eg G0)
-# target = "thumbv6m-none-eabi"    # Cortex-M0 and Cortex-M0+ (eg G0)
-# target = "thumbv8m.main-none-eabihf" # Cortex-M33F and Cortex-M35F (eg L5, U5, H5)
-
-[alias]
-rb = "run --bin"
-rrb = "run --release --bin"
-rr = "run --release"
-br = "build --release"
+target = "thumbv7em-none-eabihf"    # Cortex-M4F
 
 [env]
 DEFMT_LOG = "info"

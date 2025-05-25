@@ -9,7 +9,7 @@ version = "0.1.0"
 embassy-stm32 = { version = "0.2.0", path = "./embassy/embassy-stm32", features = [
   "defmt",
   "time-driver-any",
-  "stm32g031g8",
+  "stm32g431cb",
   "memory-x",
   "unstable-pac",
   "exti",

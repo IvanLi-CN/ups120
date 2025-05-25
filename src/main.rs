@@ -8,9 +8,17 @@ use embassy_executor::Spawner;
 use embassy_stm32::{
     bind_interrupts,
     i2c::{self, I2c},
+//use embassy_stm32::i2c::{self, I2c};
     peripherals,
     time::Hertz,
 };
+
+bind_interrupts!(
+    struct Irqs {
+        I2C1_EV => i2c::EventInterruptHandler<peripherals::I2C1>;
+        I2C1_ER => i2c::ErrorInterruptHandler<peripherals::I2C1>;
+    }
+);
 use embassy_time::{Duration, Timer};
 use {defmt_rtt as _, panic_probe as _};
 
@@ -26,9 +34,7 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex;
 
 // Define the I2C interrupt handler
-bind_interrupts!(struct Irqs {
-    I2C1 => i2c::EventInterruptHandler<peripherals::I2C1>, i2c::ErrorInterruptHandler<peripherals::I2C1>;
-});
+
 
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) {
@@ -53,33 +59,35 @@ async fn main(_spawner: Spawner) {
     static I2C_BUS_MUTEX_CELL: static_cell::StaticCell<
         Mutex<CriticalSectionRawMutex, I2c<'static, embassy_stm32::mode::Async>>,
     > = static_cell::StaticCell::new();
+let i2c_instance = embassy_stm32::i2c::I2c::new(
+    p.I2C1,         // 1. peri
+    p.PA15,          // 2. scl
+    p.PB7,          // 3. sda
+    Irqs,
+    p.DMA1_CH3,
+    p.DMA1_CH4,
+    Hertz(100_000), // 7. freq
+    i2c_config,     // 8. config
+);
 
-    let i2c_instance = i2c::I2c::new(
-        p.I2C1,         // 1. peri
-        p.PB6,          // 2. scl
-        p.PB7,          // 3. sda
-        Irqs,           // 4. _irq
-        p.DMA1_CH1,     // 5. tx_dma (Assuming DMA1_CH1 for I2C1 TX)
-        p.DMA1_CH2,     // 6. rx_dma (Assuming DMA1_CH2 for I2C1 RX)
-        Hertz(100_000), // 7. freq
-        i2c_config,     // 8. config
-    );
-
-    info!("I2C1 initialized on PB6/PB7 with DMA.");
+    info!("I2C1 initialized on PA15/PB7 with DMA.");
 
     // Initialize the static Mutex with the I2C instance
-    let i2c_bus_mutex = I2C_BUS_MUTEX_CELL.init(Mutex::new(i2c_instance));
+    let i2c_bus_mutex = I2C_BUS_MUTEX_CELL.init(Mutex::new(unsafe { core::mem::transmute(i2c_instance) }));
 
     // BQ76920 I2C address (7-bit)
     let bq76920_address = 0x08;
     // BQ25730 I2C address (7-bit)
     let bq25730_address = 0x6B; // Confirmed from bq25730.pdf
-
-    // Pass the I2C peripheral instance by value, wrapped in I2cAsynch
+// Pass the I2C peripheral instance by value, wrapped in I2cAsynch
+let mut bq: Bq769x0<_, bq769x0_async_rs::Enabled> = {
     let i2c_bus = I2cDevice::new(i2c_bus_mutex);
-    let mut bq: Bq769x0<_, bq769x0_async_rs::Enabled> = Bq769x0::new(i2c_bus, bq76920_address);
+    Bq769x0::new(i2c_bus, bq76920_address)
+};
+let mut bq25730 = {
     let i2c_bus = I2cDevice::new(i2c_bus_mutex);
-    let mut bq25730 = Bq25730::new(i2c_bus, bq25730_address);
+    Bq25730::new(i2c_bus, bq25730_address)
+};
 
     info!("BQ76920 driver instance created.");
 
