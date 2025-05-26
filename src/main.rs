@@ -302,7 +302,7 @@ async fn main(spawner: Spawner) {
         // Construct BQ25730 measurements (replace with actual ADC reads when implemented)
         let measurements = shared::Bq25730Measurements {
             adc_measurements: bq25730_async_rs::data_types::AdcMeasurements::from_register_values(
-                0, 0, 0, 0, 0, 0, 0, 0,
+                &[0, 0, 0, 0, 0, 0, 0, 0],
             ), // Placeholder
                // Add other BQ25730 measurement fields here when implemented
         };
@@ -442,7 +442,7 @@ async fn main(spawner: Spawner) {
             bq25730: bq25730_measurements.unwrap_or_else(|| shared::Bq25730Measurements {
                 adc_measurements:
                     bq25730_async_rs::data_types::AdcMeasurements::from_register_values(
-                        0, 0, 0, 0, 0, 0, 0, 0,
+                        &[0, 0, 0, 0, 0, 0, 0, 0],
                     ), // Default placeholder
                        // Add other BQ25730 measurement fields here
             }),

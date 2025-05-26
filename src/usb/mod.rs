@@ -89,6 +89,7 @@ pub async fn usb_task(
                 select::Either::First(parse_result) => {
                     match parse_result {
                         Ok(cmd) => {
+                            defmt::info!("USB command: {:#x}", cmd);
                             if let Err(e) = usb_endpoints.process_command(cmd).await {
                                 defmt::error!("Error processing command: {:?}", e);
                             }

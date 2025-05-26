@@ -3,7 +3,8 @@
 use embassy_sync::pubsub::{PubSubChannel, Publisher, Subscriber};
 use static_cell::StaticCell;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use binrw::{BinRead, BinWrite, io::{Read, Write, Seek}, BinResult}; // Remove Cursor as it's not used here
+use binrw::{BinRead, BinWrite, io::{Read, Write, Seek}, BinResult};
+use defmt::Format;
 // 在这里定义设备相关的数据结构和消息队列
 
 use bq25730_async_rs::data_types::{AdcMeasurements, ChargerStatus, ProchotStatus};
@@ -15,7 +16,7 @@ use uom::si::electric_potential::ElectricPotential; // Import specific uom types
 use uom::si::thermodynamic_temperature::ThermodynamicTemperature; // Import specific uom types
 
 /// BQ25730 测量数据
-#[derive(Debug, Copy, Clone, PartialEq)] // Removed BinRead, BinWrite
+#[derive(Debug, Copy, Clone, PartialEq, defmt::Format)] // Removed BinRead, BinWrite
 pub struct Bq25730Measurements {
     pub adc_measurements: AdcMeasurements,
     // 添加其他非告警相关的测量数据字段（如果需要）
@@ -50,6 +51,20 @@ pub struct AllMeasurements<const N: usize> {
     pub bq76920: Bq76920Measurements<N>,
 }
 
+impl<const N: usize> Format for AllMeasurements<N> {
+    fn format(&self, fmt: defmt::Formatter) {
+        defmt::write!(fmt, "AllMeasurements {{ bq25730: {}, bq76920: {{ cell_voltages: [", self.bq25730);
+        for i in 0..N {
+            defmt::write!(fmt, "{:?}, ", self.bq76920.cell_voltages.voltages[i].get::<millivolt>());
+        }
+        defmt::write!(fmt, "], temperatures: {{ ts1: {:?}, is_thermistor: {} }}, coulomb_counter: {} }} }}",
+            self.bq76920.temperatures.ts1.get::<kelvin>(),
+            self.bq76920.temperatures.is_thermistor,
+            self.bq76920.coulomb_counter.raw_cc
+        );
+    }
+}
+
 // Manual implementation of BinRead and BinWrite for AllMeasurements
 impl<const N: usize> BinRead for AllMeasurements<N> {
     type Args<'a> = ();
@@ -78,14 +93,16 @@ impl<const N: usize> BinRead for AllMeasurements<N> {
         Ok(Self {
             bq25730: Bq25730Measurements {
                 adc_measurements: AdcMeasurements::from_register_values(
-                    bq25730_psys_raw,
-                    bq25730_vbus_raw,
-                    bq25730_idchg_raw,
-                    bq25730_ichg_raw,
-                    bq25730_cmpin_raw,
-                    bq25730_iin_raw,
-                    bq25730_vbat_raw,
-                    bq25730_vsys_raw,
+                    &[
+                        bq25730_psys_raw,
+                        bq25730_vbus_raw,
+                        bq25730_idchg_raw,
+                        bq25730_ichg_raw,
+                        bq25730_cmpin_raw,
+                        bq25730_iin_raw,
+                        bq25730_vbat_raw,
+                        bq25730_vsys_raw,
+                    ]
                 ),
             },
             bq76920: Bq76920Measurements {

@@ -7,7 +7,7 @@ use embassy_usb::driver::EndpointError;
 use crate::shared::AllMeasurements;
 
 #[repr(u8)]
-#[derive(BinRead, BinWrite, Debug, Clone, Copy)]
+#[derive(BinRead, BinWrite, Debug, Clone, Copy, defmt::Format)]
 pub enum UsbData {
     // Commands
     #[brw(magic = 0x00u8)]
@@ -70,12 +70,14 @@ impl<'d, D: Driver<'d>> UsbEndpoints<'d, D> {
         match command {
             UsbData::SubscribeStatus => {
                 self.status_subscription_active = true;
+                defmt::info!("Status subscription active");
                 // Optionally send a response to confirm subscription
                 // let response = UsbData::StatusResponse(...);
                 // self.send_response(response).await?;
             }
             UsbData::UnsubscribeStatus => {
                 self.status_subscription_active = false;
+                defmt::info!("Status subscription inactive");
                 // Optionally send a response to confirm unsubscription
                 // let response = UsbData::StatusResponse(...);
                 // self.send_response(response).await?;
