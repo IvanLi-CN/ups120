@@ -1,63 +1,68 @@
-# USB 功能模块实现计划
+# BQ76920 状态信息 USB 上位机显示方案
 
-## 目标
+## 方案概述
 
-在项目 `/Volumes/ExData/Projects/Ivan/ups120` 的 `/src/usb/` 目录下实现一个基于 `embassy-usb` crate 的 USB 功能模块，支持 WebUSB 通信，包含请求响应和订阅推送两种模式。重点实现 `subscribeStatus` 和 `unsubscribeStatus` 命令以及状态消息的订阅流推送。通信使用三个端点（Command、Response、Push），数据类型通过枚举表示，使用 `binrw` 进行序列化和反序列化。
+为了在上位机上看到 BQ76920 的比较全面的状态信息，包括充电放电 MOS 管的状态以及其他状态，我们需要进行以下修改：
 
-## 参考实现
+1. **扩展 `Bq76920Measurements` 结构体：** 在 `bq76920/src/data_types.rs` 中，将 `SystemStatus` 和 MOS 管状态（`charge_on`, `discharge_on`）添加到 `Bq76920Measurements` 结构体中。
+2. **修改 `AllMeasurements` 的 `BinRead` 和 `BinWrite` 实现：** 在 `src/shared.rs` 中，更新 `AllMeasurements` 的 `BinRead` 和 `BinWrite` 实现，以包含新的 BQ76920 状态数据。
+3. **固件读取 BQ76920 状态：** 在固件中，读取 `SysStat` 和 `SysCtrl2` 寄存器，并将这些状态信息填充到 `Bq76920Measurements` 结构体中。
+4. **上位机软件更新：** 上位机软件需要更新以解析新的 USB 数据格式，并显示这些状态信息。
 
-参考实现位于 `/Volumes/ExData/Projects/Ivan/ups120/usb-example/src/usb/` 目录，包含 `combined_endpoints.rs` 和 `mod.rs` 文件。
-你必须尽可能地、全面地读取、理解并参考我提供的示例项目，它是正确无误的。
+## 详细计划
 
-* `combined_endpoints.rs` 定义了 `UsbCommand` 枚举和 `CombinedEndpoints` 结构体，处理端点通信和命令逻辑。
-* `mod.rs` 是 USB 模块入口，初始化 USB 设备和 WebUSB，并协调端点通信和数据处理。
-* 状态消息数据结构使用 [`src/shared.rs`](src/shared.rs) 中的 `AllMeasurements`。
-* 状态消息的发布/订阅机制使用 [`src/shared.rs`](src/shared.rs) 中的 `MEASUREMENTS_PUBSUB`。
+以下是实现此功能的详细步骤：
 
-## 详细实施计划
+**步骤 1：修改 `bq76920/src/data_types.rs`**
 
-1. **创建 `/src/usb/` 目录和 `mod.rs` 文件：** 在您的项目 `/Volumes/ExData/Projects/Ivan/ups120/src/` 目录下创建 `usb` 目录，并在其中创建 `mod.rs` 文件。这个文件将作为您新的 USB 模块的入口。
-2. **创建 `endpoints.rs` 文件：** 在 `/src/usb/` 目录下创建 `endpoints.rs` 文件，用于定义和实现端点相关的逻辑，类似于参考实现的 `combined_endpoints.rs`。
-3. **定义数据枚举和结构体：**
-    * 在 [`src/usb/endpoints.rs`](src/usb/endpoints.rs) 中定义一个枚举，例如 `UsbData`，用于表示 Command、Response 和 Push 数据类型。为每种数据类型定义一个枚举成员，并使用 `binrw` 的属性进行标记，以便序列化和反序列化。
-    * 定义与 `subscribeStatus` 和 `unsubscribeStatus` 命令相关的枚举成员在 `UsbData` 中。
-    * 状态消息的数据结构将直接使用 [`src/shared.rs`](src/shared.rs) 中的 `AllMeasurements`。
-4. **在 [`src/usb/endpoints.rs`](src/usb/endpoints.rs) 中定义端点结构体：** 定义一个结构体，例如 `UsbEndpoints`，包含三个 `embassy-usb` 端点：一个用于 Command 输入 (EndpointOut)，一个用于 Response 输出 (EndpointIn)，一个用于 Push 输出 (EndpointIn)。
-5. **实现端点结构体的初始化：** 在 `UsbEndpoints` 结构体中实现 `new` 函数，使用 `embassy-usb::Builder` 来配置和创建这三个端点。
-6. **实现命令解析和处理：**
-    * 在 `UsbEndpoints` 结构体中实现一个异步函数，例如 `parse_command`，用于从 Command 输入端点读取数据，并使用 `binrw` 反序列化为 `UsbData` 枚举中的 Command 成员。
-    * 实现一个异步函数，例如 `process_command`，接收解析后的 `UsbData` 枚举作为参数，根据命令类型执行相应的逻辑。
-7. **实现订阅推送逻辑：**
-    * 在 `UsbEndpoints` 结构体中添加标志位，例如 `status_subscription_active`，用于指示状态消息订阅是否激活。
-    * 在 `process_command` 中处理 `UsbData::SubscribeStatus` 和 `UsbData::UnsubscribeStatus` 命令，修改 `status_subscription_active` 标志位。
-    * 实现一个异步函数，例如 `send_status_update`，接收 [`src/shared.rs`](src/shared.rs) 中的 `AllMeasurements` 数据作为参数，如果 `status_subscription_active` 为 true，则使用 `binrw` 序列化数据并发送到 Push 输出端点。
-8. **在 [`src/usb/mod.rs`](src/usb/mod.rs) 中集成：**
-    * 在 [`src/usb/mod.rs`](src/usb/mod.rs) 中定义 `usb_task` 异步函数，类似于参考实现。
-    * 在 `usb_task` 中初始化 `embassy-usb` builder。
-    * 创建 `UsbEndpoints` 实例。
-    * 获取 [`src/shared.rs`](src/shared.rs) 中 `MEASUREMENTS_PUBSUB` 的订阅者实例。
-    * 使用 `embassy_futures::select` 同时监听 Command 输入端点的读取和 `MEASUREMENTS_PUBSUB` 的新消息。
-    * 在 `select` 的分支中，处理接收到的命令和状态更新，调用 `UsbEndpoints` 中相应的方法（例如，接收到 `MEASUREMENTS_PUBSUB` 的新消息时，调用 `send_status_update`）。
-9. **更新 Cargo.toml：** 添加 `embassy-usb` 和 `binrw` 等必要的依赖。
-10. **更新 Cargo.toml：** 添加 `embassy-usb` 和 `binrw` 等必要的依赖。
-11. **在 `main.rs` 中调用 `usb_task`：** 在您的主程序中初始化 USB 驱动和 [`src/shared.rs`](src/shared.rs) 中的 pubsubs，并 spawn `usb_task`。
+* 在 `Bq76920Measurements` 结构体中添加 `system_status: SystemStatus` 和 `mos_status: MosStatus` 字段。
+* 定义一个新的 `MosStatus` 枚举或结构体来表示充电/放电 MOS 管的状态。
 
-## Mermaid 图示
+**步骤 2：修改 `src/shared.rs`**
+
+* 更新 `AllMeasurements` 结构体中的 `bq76920` 字段，使其包含新的 `SystemStatus` 和 `MosStatus`。
+* 修改 `AllMeasurements` 的 `impl BinRead for AllMeasurements<N>` 和 `impl BinWrite for AllMeasurements<N>` 实现，以正确地序列化和反序列化新的状态字段。
+
+**步骤 3：修改固件逻辑（`src/main.rs` 或相关 BQ76920 驱动文件）**
+
+* 在读取 BQ76920 测量数据的地方，添加读取 `SysStat` (0x00) 和 `SysCtrl2` (0x05) 寄存器的逻辑。
+* 解析这些寄存器的值，提取 `CHG_ON` 和 `DSG_ON` 位以及其他系统状态位。
+* 将这些状态信息填充到 `Bq76920Measurements` 结构体的新字段中。
+* 确保这些更新后的 `AllMeasurements` 数据通过 `MEASUREMENTS_PUBSUB` 发布。
+
+**步骤 4：上位机软件更新（不在当前任务范围内，但需要考虑）**
+
+* 上位机应用程序需要更新其 USB 数据解析逻辑，以匹配新的 `AllMeasurements` 结构体。
+* 在用户界面上添加新的显示元素，以展示充电/放电 MOS 管状态和 BQ76920 的其他系统状态。
+
+## Mermaid 图
 
 ```mermaid
 graph TD
-    A[main.rs] --> B(usb_task);
-    B --> C(embassy-usb::Builder);
-    C --> D(UsbEndpoints::new);
-    D --> E(Command Endpoint OUT);
-    D --> F(Response Endpoint IN);
-    D --> G(Push Endpoint IN);
-    B --> H(embassy_futures::select);
-    H --> I(Command Endpoint Read);
-    H --> J(MEASUREMENTS_PUBSUB Subscriber);
-    I --> K(UsbEndpoints::parse_command);
-    K --> L(UsbEndpoints::process_command);
-    L --> F;
-    L --> G;
-    J --> M(UsbEndpoints::send_status_update);
-    M --> G;
+    A[用户需求：获取BQ76920全面状态] --> B{分析现有代码}
+    B --> C1[bq76920/src/registers.rs]
+    B --> C2[bq76920/src/data_types.rs]
+    B --> C3[src/usb/mod.rs]
+    B --> C4[src/usb/endpoints.rs]
+    B --> C5[src/shared.rs]
+
+    C1 --> D[识别SysStat和SysCtrl2寄存器]
+    C2 --> E[识别SystemStatus和BatteryConfig中的MOS状态]
+    C3 --> F[USB任务使用AllMeasurements<5>通过PubSub]
+    C4 --> G[UsbData通过Binrw序列化AllMeasurements<5>]
+    C5 --> H[AllMeasurements<5>手动实现BinRead/BinWrite]
+
+    D & E & F & G & H --> I[设计方案]
+
+    I --> J[修改bq76920/src/data_types.rs: 扩展Bq76920Measurements]
+    I --> K[修改src/shared.rs: 更新AllMeasurements的BinRead/BinWrite]
+    I --> L[修改固件逻辑: 读取寄存器并填充数据]
+    I --> M[上位机软件更新: 解析并显示新数据]
+
+    J --> N[实现]
+    K --> N
+    L --> N
+    M --> N
+
+    N --> O[完成]
+```

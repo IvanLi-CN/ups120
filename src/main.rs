@@ -189,6 +189,8 @@ async fn main(spawner: Spawner) {
         let mut voltages = None;
         let mut temps = None;
         let mut current = None;
+        let mut system_status = None;
+        let mut mos_status = None;
         let mut bq25730_measurements = None;
 
         info!("--- Reading BQ76920 Data ---");
@@ -380,7 +382,7 @@ async fn main(spawner: Spawner) {
                     c.raw_cc,
                     current_ma.get::<uom::si::electric_current::milliampere>()
                 );
-                current = Some(c); // Assign to the outer variable
+                current = Some(current_ma); // Assign to the outer variable, now as ElectricCurrent
             }
             Err(e) => {
                 error!("Failed to read current: {:?}", e);
@@ -400,6 +402,7 @@ async fn main(spawner: Spawner) {
                 info!("  Overcurrent Discharge (OCD): {}", status.ocd);
                 info!("  Cell Undervoltage (CUV): {}", status.cuv);
                 info!("  Cell Overvoltage (COV): {}", status.cov);
+                system_status = Some(status); // Assign to the outer variable
 
                 // Clear status flags after reading
                 // Only clear flags that are set
@@ -422,6 +425,22 @@ async fn main(spawner: Spawner) {
             }
             Err(e) => {
                 error!("Failed to read system status: {:?}", e);
+                system_status = None; // Assign None on error
+            }
+        }
+
+        // Read SYS_CTRL2 for MOS status
+        match bq.read_register(Register::SysCtrl2).await {
+            Ok(sys_ctrl2_byte) => {
+                let mos = bq769x0_async_rs::data_types::MosStatus::new(sys_ctrl2_byte);
+                info!("MOS Status:");
+                info!("  Charge ON: {}", mos.charge_on);
+                info!("  Discharge ON: {}", mos.discharge_on);
+                mos_status = Some(mos); // Assign to the outer variable
+            }
+            Err(e) => {
+                error!("Failed to read SYS_CTRL2 for MOS status: {:?}", e);
+                mos_status = None; // Assign None on error
             }
         }
 
@@ -436,7 +455,7 @@ async fn main(spawner: Spawner) {
         info!("----------------------------");
 
         // 构造并发布聚合测量数据
-        // 假设 voltages, temps, current, and bq25730_measurements variables were successfully obtained
+        // 假设 voltages, temps, current, system_status, mos_status and bq25730_measurements variables were successfully obtained
         // If reading failed, handle accordingly, e.g., use default values or skip publishing
         let all_measurements = shared::AllMeasurements {
             bq25730: bq25730_measurements.unwrap_or_else(|| shared::Bq25730Measurements {
@@ -447,13 +466,18 @@ async fn main(spawner: Spawner) {
                        // Add other BQ25730 measurement fields here
             }),
             bq76920: shared::Bq76920Measurements {
-                cell_voltages: voltages
-                    .unwrap_or_else(|| bq769x0_async_rs::data_types::CellVoltages::new()), // Use default if read failed
-                temperatures: temps
-                    .unwrap_or_else(|| bq769x0_async_rs::data_types::Temperatures::new()), // Use default if read failed
-                coulomb_counter: current
-                    .unwrap_or_else(|| bq769x0_async_rs::data_types::CoulombCounter { raw_cc: 0 }), // Use default if read failed
-                                                                                                    // Add other default BQ76920 measurement fields here
+                core_measurements: bq769x0_async_rs::data_types::Bq76920Measurements {
+                    cell_voltages: voltages
+                        .unwrap_or_else(|| bq769x0_async_rs::data_types::CellVoltages::new()), // Use default if read failed
+                    temperatures: temps
+                        .unwrap_or_else(|| bq769x0_async_rs::data_types::Temperatures::new()), // Use default if read failed
+                    current: current
+                        .unwrap_or_else(|| uom::si::electric_current::ElectricCurrent::new::<uom::si::electric_current::milliampere>(0.0)), // Use default if read failed
+                    system_status: system_status
+                        .unwrap_or_else(|| bq769x0_async_rs::data_types::SystemStatus::new(0)), // Use default if read failed
+                    mos_status: mos_status
+                        .unwrap_or_else(|| bq769x0_async_rs::data_types::MosStatus::new(0)), // Use default if read failed
+                }
             },
         };
 

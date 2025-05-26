@@ -8,12 +8,13 @@ use defmt::Format;
 // 在这里定义设备相关的数据结构和消息队列
 
 use bq25730_async_rs::data_types::{AdcMeasurements, ChargerStatus, ProchotStatus};
-use bq769x0_async_rs::data_types::{CellVoltages, Temperatures, CoulombCounter, SystemStatus};
+use bq769x0_async_rs::data_types::{CellVoltages, Temperatures, CoulombCounter, SystemStatus, MosStatus, Bq76920Measurements as Bq76920CoreMeasurements};
 use uom::si::{
-    electric_potential::millivolt, thermodynamic_temperature::kelvin, // Remove electric_current::milliampere
+    electric_potential::millivolt, thermodynamic_temperature::kelvin, electric_current::milliampere,
 }; // Import uom units
 use uom::si::electric_potential::ElectricPotential; // Import specific uom types
 use uom::si::thermodynamic_temperature::ThermodynamicTemperature; // Import specific uom types
+use uom::si::electric_current::ElectricCurrent; // Import specific uom types
 
 /// BQ25730 测量数据
 #[derive(Debug, Copy, Clone, PartialEq, defmt::Format)] // Removed BinRead, BinWrite
@@ -32,10 +33,7 @@ pub struct Bq25730Alerts {
 /// BQ76920 测量数据
 #[derive(Debug, Copy, Clone, PartialEq)] // Removed BinRead, BinWrite
 pub struct Bq76920Measurements<const N: usize> {
-    pub cell_voltages: CellVoltages<N>,
-    pub temperatures: Temperatures,
-    pub coulomb_counter: CoulombCounter,
-    // 添加其他非告警相关的测量数据字段（如果需要）
+    pub core_measurements: Bq76920CoreMeasurements<N>,
 }
 
 /// BQ76920 安全告警信息
@@ -55,12 +53,22 @@ impl<const N: usize> Format for AllMeasurements<N> {
     fn format(&self, fmt: defmt::Formatter) {
         defmt::write!(fmt, "AllMeasurements {{ bq25730: {}, bq76920: {{ cell_voltages: [", self.bq25730);
         for i in 0..N {
-            defmt::write!(fmt, "{:?}, ", self.bq76920.cell_voltages.voltages[i].get::<millivolt>());
+            defmt::write!(fmt, "{:?}, ", self.bq76920.core_measurements.cell_voltages.voltages[i].get::<millivolt>());
         }
-        defmt::write!(fmt, "], temperatures: {{ ts1: {:?}, is_thermistor: {} }}, coulomb_counter: {} }} }}",
-            self.bq76920.temperatures.ts1.get::<kelvin>(),
-            self.bq76920.temperatures.is_thermistor,
-            self.bq76920.coulomb_counter.raw_cc
+        defmt::write!(fmt, "], temperatures: {{ ts1: {:?}, is_thermistor: {} }}, current: {}, system_status: {{ cc_ready: {}, ovr_temp: {}, uv: {}, ov: {}, scd: {}, ocd: {}, cuv: {}, cov: {} }}, mos_status: {{ charge_on: {}, discharge_on: {} }} }} }}",
+            self.bq76920.core_measurements.temperatures.ts1.get::<kelvin>(),
+            self.bq76920.core_measurements.temperatures.is_thermistor,
+            self.bq76920.core_measurements.current.get::<milliampere>(),
+            self.bq76920.core_measurements.system_status.cc_ready,
+            self.bq76920.core_measurements.system_status.ovr_temp,
+            self.bq76920.core_measurements.system_status.uv,
+            self.bq76920.core_measurements.system_status.ov,
+            self.bq76920.core_measurements.system_status.scd,
+            self.bq76920.core_measurements.system_status.ocd,
+            self.bq76920.core_measurements.system_status.cuv,
+            self.bq76920.core_measurements.system_status.cov,
+            self.bq76920.core_measurements.mos_status.charge_on,
+            self.bq76920.core_measurements.mos_status.discharge_on
         );
     }
 }
@@ -88,7 +96,10 @@ impl<const N: usize> BinRead for AllMeasurements<N> {
         let temperatures_is_thermistor_raw = u8::read_options(reader, endian, args)?; // Read as u8
         let temperatures_is_thermistor = temperatures_is_thermistor_raw != 0; // Convert to bool
 
-        let coulomb_counter_raw_cc = i16::read_options(reader, endian, args)?;
+        let current_raw = f32::read_options(reader, endian, args)?; // Changed to f32 for ElectricCurrent
+        let system_status_raw = u8::read_options(reader, endian, args)?;
+        let mos_status_raw = u8::read_options(reader, endian, args)?;
+
 
         Ok(Self {
             bq25730: Bq25730Measurements {
@@ -106,20 +117,24 @@ impl<const N: usize> BinRead for AllMeasurements<N> {
                 ),
             },
             bq76920: Bq76920Measurements {
-                cell_voltages: {
-                    let mut voltages = [ElectricPotential::new::<millivolt>(0.0); N];
-                    for i in 0..N {
-                        voltages[i] = ElectricPotential::new::<millivolt>(cell_voltages_raw[i]);
-                    }
-                    CellVoltages { voltages }
-                },
-                temperatures: Temperatures {
-                    ts1: ThermodynamicTemperature::new::<kelvin>(temperatures_ts1_raw),
-                    ts2: None, // Not serializing Option types for simplicity
-                    ts3: None, // Not serializing Option types for simplicity
-                    is_thermistor: temperatures_is_thermistor,
-                },
-                coulomb_counter: CoulombCounter { raw_cc: coulomb_counter_raw_cc },
+                core_measurements: Bq76920CoreMeasurements {
+                    cell_voltages: {
+                        let mut voltages = [ElectricPotential::new::<millivolt>(0.0); N];
+                        for i in 0..N {
+                            voltages[i] = ElectricPotential::new::<millivolt>(cell_voltages_raw[i]);
+                        }
+                        CellVoltages { voltages }
+                    },
+                    temperatures: Temperatures {
+                        ts1: ThermodynamicTemperature::new::<kelvin>(temperatures_ts1_raw),
+                        ts2: None, // Not serializing Option types for simplicity
+                        ts3: None, // Not serializing Option types for simplicity
+                        is_thermistor: temperatures_is_thermistor,
+                    },
+                    current: ElectricCurrent::new::<milliampere>(current_raw), // Use ElectricCurrent
+                    system_status: SystemStatus::new(system_status_raw),
+                    mos_status: MosStatus::new(mos_status_raw),
+                }
             },
         })
     }
@@ -139,13 +154,23 @@ impl<const N: usize> BinWrite for AllMeasurements<N> {
         self.bq25730.adc_measurements.vsys.0.write_options(writer, endian, args)?;
 
         for i in 0..N {
-            self.bq76920.cell_voltages.voltages[i].get::<millivolt>().write_options(writer, endian, args)?;
+            self.bq76920.core_measurements.cell_voltages.voltages[i].get::<millivolt>().write_options(writer, endian, args)?;
         }
 
-        self.bq76920.temperatures.ts1.get::<kelvin>().write_options(writer, endian, args)?;
-        (self.bq76920.temperatures.is_thermistor as u8).write_options(writer, endian, args)?; // Write as u8
+        self.bq76920.core_measurements.temperatures.ts1.get::<kelvin>().write_options(writer, endian, args)?;
+        (self.bq76920.core_measurements.temperatures.is_thermistor as u8).write_options(writer, endian, args)?; // Write as u8
 
-        self.bq76920.coulomb_counter.raw_cc.write_options(writer, endian, args)?;
+        self.bq76920.core_measurements.current.get::<milliampere>().write_options(writer, endian, args)?; // Write ElectricCurrent
+        (self.bq76920.core_measurements.system_status.cc_ready as u8).write_options(writer, endian, args)?;
+        (self.bq76920.core_measurements.system_status.ovr_temp as u8).write_options(writer, endian, args)?;
+        (self.bq76920.core_measurements.system_status.uv as u8).write_options(writer, endian, args)?;
+        (self.bq76920.core_measurements.system_status.ov as u8).write_options(writer, endian, args)?;
+        (self.bq76920.core_measurements.system_status.scd as u8).write_options(writer, endian, args)?;
+        (self.bq76920.core_measurements.system_status.ocd as u8).write_options(writer, endian, args)?;
+        (self.bq76920.core_measurements.system_status.cuv as u8).write_options(writer, endian, args)?;
+        (self.bq76920.core_measurements.system_status.cov as u8).write_options(writer, endian, args)?;
+        (self.bq76920.core_measurements.mos_status.charge_on as u8).write_options(writer, endian, args)?;
+        (self.bq76920.core_measurements.mos_status.discharge_on as u8).write_options(writer, endian, args)?;
 
         Ok(())
     }
