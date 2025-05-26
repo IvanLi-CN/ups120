@@ -1,61 +1,63 @@
-# UPS120 数据共享模块计划
+# USB 功能模块实现计划
 
-**目标：** 在 `src/shared.rs` 中实现基于 `embassy-sync::pubsub` 的消息队列，用于共享设备采集数据，并定义生产者和消费者类型别名。
+## 目标
 
-**设计思路：**
+在项目 `/Volumes/ExData/Projects/Ivan/ups120` 的 `/src/usb/` 目录下实现一个基于 `embassy-usb` crate 的 USB 功能模块，支持 WebUSB 通信，包含请求响应和订阅推送两种模式。重点实现 `subscribeStatus` 和 `unsubscribeStatus` 命令以及状态消息的订阅流推送。通信使用三个端点（Command、Response、Push），数据类型通过枚举表示，使用 `binrw` 进行序列化和反序列化。
 
-1. **数据结构定义：**
-    * 为了按设备分类安全告警信息并聚合其他测量数据，我们将为每个设备定义两个结构体：一个用于测量数据，一个用于安全告警。
-    * `Bq25730Measurements`: 包含 BQ25730 的测量数据，例如 `AdcMeasurements`。
-    * `Bq25730Alerts`: 包含 BQ25730 的安全告警信息，例如 `ChargerStatus` 和 `ProchotStatus`。
-    * `Bq76920Measurements`: 包含 BQ76920 的测量数据，例如 `CellVoltages`, `Temperatures`, `CoulombCounter`。
-    * `Bq76920Alerts`: 包含 BQ76920 的安全告警信息，例如 `SystemStatus`。
+## 参考实现
 
-2. **消息队列 (`pubsub`) 定义：**
-    * 创建一个 `pubsub` 实例用于共享聚合的测量数据。这个 `pubsub` 将传输一个包含 `Bq25730Measurements` 和 `Bq76920Measurements` 的枚举或结构体。
-    * 创建一个 `pubsub` 实例用于共享 BQ25730 的安全告警信息 (`Bq25730Alerts`)。
-    * 创建一个 `pubsub` 实例用于共享 BQ76920 的安全告警信息 (`Bq76920Alerts`)。
+参考实现位于 `/Volumes/ExData/Projects/Ivan/ups120/usb-example/src/usb/` 目录，包含 `combined_endpoints.rs` 和 `mod.rs` 文件。
+你必须尽可能地、全面地读取、理解并参考我提供的示例项目，它是正确无误的。
 
-3. **生产者和消费者类型别名：**
-    * 为每个 `pubsub` 定义清晰的生产者 (`Publisher`) 和消费者 (`Subscriber`) 类型别名，方便在代码中引用和管理。
+* `combined_endpoints.rs` 定义了 `UsbCommand` 枚举和 `CombinedEndpoints` 结构体，处理端点通信和命令逻辑。
+* `mod.rs` 是 USB 模块入口，初始化 USB 设备和 WebUSB，并协调端点通信和数据处理。
+* 状态消息数据结构使用 [`src/shared.rs`](src/shared.rs) 中的 `AllMeasurements`。
+* 状态消息的发布/订阅机制使用 [`src/shared.rs`](src/shared.rs) 中的 `MEASUREMENTS_PUBSUB`。
 
-4. **非阻塞发布：**
-    * 生产者在发布消息时将使用非阻塞的方式。
+## 详细实施计划
 
-**实施步骤：**
+1. **创建 `/src/usb/` 目录和 `mod.rs` 文件：** 在您的项目 `/Volumes/ExData/Projects/Ivan/ups120/src/` 目录下创建 `usb` 目录，并在其中创建 `mod.rs` 文件。这个文件将作为您新的 USB 模块的入口。
+2. **创建 `endpoints.rs` 文件：** 在 `/src/usb/` 目录下创建 `endpoints.rs` 文件，用于定义和实现端点相关的逻辑，类似于参考实现的 `combined_endpoints.rs`。
+3. **定义数据枚举和结构体：**
+    * 在 [`src/usb/endpoints.rs`](src/usb/endpoints.rs) 中定义一个枚举，例如 `UsbData`，用于表示 Command、Response 和 Push 数据类型。为每种数据类型定义一个枚举成员，并使用 `binrw` 的属性进行标记，以便序列化和反序列化。
+    * 定义与 `subscribeStatus` 和 `unsubscribeStatus` 命令相关的枚举成员在 `UsbData` 中。
+    * 状态消息的数据结构将直接使用 [`src/shared.rs`](src/shared.rs) 中的 `AllMeasurements`。
+4. **在 [`src/usb/endpoints.rs`](src/usb/endpoints.rs) 中定义端点结构体：** 定义一个结构体，例如 `UsbEndpoints`，包含三个 `embassy-usb` 端点：一个用于 Command 输入 (EndpointOut)，一个用于 Response 输出 (EndpointIn)，一个用于 Push 输出 (EndpointIn)。
+5. **实现端点结构体的初始化：** 在 `UsbEndpoints` 结构体中实现 `new` 函数，使用 `embassy-usb::Builder` 来配置和创建这三个端点。
+6. **实现命令解析和处理：**
+    * 在 `UsbEndpoints` 结构体中实现一个异步函数，例如 `parse_command`，用于从 Command 输入端点读取数据，并使用 `binrw` 反序列化为 `UsbData` 枚举中的 Command 成员。
+    * 实现一个异步函数，例如 `process_command`，接收解析后的 `UsbData` 枚举作为参数，根据命令类型执行相应的逻辑。
+7. **实现订阅推送逻辑：**
+    * 在 `UsbEndpoints` 结构体中添加标志位，例如 `status_subscription_active`，用于指示状态消息订阅是否激活。
+    * 在 `process_command` 中处理 `UsbData::SubscribeStatus` 和 `UsbData::UnsubscribeStatus` 命令，修改 `status_subscription_active` 标志位。
+    * 实现一个异步函数，例如 `send_status_update`，接收 [`src/shared.rs`](src/shared.rs) 中的 `AllMeasurements` 数据作为参数，如果 `status_subscription_active` 为 true，则使用 `binrw` 序列化数据并发送到 Push 输出端点。
+8. **在 [`src/usb/mod.rs`](src/usb/mod.rs) 中集成：**
+    * 在 [`src/usb/mod.rs`](src/usb/mod.rs) 中定义 `usb_task` 异步函数，类似于参考实现。
+    * 在 `usb_task` 中初始化 `embassy-usb` builder。
+    * 创建 `UsbEndpoints` 实例。
+    * 获取 [`src/shared.rs`](src/shared.rs) 中 `MEASUREMENTS_PUBSUB` 的订阅者实例。
+    * 使用 `embassy_futures::select` 同时监听 Command 输入端点的读取和 `MEASUREMENTS_PUBSUB` 的新消息。
+    * 在 `select` 的分支中，处理接收到的命令和状态更新，调用 `UsbEndpoints` 中相应的方法（例如，接收到 `MEASUREMENTS_PUBSUB` 的新消息时，调用 `send_status_update`）。
+9. **更新 Cargo.toml：** 添加 `embassy-usb` 和 `binrw` 等必要的依赖。
+10. **更新 Cargo.toml：** 添加 `embassy-usb` 和 `binrw` 等必要的依赖。
+11. **在 `main.rs` 中调用 `usb_task`：** 在您的主程序中初始化 USB 驱动和 [`src/shared.rs`](src/shared.rs) 中的 pubsubs，并 spawn `usb_task`。
 
-1. 创建新的文件 `src/shared.rs`。
-2. 在 `src/shared.rs` 中，导入所需的 `embassy-sync::pubsub` 和其他必要的依赖。
-3. 定义 `Bq25730Measurements`, `Bq25730Alerts`, `Bq76920Measurements`, `Bq76920Alerts` 结构体。
-4. 定义一个聚合测量数据的枚举或结构体，例如 `AllMeasurements`，包含 `Bq25730Measurements` 和 `Bq76920Measurements`。
-5. 创建三个 `static` 的 `PubSub` 实例，分别用于 `AllMeasurements`, `Bq25730Alerts`, 和 `Bq76920Alerts`。
-6. 定义生产者和消费者类型别名，例如 `MeasurementsPublisher`, `MeasurementsSubscriber`, `Bq25730AlertsPublisher`, `Bq25730AlertsSubscriber`, `Bq76920AlertsPublisher`, `Bq76920AlertsSubscriber`。
-7. 编写示例代码，演示如何获取生产者和消费者实例，以及如何发布和订阅消息（这部分将在后续的 `code` 模式中实现）。
-8. 使用 `cargo check` 和 `cargo build` 命令逐步检查代码，确保没有编译错误。
-
-**Mermaid 图示：**
+## Mermaid 图示
 
 ```mermaid
 graph TD
-    A[设备采集数据] --> B{数据分类};
-    B --> C[BQ25730 测量数据];
-    B --> D[BQ25730 安全告警];
-    B --> E[BQ76920 测量数据];
-    B --> F[BQ76920 安全告警];
-
-    C --> G[聚合测量数据];
-    E --> G;
-
-    G --> H[测量数据 PubSub];
-    D --> I[BQ25730 告警 PubSub];
-    F --> J[BQ76920 告警 PubSub];
-
-    H --> K[测量数据 消费者1];
-    H --> L[测量数据 消费者2];
-
-    I --> M[BQ25730 告警 消费者];
-    J --> N[BQ76920 告警 消费者];
-
-    O[生产者] --> H;
-    O --> I;
-    O --> J;
+    A[main.rs] --> B(usb_task);
+    B --> C(embassy-usb::Builder);
+    C --> D(UsbEndpoints::new);
+    D --> E(Command Endpoint OUT);
+    D --> F(Response Endpoint IN);
+    D --> G(Push Endpoint IN);
+    B --> H(embassy_futures::select);
+    H --> I(Command Endpoint Read);
+    H --> J(MEASUREMENTS_PUBSUB Subscriber);
+    I --> K(UsbEndpoints::parse_command);
+    K --> L(UsbEndpoints::process_command);
+    L --> F;
+    L --> G;
+    J --> M(UsbEndpoints::send_status_update);
+    M --> G;

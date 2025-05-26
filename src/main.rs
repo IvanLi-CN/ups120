@@ -1,5 +1,8 @@
 #![no_std]
 #![no_main]
+// #![feature(type_alias_impl_trait)] // Required for embassy tasks - Temporarily removed
+
+extern crate alloc; // Required for global allocator
 
 use bq769x0_async_rs::units::ElectricalResistance;
 use defmt::*;
@@ -8,13 +11,15 @@ use embassy_executor::Spawner;
 use embassy_stm32::{
     bind_interrupts,
     i2c::{self, I2c},
-//use embassy_stm32::i2c::{self, I2c};
-    peripherals,
+    peripherals, // Keep peripherals here
     time::Hertz,
+    usb::Driver, // Remove InterruptHandler as it's not directly used here
 };
+// use peripherals::USB; // Import peripherals::USB directly for bind_interrupts! - Removed, as it's already in `peripherals`
 
 bind_interrupts!(
     struct Irqs {
+        USB_LP => embassy_stm32::usb::InterruptHandler<peripherals::USB>;
         I2C1_EV => i2c::EventInterruptHandler<peripherals::I2C1>;
         I2C1_ER => i2c::ErrorInterruptHandler<peripherals::I2C1>;
     }
@@ -24,6 +29,7 @@ use {defmt_rtt as _, panic_probe as _};
 
 // 声明共享模块
 mod shared;
+mod usb; // Keep this for our local usb module
 
 // Import the BQ769x0 driver crate
 use bq769x0_async_rs::registers::*;
@@ -39,24 +45,39 @@ use ina226::INA226;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex;
 
-// Define the I2C interrupt handler
+// Global allocator
+use embedded_alloc::LlffHeap as Heap; // Import Heap from embedded_alloc
 
+#[global_allocator]
+static HEAP: Heap = Heap::empty();
 
 #[embassy_executor::main]
-async fn main(_spawner: Spawner) {
+async fn main(spawner: Spawner) {
+    // Change _spawner to spawner
     info!("Starting UPS120 data sharing demo...");
+
+    // Initialize global allocator
+    // Initialize the allocator BEFORE you use it
+    {
+        const HEAP_SIZE: usize = 16_384;
+        static mut HEAP_MEM: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
+
+        unsafe {
+            let heap_start = core::ptr::addr_of_mut!(HEAP_MEM).cast::<u8>();
+            HEAP.init(heap_start as usize, HEAP_SIZE)
+        }
+    }
 
     // 初始化消息队列并获取生产者和消费者
     let (
         measurements_publisher,
-        measurements_subscriber1,
+        _measurements_subscriber1, // Mark as unused
         measurements_subscriber2,
         bq25730_alerts_publisher,
-        bq25730_alerts_subscriber,
+        _bq25730_alerts_subscriber, // Mark as unused
         bq76920_alerts_publisher,
-        bq76920_alerts_subscriber,
+        _bq76920_alerts_subscriber, // Mark as unused
     ) = shared::init_pubsubs(); // 初始化消息队列并获取生产者和消费者
-
 
     info!("消息队列初始化完成，已获取生产者和消费者。");
 
@@ -70,6 +91,11 @@ async fn main(_spawner: Spawner) {
 
     info!("STM32 initialized.");
 
+    let usb_driver = Driver::new(p.USB, Irqs, p.PA12, p.PA11); // Use imported Driver, add D+ and D- pins
+    spawner
+        .spawn(usb::usb_task(usb_driver, measurements_subscriber2))
+        .unwrap(); // Spawn usb_task
+
     // Configure I2C1 (PB6 SCL, PB7 SDA) with DMA
     // Ensure these pins are configured as Alternate Function Open Drain with Pull-ups in your STM32CubeIDE or equivalent configuration tool
     // Assuming DMA1_CH1 for TX and DMA1_CH2 for RX for I2C1 on STM32G031G8U6
@@ -81,42 +107,43 @@ async fn main(_spawner: Spawner) {
     static I2C_BUS_MUTEX_CELL: static_cell::StaticCell<
         Mutex<CriticalSectionRawMutex, I2c<'static, embassy_stm32::mode::Async>>,
     > = static_cell::StaticCell::new();
-let i2c_instance = embassy_stm32::i2c::I2c::new(
-    p.I2C1,         // 1. peri
-    p.PA15,          // 2. scl
-    p.PB7,          // 3. sda
-    Irqs,
-    p.DMA1_CH3,
-    p.DMA1_CH4,
-    Hertz(100_000), // 7. freq
-    i2c_config,     // 8. config
-);
+    let i2c_instance = embassy_stm32::i2c::I2c::new(
+        p.I2C1, // 1. peri
+        p.PA15, // 2. scl
+        p.PB7,  // 3. sda
+        Irqs,
+        p.DMA1_CH3,
+        p.DMA1_CH4,
+        Hertz(100_000), // 7. freq
+        i2c_config,     // 8. config
+    );
 
     info!("I2C1 initialized on PA15/PB7 with DMA.");
 
     // Initialize the static Mutex with the I2C instance
-    let i2c_bus_mutex = I2C_BUS_MUTEX_CELL.init(Mutex::new(unsafe { core::mem::transmute(i2c_instance) }));
+    let i2c_bus_mutex =
+        I2C_BUS_MUTEX_CELL.init(Mutex::new(unsafe { core::mem::transmute(i2c_instance) }));
 
     // BQ76920 I2C address (7-bit)
     let bq76920_address = 0x08;
     // BQ25730 I2C address (7-bit)
     let bq25730_address = 0x6B; // Confirmed from bq25730.pdf
-// Pass the I2C peripheral instance by value, wrapped in I2cAsynch
-let mut bq: Bq769x0<_, bq769x0_async_rs::Enabled, 5> = {
-    let i2c_bus = I2cDevice::new(i2c_bus_mutex);
-    Bq769x0::new(i2c_bus, bq76920_address)
-};
-let mut bq25730 = {
-    let i2c_bus = I2cDevice::new(i2c_bus_mutex);
-    Bq25730::new(i2c_bus, bq25730_address)
-};
+    // Pass the I2C peripheral instance by value, wrapped in I2cAsynch
+    let mut bq: Bq769x0<_, bq769x0_async_rs::Enabled, 5> = {
+        let i2c_bus = I2cDevice::new(i2c_bus_mutex);
+        Bq769x0::new(i2c_bus, bq76920_address)
+    };
+    let mut bq25730 = {
+        let i2c_bus = I2cDevice::new(i2c_bus_mutex);
+        Bq25730::new(i2c_bus, bq25730_address)
+    };
 
-// INA226 I2C address (7-bit)
-let ina226_address = 0x40;
-let mut ina226 = {
-    let i2c_bus = I2cDevice::new(i2c_bus_mutex);
-    INA226::new(i2c_bus, ina226_address)
-};
+    // INA226 I2C address (7-bit)
+    let ina226_address = 0x40;
+    let mut ina226 = {
+        let i2c_bus = I2cDevice::new(i2c_bus_mutex);
+        INA226::new(i2c_bus, ina226_address)
+    };
 
     info!("BQ76920 driver instance created.");
 
@@ -164,13 +191,15 @@ let mut ina226 = {
         let mut current = None;
         let mut bq25730_measurements = None;
 
-
         info!("--- Reading BQ76920 Data ---");
 
         // Ensure CC_EN is enabled in SYS_CTRL2
         info!("Ensuring CC_EN is enabled in SYS_CTRL2...");
         let sys_ctrl2_val = bq.read_register(Register::SysCtrl2).await.unwrap_or(0);
-        if let Err(e) = bq.write_register(Register::SysCtrl2, sys_ctrl2_val | SYS_CTRL2_CC_EN).await {
+        if let Err(e) = bq
+            .write_register(Register::SysCtrl2, sys_ctrl2_val | SYS_CTRL2_CC_EN)
+            .await
+        {
             error!("Failed to enable CC_EN: {:?}", e);
         }
         info!("CC_EN enable attempt complete.");
@@ -186,7 +215,6 @@ let mut ina226 = {
                 error!("Failed to read INA226 voltage: {:?}", e);
             }
         }
-
 
         match ina226.current_amps().await {
             Ok(current) => {
@@ -261,25 +289,24 @@ let mut ina226 = {
         };
 
         // 更新并发布 BQ25730 告警信息（包含 Prochot Status）
-        if let (Some(charger_status), Some(prochot_status)) = (bq25730_charger_status, bq25730_prochot_status) {
+        if let (Some(charger_status), Some(prochot_status)) =
+            (bq25730_charger_status, bq25730_prochot_status)
+        {
             let alerts = shared::Bq25730Alerts {
                 charger_status: charger_status,
                 prochot_status: prochot_status,
             };
-            // 使用非阻塞方式发布
-            if let Err(_) = bq25730_alerts_publisher.try_publish(alerts) {
-                // 消息队列已满，可以根据需要处理错误，例如记录日志
-                error!("BQ25730 alerts queue is full, message dropped.");
-            }
+            bq25730_alerts_publisher.publish_immediate(alerts);
         }
 
         // Construct BQ25730 measurements (replace with actual ADC reads when implemented)
         let measurements = shared::Bq25730Measurements {
-            adc_measurements: bq25730_async_rs::data_types::AdcMeasurements::from_register_values(0, 0, 0, 0, 0, 0, 0, 0), // Placeholder
-            // Add other BQ25730 measurement fields here when implemented
+            adc_measurements: bq25730_async_rs::data_types::AdcMeasurements::from_register_values(
+                0, 0, 0, 0, 0, 0, 0, 0,
+            ), // Placeholder
+               // Add other BQ25730 measurement fields here when implemented
         };
         bq25730_measurements = Some(measurements);
-
 
         // Read Cell Voltages
         match bq.read_cell_voltages().await {
@@ -322,21 +349,13 @@ let mut ina226 = {
                     info!("Temperatures (0.1 Ohms):");
                     info!(
                         "  TS1: {} ({} Ohms)",
-                        t
-                            .ts1
-                            .get::<uom::si::thermodynamic_temperature::kelvin>(),
-                        t
-                            .ts1
-                            .get::<uom::si::thermodynamic_temperature::kelvin>()
-                            as f32
-                            / 10.0
+                        t.ts1.get::<uom::si::thermodynamic_temperature::kelvin>(),
+                        t.ts1.get::<uom::si::thermodynamic_temperature::kelvin>() as f32 / 10.0
                     );
-                    // BQ76920 only has TS1
                 } else {
                     info!("Temperatures (deci-Celsius):");
-                    let ts1_kelvin_integer = t
-                        .ts1
-                        .get::<uom::si::thermodynamic_temperature::kelvin>();
+                    let ts1_kelvin_integer =
+                        t.ts1.get::<uom::si::thermodynamic_temperature::kelvin>();
                     let ts1_celsius_f32 = ts1_kelvin_integer as f32 - 273.15; // Manually convert kelvin to celsius float
 
                     info!(
@@ -405,20 +424,15 @@ let mut ina226 = {
                 error!("Failed to read system status: {:?}", e);
             }
         }
-    
+
         // 发布 BQ76920 告警信息
         if let Ok(status) = bq.read_status().await {
             let alerts = shared::Bq76920Alerts {
                 system_status: status,
             };
-            // 使用非阻塞方式发布
-            if let Err(_) = bq76920_alerts_publisher.try_publish(alerts) {
-                // 消息队列已满，可以根据需要处理错误，例如记录日志
-                error!("BQ76920 alerts queue is full, message dropped.");
-            }
+            bq76920_alerts_publisher.publish_immediate(alerts);
         }
-    
-    
+
         info!("----------------------------");
 
         // 构造并发布聚合测量数据
@@ -426,23 +440,24 @@ let mut ina226 = {
         // If reading failed, handle accordingly, e.g., use default values or skip publishing
         let all_measurements = shared::AllMeasurements {
             bq25730: bq25730_measurements.unwrap_or_else(|| shared::Bq25730Measurements {
-                adc_measurements: bq25730_async_rs::data_types::AdcMeasurements::from_register_values(0, 0, 0, 0, 0, 0, 0, 0), // Default placeholder
-                // Add other default BQ25730 measurement fields here
+                adc_measurements:
+                    bq25730_async_rs::data_types::AdcMeasurements::from_register_values(
+                        0, 0, 0, 0, 0, 0, 0, 0,
+                    ), // Default placeholder
+                       // Add other BQ25730 measurement fields here
             }),
             bq76920: shared::Bq76920Measurements {
-                cell_voltages: voltages.unwrap_or_else(|| bq769x0_async_rs::data_types::CellVoltages::new()), // Use default if read failed
-                temperatures: temps.unwrap_or_else(|| bq769x0_async_rs::data_types::Temperatures::new()), // Use default if read failed
-                coulomb_counter: current.unwrap_or_else(|| bq769x0_async_rs::data_types::CoulombCounter { raw_cc: 0 }), // Use default if read failed
-                // Add other default BQ76920 measurement fields here
+                cell_voltages: voltages
+                    .unwrap_or_else(|| bq769x0_async_rs::data_types::CellVoltages::new()), // Use default if read failed
+                temperatures: temps
+                    .unwrap_or_else(|| bq769x0_async_rs::data_types::Temperatures::new()), // Use default if read failed
+                coulomb_counter: current
+                    .unwrap_or_else(|| bq769x0_async_rs::data_types::CoulombCounter { raw_cc: 0 }), // Use default if read failed
+                                                                                                    // Add other default BQ76920 measurement fields here
             },
         };
 
-        // 使用非阻塞方式发布聚合测量数据
-        if let Err(_) = measurements_publisher.try_publish(all_measurements) {
-            // 消息队列已满，可以根据需要处理错误，例如记录日志
-            error!("Measurements queue is full, message dropped.");
-        }
-
+        measurements_publisher.publish_immediate(all_measurements);
 
         // Wait for 1 second
         Timer::after(Duration::from_secs(1)).await;

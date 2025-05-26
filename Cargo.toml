@@ -4,6 +4,17 @@ edition = "2024"
 name = "ups120"
 version = "0.1.0"
 
+[build-dependencies]
+# Add this to enable build.rs
+# This is needed to read environment variables at compile time
+# and make them available to the application via env! macro.
+# See https://doc.rust-lang.org/cargo/reference/build-scripts.html
+# for more details.
+# This is a common pattern in embedded Rust to inject configuration.
+# The `build.rs` script will be created in the next step.
+# It will read USB_VID, USB_PID, and WEBUSB_LANDING_URL
+# and make them available as compile-time constants.
+
 [dependencies]
 # Change stm32g0b1re to your chip name, if necessary.
 embassy-stm32 = { version = "0.2.0", path = "./embassy/embassy-stm32", features = [
@@ -47,12 +58,15 @@ heapless = { version = "0.8", default-features = false }
 portable-atomic = { version = "1.11.0", features = ["critical-section"] }
 static_cell = "2.1.0" # Add static_cell dependency
 libm = "0.2.8" # Add libm dependency
+embedded-alloc = "0.6.0" # Change embedded-alloc version to 0.6.0
 
 embedded-io-async = { version = "0.6.1" }
 
 bq769x0-async-rs = { version = "0.1.1", path = "./bq76920", features = ["async", "defmt"] } # Enable defmt feature
 bq25730-async-rs = { version = "0.1.1", path = "./bq25730", features = ["async", "bq25730", "defmt"] } # Add bq25730 driver
 uom = { version = "0.37", default-features = false, features = ["si", "i32"] }
+
+binrw = { version = "0.11", default-features = false } # Add binrw dependency with no_std compatibility
 
 # cargo build/run
 

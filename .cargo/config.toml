@@ -14,5 +14,3 @@ target = "thumbv7em-none-eabihf"    # Cortex-M4F
 
 [env]
 DEFMT_LOG = "info"
-USB_VID = "0xc0de"
-USB_PID = "0xff87"
