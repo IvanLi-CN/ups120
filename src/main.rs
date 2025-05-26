@@ -22,6 +22,9 @@ bind_interrupts!(
 use embassy_time::{Duration, Timer};
 use {defmt_rtt as _, panic_probe as _};
 
+// 声明共享模块
+mod shared;
+
 // Import the BQ769x0 driver crate
 use bq769x0_async_rs::registers::*;
 use bq769x0_async_rs::{BatteryConfig, Bq769x0, RegisterAccess};
@@ -41,6 +44,22 @@ use embassy_sync::mutex::Mutex;
 
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) {
+    info!("Starting UPS120 data sharing demo...");
+
+    // 初始化消息队列并获取生产者和消费者
+    let (
+        measurements_publisher,
+        measurements_subscriber1,
+        measurements_subscriber2,
+        bq25730_alerts_publisher,
+        bq25730_alerts_subscriber,
+        bq76920_alerts_publisher,
+        bq76920_alerts_subscriber,
+    ) = shared::init_pubsubs(); // 初始化消息队列并获取生产者和消费者
+
+
+    info!("消息队列初始化完成，已获取生产者和消费者。");
+
     info!("Starting BQ76920 demo...");
 
     let config = embassy_stm32::Config::default();
@@ -139,6 +158,13 @@ let mut ina226 = {
     let sense_resistor = ElectricalResistance::new::<uom::si::electrical_resistance::milliohm>(3.0); // Your sense resistor value in milliOhms
 
     loop {
+        // Declare variables to hold read data, initialized to None
+        let mut voltages = None;
+        let mut temps = None;
+        let mut current = None;
+        let mut bq25730_measurements = None;
+
+
         info!("--- Reading BQ76920 Data ---");
 
         // Ensure CC_EN is enabled in SYS_CTRL2
@@ -180,7 +206,7 @@ let mut ina226 = {
         info!("--- Reading BQ25730 Data ---");
 
         // Read Charger Status
-        match bq25730.read_charger_status().await {
+        let bq25730_charger_status = match bq25730.read_charger_status().await {
             Ok(status) => {
                 info!("BQ25730 Charger Status:");
                 info!("  Input Present: {}", status.stat_ac);
@@ -202,14 +228,16 @@ let mut ina226 = {
                 );
                 info!("  Fault OTG OVP: {}", status.fault_otg_ovp);
                 info!("  Fault OTG UVP: {}", status.fault_otg_uvp);
+                Some(status)
             }
             Err(e) => {
                 error!("Failed to read BQ25730 Charger Status: {:?}", e);
+                None
             }
-        }
+        };
 
         // Read Prochot Status
-        match bq25730.read_prochot_status().await {
+        let bq25730_prochot_status = match bq25730.read_prochot_status().await {
             Ok(status) => {
                 info!("BQ25730 Prochot Status:");
                 info!("  VINDPM Triggered: {}", status.stat_vindpm);
@@ -224,15 +252,38 @@ let mut ina226 = {
                 info!("  Exit VAP: {}", status.stat_exit_vap);
                 info!("  IDCHG2 Triggered: {}", status.stat_idchg2);
                 info!("  PTM Operation: {}", status.stat_ptm);
+                Some(status)
             }
             Err(e) => {
                 error!("Failed to read BQ25730 Prochot Status: {:?}", e);
+                None
+            }
+        };
+
+        // 更新并发布 BQ25730 告警信息（包含 Prochot Status）
+        if let (Some(charger_status), Some(prochot_status)) = (bq25730_charger_status, bq25730_prochot_status) {
+            let alerts = shared::Bq25730Alerts {
+                charger_status: charger_status,
+                prochot_status: prochot_status,
+            };
+            // 使用非阻塞方式发布
+            if let Err(_) = bq25730_alerts_publisher.try_publish(alerts) {
+                // 消息队列已满，可以根据需要处理错误，例如记录日志
+                error!("BQ25730 alerts queue is full, message dropped.");
             }
         }
 
+        // Construct BQ25730 measurements (replace with actual ADC reads when implemented)
+        let measurements = shared::Bq25730Measurements {
+            adc_measurements: bq25730_async_rs::data_types::AdcMeasurements::from_register_values(0, 0, 0, 0, 0, 0, 0, 0), // Placeholder
+            // Add other BQ25730 measurement fields here when implemented
+        };
+        bq25730_measurements = Some(measurements);
+
+
         // Read Cell Voltages
         match bq.read_cell_voltages().await {
-            Ok(voltages) => {
+            Ok(v) => {
                 info!("Cell Voltages (mV):");
                 // BQ76920 supports up to 5 cells
                 for _i in 0..5 {
@@ -240,12 +291,14 @@ let mut ina226 = {
                     info!(
                         "  Cell {}: {} mV",
                         _i + 1,
-                        voltages.voltages[_i].get::<uom::si::electric_potential::millivolt>()
+                        v.voltages[_i].get::<uom::si::electric_potential::millivolt>()
                     );
                 }
+                voltages = Some(v); // Assign to the outer variable
             }
             Err(e) => {
                 error!("Failed to read cell voltages: {:?}", e);
+                voltages = None; // Assign None on error
             }
         }
 
@@ -264,15 +317,15 @@ let mut ina226 = {
 
         // Read Temperatures
         match bq.read_temperatures().await {
-            Ok(temps) => {
-                if temps.is_thermistor {
+            Ok(t) => {
+                if t.is_thermistor {
                     info!("Temperatures (0.1 Ohms):");
                     info!(
                         "  TS1: {} ({} Ohms)",
-                        temps
+                        t
                             .ts1
                             .get::<uom::si::thermodynamic_temperature::kelvin>(),
-                        temps
+                        t
                             .ts1
                             .get::<uom::si::thermodynamic_temperature::kelvin>()
                             as f32
@@ -281,7 +334,7 @@ let mut ina226 = {
                     // BQ76920 only has TS1
                 } else {
                     info!("Temperatures (deci-Celsius):");
-                    let ts1_kelvin_integer = temps
+                    let ts1_kelvin_integer = t
                         .ts1
                         .get::<uom::si::thermodynamic_temperature::kelvin>();
                     let ts1_celsius_f32 = ts1_kelvin_integer as f32 - 273.15; // Manually convert kelvin to celsius float
@@ -291,24 +344,28 @@ let mut ina226 = {
                         ts1_kelvin_integer, ts1_celsius_f32
                     );
                 }
+                temps = Some(t); // Assign to the outer variable
             }
             Err(e) => {
                 error!("Failed to read temperatures: {:?}", e);
+                temps = None; // Assign None on error
             }
         }
 
         // Read Current
         match bq.read_current().await {
-            Ok(current) => {
-                let current_ma = bq.convert_raw_cc_to_current_ma(current.raw_cc, sense_resistor);
+            Ok(c) => {
+                let current_ma = bq.convert_raw_cc_to_current_ma(c.raw_cc, sense_resistor);
                 info!(
                     "Raw CC: {}, Current: {} mA",
-                    current.raw_cc,
+                    c.raw_cc,
                     current_ma.get::<uom::si::electric_current::milliampere>()
                 );
+                current = Some(c); // Assign to the outer variable
             }
             Err(e) => {
                 error!("Failed to read current: {:?}", e);
+                current = None; // Assign None on error
             }
         }
 
@@ -348,8 +405,44 @@ let mut ina226 = {
                 error!("Failed to read system status: {:?}", e);
             }
         }
-
+    
+        // 发布 BQ76920 告警信息
+        if let Ok(status) = bq.read_status().await {
+            let alerts = shared::Bq76920Alerts {
+                system_status: status,
+            };
+            // 使用非阻塞方式发布
+            if let Err(_) = bq76920_alerts_publisher.try_publish(alerts) {
+                // 消息队列已满，可以根据需要处理错误，例如记录日志
+                error!("BQ76920 alerts queue is full, message dropped.");
+            }
+        }
+    
+    
         info!("----------------------------");
+
+        // 构造并发布聚合测量数据
+        // 假设 voltages, temps, current, and bq25730_measurements variables were successfully obtained
+        // If reading failed, handle accordingly, e.g., use default values or skip publishing
+        let all_measurements = shared::AllMeasurements {
+            bq25730: bq25730_measurements.unwrap_or_else(|| shared::Bq25730Measurements {
+                adc_measurements: bq25730_async_rs::data_types::AdcMeasurements::from_register_values(0, 0, 0, 0, 0, 0, 0, 0), // Default placeholder
+                // Add other default BQ25730 measurement fields here
+            }),
+            bq76920: shared::Bq76920Measurements {
+                cell_voltages: voltages.unwrap_or_else(|| bq769x0_async_rs::data_types::CellVoltages::new()), // Use default if read failed
+                temperatures: temps.unwrap_or_else(|| bq769x0_async_rs::data_types::Temperatures::new()), // Use default if read failed
+                coulomb_counter: current.unwrap_or_else(|| bq769x0_async_rs::data_types::CoulombCounter { raw_cc: 0 }), // Use default if read failed
+                // Add other default BQ76920 measurement fields here
+            },
+        };
+
+        // 使用非阻塞方式发布聚合测量数据
+        if let Err(_) = measurements_publisher.try_publish(all_measurements) {
+            // 消息队列已满，可以根据需要处理错误，例如记录日志
+            error!("Measurements queue is full, message dropped.");
+        }
+
 
         // Wait for 1 second
         Timer::after(Duration::from_secs(1)).await;
