@@ -34,13 +34,15 @@ pub async fn usb_task(
         'static,
         CriticalSectionRawMutex,
         AllMeasurements<5>,
-        MEASUREMENTS_PUBSUB_DEPTH, // Use constant
+        MEASUREMENTS_PUBSUB_DEPTH,   // Use constant
         MEASUREMENTS_PUBSUB_READERS, // Use constant
-        1, // Publishers count is 1
+        1,                           // Publishers count is 1
     >,
 ) {
-    let vid: u16 = u16::from_str_radix(env!("USB_VID").trim_start_matches("0x"), 16).expect("Invalid USB_VID");
-    let pid: u16 = u16::from_str_radix(env!("USB_PID").trim_start_matches("0x"), 16).expect("Invalid USB_PID");
+    let vid: u16 =
+        u16::from_str_radix(env!("USB_VID").trim_start_matches("0x"), 16).expect("Invalid USB_VID");
+    let pid: u16 =
+        u16::from_str_radix(env!("USB_PID").trim_start_matches("0x"), 16).expect("Invalid USB_PID");
 
     let mut usb_config = embassy_usb::Config::new(vid, pid);
     usb_config.manufacturer = Some("Ivan");
@@ -86,19 +88,17 @@ pub async fn usb_task(
             .await;
 
             match result {
-                select::Either::First(parse_result) => {
-                    match parse_result {
-                        Ok(cmd) => {
-                            defmt::info!("USB command: {:#x}", cmd);
-                            if let Err(e) = usb_endpoints.process_command(cmd).await {
-                                defmt::error!("Error processing command: {:?}", e);
-                            }
-                        }
-                        Err(e) => {
-                            defmt::error!("USB command endpoint error: {:?}", e);
+                select::Either::First(parse_result) => match parse_result {
+                    Ok(cmd) => {
+                        defmt::info!("USB command: {:#x}", cmd);
+                        if let Err(e) = usb_endpoints.process_command(cmd).await {
+                            defmt::error!("Error processing command: {:?}", e);
                         }
                     }
-                }
+                    Err(e) => {
+                        defmt::error!("USB command endpoint error: {:?}", e);
+                    }
+                },
                 select::Either::Second(pubsub::WaitResult::Message(msg)) => {
                     if let Err(e) = usb_endpoints.send_status_update(msg).await {
                         defmt::error!("Send status update failed: {:?}", e);

@@ -1,8 +1,8 @@
+use binrw::io::Cursor;
 use binrw::{BinRead, BinWrite}; // Remove BinReaderExt and BinWriterExt as they are not directly used here
 use embassy_usb::Builder;
-use embassy_usb::driver::{Driver, Endpoint, EndpointIn, EndpointOut};
-use binrw::io::Cursor;
 use embassy_usb::driver::EndpointError;
+use embassy_usb::driver::{Driver, Endpoint, EndpointIn, EndpointOut};
 
 use crate::shared::AllMeasurements;
 
@@ -89,14 +89,20 @@ impl<'d, D: Driver<'d>> UsbEndpoints<'d, D> {
         Ok(())
     }
 
-    pub async fn send_status_update(&mut self, data: AllMeasurements<5>) -> Result<(), EndpointError> {
+    pub async fn send_status_update(
+        &mut self,
+        data: AllMeasurements<5>,
+    ) -> Result<(), EndpointError> {
         if !self.status_subscription_active {
             return Ok(());
         }
 
         let mut writer = Cursor::new(&mut self.write_buffer[..]);
-        UsbData::StatusPush(data).write_be(&mut writer).map_err(|_| EndpointError::BufferOverflow)?; // Simplified error handling
+        UsbData::StatusPush(data)
+            .write_be(&mut writer)
+            .map_err(|_| EndpointError::BufferOverflow)?; // Simplified error handling
         let len = writer.position() as usize; // Remove map_err and '?' as position() returns u64
+        defmt::info!("固件发送原始字节: {:x}", &self.write_buffer[..len]); // 添加日志
 
         let mut cur = 0;
         let max_packet = 64; // Assuming max packet size for interrupt endpoint

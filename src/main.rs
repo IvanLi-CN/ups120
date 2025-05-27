@@ -301,12 +301,34 @@ async fn main(spawner: Spawner) {
             bq25730_alerts_publisher.publish_immediate(alerts);
         }
 
-        // Construct BQ25730 measurements (replace with actual ADC reads when implemented)
+        // Read ADC Measurements for BQ25730
+        let bq25730_adc_measurements = match bq25730.read_adc_measurements().await {
+            Ok(measurements) => {
+                info!("BQ25730 ADC Measurements:");
+                info!("  PSYS: {} mW", measurements.psys.0);
+                info!("  VBUS: {} mV", measurements.vbus.0);
+                info!("  IDCHG: {} mA", measurements.idchg.0);
+                info!("  ICHG: {} mA", measurements.ichg.0);
+                info!("  CMPIN: {} mV", measurements.cmpin.0);
+                info!("  IIN: {} mA", measurements.iin.0);
+                info!("  VBAT: {} mV", measurements.vbat.0);
+                info!("  VSYS: {} mV", measurements.vsys.0);
+                Some(measurements)
+            }
+            Err(e) => {
+                error!("Failed to read BQ25730 ADC Measurements: {:?}", e);
+                None
+            }
+        };
+
+        // Construct BQ25730 measurements
         let measurements = shared::Bq25730Measurements {
-            adc_measurements: bq25730_async_rs::data_types::AdcMeasurements::from_register_values(
-                &[0, 0, 0, 0, 0, 0, 0, 0],
-            ), // Placeholder
-               // Add other BQ25730 measurement fields here when implemented
+            adc_measurements: bq25730_adc_measurements.unwrap_or_else(|| {
+                bq25730_async_rs::data_types::AdcMeasurements::from_register_values(&[
+                    0, 0, 0, 0, 0, 0, 0, 0,
+                ])
+            }),
+            // Add other BQ25730 measurement fields here when implemented
         };
         bq25730_measurements = Some(measurements);
 
@@ -458,26 +480,29 @@ async fn main(spawner: Spawner) {
         // 假设 voltages, temps, current, system_status, mos_status and bq25730_measurements variables were successfully obtained
         // If reading failed, handle accordingly, e.g., use default values or skip publishing
         let all_measurements = shared::AllMeasurements {
-            bq25730: bq25730_measurements.unwrap_or_else(|| shared::Bq25730Measurements {
-                adc_measurements:
-                    bq25730_async_rs::data_types::AdcMeasurements::from_register_values(
-                        &[0, 0, 0, 0, 0, 0, 0, 0],
-                    ), // Default placeholder
-                       // Add other BQ25730 measurement fields here
-            }),
+            bq25730: shared::Bq25730Measurements {
+                adc_measurements: bq25730_adc_measurements.unwrap_or_else(|| {
+                    bq25730_async_rs::data_types::AdcMeasurements::from_register_values(&[
+                        0, 0, 0, 0, 0, 0, 0, 0,
+                    ])
+                }),
+            },
             bq76920: shared::Bq76920Measurements {
                 core_measurements: bq769x0_async_rs::data_types::Bq76920Measurements {
                     cell_voltages: voltages
-                        .unwrap_or_else(|| bq769x0_async_rs::data_types::CellVoltages::new()), // Use default if read failed
+                        .unwrap_or_else(|| bq769x0_async_rs::data_types::CellVoltages::new()),
                     temperatures: temps
-                        .unwrap_or_else(|| bq769x0_async_rs::data_types::Temperatures::new()), // Use default if read failed
-                    current: current
-                        .unwrap_or_else(|| uom::si::electric_current::ElectricCurrent::new::<uom::si::electric_current::milliampere>(0.0)), // Use default if read failed
+                        .unwrap_or_else(|| bq769x0_async_rs::data_types::Temperatures::new()),
+                    current: current.unwrap_or_else(|| {
+                        uom::si::electric_current::ElectricCurrent::new::<
+                            uom::si::electric_current::milliampere,
+                        >(0.0)
+                    }),
                     system_status: system_status
-                        .unwrap_or_else(|| bq769x0_async_rs::data_types::SystemStatus::new(0)), // Use default if read failed
+                        .unwrap_or_else(|| bq769x0_async_rs::data_types::SystemStatus::new(0)),
                     mos_status: mos_status
                         .unwrap_or_else(|| bq769x0_async_rs::data_types::MosStatus::new(0)), // Use default if read failed
-                }
+                },
             },
         };
 
