@@ -135,7 +135,7 @@ async fn main(spawner: Spawner) {
     };
     let mut bq25730 = {
         let i2c_bus = I2cDevice::new(i2c_bus_mutex);
-        Bq25730::new(i2c_bus, bq25730_address)
+        Bq25730::new(i2c_bus, bq25730_address, 4)
     };
 
     // INA226 I2C address (7-bit)
@@ -186,12 +186,12 @@ async fn main(spawner: Spawner) {
 
     loop {
         // Declare variables to hold read data, initialized to None
-        let mut voltages = None;
-        let mut temps = None;
-        let mut current = None;
-        let mut system_status = None;
-        let mut mos_status = None;
-        let mut bq25730_measurements = None;
+        let mut _voltages = None;
+        let mut _temps = None;
+        let mut _current = None;
+        let mut _system_status = None;
+        let mut _mos_status = None;
+        let mut _bq25730_measurements = None;
 
         info!("--- Reading BQ76920 Data ---");
 
@@ -295,8 +295,8 @@ async fn main(spawner: Spawner) {
             (bq25730_charger_status, bq25730_prochot_status)
         {
             let alerts = shared::Bq25730Alerts {
-                charger_status: charger_status,
-                prochot_status: prochot_status,
+                charger_status,
+                prochot_status,
             };
             bq25730_alerts_publisher.publish_immediate(alerts);
         }
@@ -323,14 +323,21 @@ async fn main(spawner: Spawner) {
 
         // Construct BQ25730 measurements
         let measurements = shared::Bq25730Measurements {
-            adc_measurements: bq25730_adc_measurements.unwrap_or_else(|| {
-                bq25730_async_rs::data_types::AdcMeasurements::from_register_values(&[
-                    0, 0, 0, 0, 0, 0, 0, 0,
-                ])
+            adc_measurements: bq25730_adc_measurements.unwrap_or({
+                bq25730_async_rs::data_types::AdcMeasurements {
+                    psys: bq25730_async_rs::data_types::AdcPsys(0),
+                    vbus: bq25730_async_rs::data_types::AdcVbus(0),
+                    idchg: bq25730_async_rs::data_types::AdcIdchg(0),
+                    ichg: bq25730_async_rs::data_types::AdcIchg(0),
+                    cmpin: bq25730_async_rs::data_types::AdcCmpin(0),
+                    iin: bq25730_async_rs::data_types::AdcIin(0),
+                    vbat: bq25730_async_rs::data_types::AdcVbat(0),
+                    vsys: bq25730_async_rs::data_types::AdcVsys(0),
+                }
             }),
             // Add other BQ25730 measurement fields here when implemented
         };
-        bq25730_measurements = Some(measurements);
+        _bq25730_measurements = Some(measurements);
 
         // Read Cell Voltages
         match bq.read_cell_voltages().await {
@@ -345,11 +352,11 @@ async fn main(spawner: Spawner) {
                         v.voltages[_i].get::<uom::si::electric_potential::millivolt>()
                     );
                 }
-                voltages = Some(v); // Assign to the outer variable
+                _voltages = Some(v); // Assign to the outer variable
             }
             Err(e) => {
                 error!("Failed to read cell voltages: {:?}", e);
-                voltages = None; // Assign None on error
+                _voltages = None; // Assign None on error
             }
         }
 
@@ -367,31 +374,47 @@ async fn main(spawner: Spawner) {
         }
 
         // Read Temperatures
+        // Read Temperatures
         match bq.read_temperatures().await {
-            Ok(t) => {
-                if t.is_thermistor {
-                    info!("Temperatures (0.1 Ohms):");
-                    info!(
-                        "  TS1: {} ({} Ohms)",
-                        t.ts1.get::<uom::si::thermodynamic_temperature::kelvin>(),
-                        t.ts1.get::<uom::si::thermodynamic_temperature::kelvin>() as f32 / 10.0
-                    );
-                } else {
-                    info!("Temperatures (deci-Celsius):");
-                    let ts1_kelvin_integer =
-                        t.ts1.get::<uom::si::thermodynamic_temperature::kelvin>();
-                    let ts1_celsius_f32 = ts1_kelvin_integer as f32 - 273.15; // Manually convert kelvin to celsius float
+            Ok(sensor_readings) => {
+                // Store the original sensor readings
+                _temps = Some(sensor_readings);
 
-                    info!(
-                        "  TS1 (Die Temp): kelvin_value={}, celsius_manual_f32={}",
-                        ts1_kelvin_integer, ts1_celsius_f32
-                    );
+                // Convert sensor readings to temperature data for display
+                match sensor_readings.into_temperature_data(None) {
+                    // Assuming internal sensor, no NTC params
+                    Ok(temp_data) => {
+                        info!("Temperatures (Celsius):");
+                        info!(
+                            "  TS1: {} °C",
+                            temp_data
+                                .ts1
+                                .get::<uom::si::temperature_interval::degree_celsius>()
+                        );
+                        if let Some(ts2) = temp_data.ts2 {
+                            info!(
+                                "  TS2: {} °C",
+                                ts2.get::<uom::si::temperature_interval::degree_celsius>()
+                            );
+                        }
+                        if let Some(ts3) = temp_data.ts3 {
+                            info!(
+                                "  TS3: {} °C",
+                                ts3.get::<uom::si::temperature_interval::degree_celsius>()
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        error!(
+                            "Failed to convert temperature sensor readings for display: {}",
+                            e
+                        );
+                    }
                 }
-                temps = Some(t); // Assign to the outer variable
             }
             Err(e) => {
-                error!("Failed to read temperatures: {:?}", e);
-                temps = None; // Assign None on error
+                error!("Failed to read temperature sensor readings: {:?}", e);
+                _temps = None; // Assign None on error
             }
         }
 
@@ -404,11 +427,11 @@ async fn main(spawner: Spawner) {
                     c.raw_cc,
                     current_ma.get::<uom::si::electric_current::milliampere>()
                 );
-                current = Some(current_ma); // Assign to the outer variable, now as ElectricCurrent
+                _current = Some(current_ma); // Assign to the outer variable, now as ElectricCurrent
             }
             Err(e) => {
                 error!("Failed to read current: {:?}", e);
-                current = None; // Assign None on error
+                _current = None; // Assign None on error
             }
         }
 
@@ -422,20 +445,20 @@ async fn main(spawner: Spawner) {
                 info!("  Overvoltage (OV): {}", status.ov);
                 info!("  Short Circuit Discharge (SCD): {}", status.scd);
                 info!("  Overcurrent Discharge (OCD): {}", status.ocd);
-                info!("  Cell Undervoltage (CUV): {}", status.cuv);
-                info!("  Cell Overvoltage (COV): {}", status.cov);
-                system_status = Some(status); // Assign to the outer variable
+                info!("  Device X-Ready: {}", status.device_xready);
+                info!("  Override Alert: {}", status.ovrd_alert);
+                _system_status = Some(status); // Assign to the outer variable
 
                 // Clear status flags after reading
                 // Only clear flags that are set
                 let flags_to_clear = (status.cc_ready as u8 * SYS_STAT_CC_READY)
-                    | (status.ovr_temp as u8 * SYS_STAT_OVRD_ALERT)
+                    | (status.ovr_temp as u8 * (1 << 6)) // Corrected bit for ovr_temp
+                    | (status.device_xready as u8 * SYS_STAT_DEVICE_XREADY)
+                    | (status.ovrd_alert as u8 * SYS_STAT_OVRD_ALERT)
                     | (status.uv as u8 * SYS_STAT_UV)
                     | (status.ov as u8 * SYS_STAT_OV)
                     | (status.scd as u8 * SYS_STAT_SCD)
-                    | (status.ocd as u8 * SYS_STAT_OCD)
-                    | (status.cuv as u8 * SYS_STAT_UV)
-                    | (status.cov as u8 * SYS_STAT_OV);
+                    | (status.ocd as u8 * SYS_STAT_OCD);
 
                 if flags_to_clear != 0 {
                     if let Err(e) = bq.clear_status_flags(flags_to_clear).await {
@@ -447,7 +470,7 @@ async fn main(spawner: Spawner) {
             }
             Err(e) => {
                 error!("Failed to read system status: {:?}", e);
-                system_status = None; // Assign None on error
+                _system_status = None; // Assign None on error
             }
         }
 
@@ -458,11 +481,11 @@ async fn main(spawner: Spawner) {
                 info!("MOS Status:");
                 info!("  Charge ON: {}", mos.charge_on);
                 info!("  Discharge ON: {}", mos.discharge_on);
-                mos_status = Some(mos); // Assign to the outer variable
+                _mos_status = Some(mos); // Assign to the outer variable
             }
             Err(e) => {
                 error!("Failed to read SYS_CTRL2 for MOS status: {:?}", e);
-                mos_status = None; // Assign None on error
+                _mos_status = None; // Assign None on error
             }
         }
 
@@ -482,25 +505,49 @@ async fn main(spawner: Spawner) {
         let all_measurements = shared::AllMeasurements {
             bq25730: shared::Bq25730Measurements {
                 adc_measurements: bq25730_adc_measurements.unwrap_or_else(|| {
-                    bq25730_async_rs::data_types::AdcMeasurements::from_register_values(&[
-                        0, 0, 0, 0, 0, 0, 0, 0,
-                    ])
+                    bq25730_async_rs::data_types::AdcMeasurements {
+                        psys: bq25730_adc_measurements
+                            .as_ref()
+                            .map_or(bq25730_async_rs::data_types::AdcPsys(0), |m| m.psys),
+                        vbus: bq25730_adc_measurements
+                            .as_ref()
+                            .map_or(bq25730_async_rs::data_types::AdcVbus(0), |m| m.vbus),
+                        idchg: bq25730_adc_measurements
+                            .as_ref()
+                            .map_or(bq25730_async_rs::data_types::AdcIdchg(0), |m| m.idchg),
+                        ichg: bq25730_adc_measurements
+                            .as_ref()
+                            .map_or(bq25730_async_rs::data_types::AdcIchg(0), |m| m.ichg),
+                        cmpin: bq25730_adc_measurements
+                            .as_ref()
+                            .map_or(bq25730_async_rs::data_types::AdcCmpin(0), |m| m.cmpin),
+                        iin: bq25730_adc_measurements
+                            .as_ref()
+                            .map_or(bq25730_async_rs::data_types::AdcIin(0), |m| m.iin),
+                        vbat: bq25730_adc_measurements
+                            .as_ref()
+                            .map_or(bq25730_async_rs::data_types::AdcVbat(0), |m| m.vbat),
+                        vsys: bq25730_adc_measurements
+                            .as_ref()
+                            .map_or(bq25730_async_rs::data_types::AdcVsys(0), |m| m.vsys),
+                    }
                 }),
             },
             bq76920: shared::Bq76920Measurements {
                 core_measurements: bq769x0_async_rs::data_types::Bq76920Measurements {
-                    cell_voltages: voltages
-                        .unwrap_or_else(|| bq769x0_async_rs::data_types::CellVoltages::new()),
-                    temperatures: temps
-                        .unwrap_or_else(|| bq769x0_async_rs::data_types::Temperatures::new()),
-                    current: current.unwrap_or_else(|| {
+                    cell_voltages: _voltages
+                        .unwrap_or_else(bq769x0_async_rs::data_types::CellVoltages::new),
+                    temperatures: _temps.unwrap_or_else(
+                        bq769x0_async_rs::data_types::TemperatureSensorReadings::new,
+                    ),
+                    current: _current.unwrap_or_else(|| {
                         uom::si::electric_current::ElectricCurrent::new::<
                             uom::si::electric_current::milliampere,
                         >(0.0)
                     }),
-                    system_status: system_status
+                    system_status: _system_status
                         .unwrap_or_else(|| bq769x0_async_rs::data_types::SystemStatus::new(0)),
-                    mos_status: mos_status
+                    mos_status: _mos_status
                         .unwrap_or_else(|| bq769x0_async_rs::data_types::MosStatus::new(0)), // Use default if read failed
                 },
             },
