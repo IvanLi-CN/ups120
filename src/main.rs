@@ -28,6 +28,7 @@ use embassy_time::{Duration, Timer};
 use {defmt_rtt as _, panic_probe as _};
 
 // 声明共享模块
+mod data_types;
 mod shared;
 mod usb; // Keep this for our local usb module
 

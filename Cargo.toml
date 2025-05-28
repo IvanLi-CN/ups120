@@ -61,11 +61,18 @@ libm = "0.2.8" # Add libm dependency
 embedded-alloc = "0.6.0" # Change embedded-alloc version to 0.6.0
 
 embedded-io-async = { version = "0.6.1" }
-binrw = { version = "0.11", default-features = false } # Add binrw dependency with no_std compatibility
+binrw = { version = "0.15", default-features = false }
 uom = { version = "0.37", default-features = false, features = ["si", "i32"] }
 
-bq769x0-async-rs = { version = "0.1.1", path = "./bq76920", features = ["async", "defmt"] } # Enable defmt feature
-bq25730-async-rs = { version = "0.1.1", path = "./bq25730", features = ["async", "defmt"] } # Add bq25730 driver
+bq769x0-async-rs = { version = "0.1.1", path = "./bq76920", features = [
+  "async",
+  "defmt",
+  "binrw",
+] }
+bq25730-async-rs = { version = "0.1.1", path = "./bq25730", features = [
+  "async",
+  "defmt",
+] }
 
 ina226 = { version = "0.3.0", features = ["async"] }
 
