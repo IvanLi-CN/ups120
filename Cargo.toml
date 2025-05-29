@@ -62,7 +62,6 @@ embedded-alloc = "0.6.0" # Change embedded-alloc version to 0.6.0
 
 embedded-io-async = { version = "0.6.1" }
 binrw = { version = "0.15", default-features = false }
-uom = { version = "0.37", default-features = false, features = ["si", "i32"] }
 
 bq769x0-async-rs = { version = "0.0.0", path = "./bq76920", features = [
   "async",

@@ -7,7 +7,7 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 // Removed WaitResult import as it's no longer needed in this task
 
 use bq769x0_async_rs::registers::*;
-use bq769x0_async_rs::units::ElectricalResistance;
+// use bq769x0_async_rs::units::ElectricalResistance; // Removed as uom is no longer used by the lib
 use bq769x0_async_rs::{BatteryConfig, Bq769x0, RegisterAccess};
 
  // Import necessary data types
@@ -26,7 +26,12 @@ pub async fn bq76920_task(
     info!("BQ76920 task started.");
     let mut bq: Bq769x0<_, bq769x0_async_rs::Enabled, 5> = { Bq769x0::new(i2c_bus, address) };
     // --- Main Loop for Data Acquisition ---
-    let sense_resistor = ElectricalResistance::new::<uom::si::electrical_resistance::milliohm>(3.0); // Your sense resistor value in milliOhms
+    // Assuming the library now takes the sense resistor value, e.g., as f32 in milliohms for calculations.
+    // This might need adjustment based on the updated bq769x0-async-rs API.
+    // If convert_raw_cc_to_current_ma is removed or changed, this will also need an update.
+    // Assuming the library now takes the sense resistor value as u32 in microOhms.
+    // This might need adjustment based on the updated bq769x0-async-rs API.
+    let sense_resistor_uohms: u32 = 3000; // 3.0 milliOhms = 3000 microOhms
 
     // Declare variables to hold read data, initialized to None
     let mut voltages = None;
@@ -106,7 +111,7 @@ pub async fn bq76920_task(
                     info!(
                         "  Cell {}: {} mV",
                         _i + 1,
-                        v.voltages[_i].get::<uom::si::electric_potential::millivolt>()
+                        v.voltages[_i] // Assuming this is already in mV (e.g., u16)
                     );
                 }
                 *voltages_ref = Some(v); // Assign to the outer variable via mutable reference
@@ -122,7 +127,7 @@ pub async fn bq76920_task(
             Ok(voltage) => {
                 info!(
                     "Pack Voltage: {} mV",
-                    voltage.get::<uom::si::electric_potential::millivolt>()
+                    voltage // Assuming this is already in mV (e.g., u32)
                 );
             }
             Err(e) => {
@@ -144,20 +149,18 @@ pub async fn bq76920_task(
                         info!("Temperatures (Celsius):");
                         info!(
                             "  TS1: {} °C",
-                            temp_data
-                                .ts1
-                                .get::<uom::si::temperature_interval::degree_celsius>()
+                            temp_data.ts1
                         );
-                        if let Some(ts2) = temp_data.ts2 {
+                        if let Some(ts2_val) = temp_data.ts2 {
                             info!(
                                 "  TS2: {} °C",
-                                ts2.get::<uom::si::temperature_interval::degree_celsius>()
+                                ts2_val
                             );
                         }
-                        if let Some(ts3) = temp_data.ts3 {
+                        if let Some(ts3_val) = temp_data.ts3 {
                             info!(
                                 "  TS3: {} °C",
-                                ts3.get::<uom::si::temperature_interval::degree_celsius>()
+                                ts3_val
                             );
                         }
                     }
@@ -179,11 +182,11 @@ pub async fn bq76920_task(
         let current_ref = &mut current;
         match bq.read_current().await {
             Ok(c) => {
-                let current_ma = bq.convert_raw_cc_to_current_ma(c.raw_cc, sense_resistor);
+                let current_ma = bq.convert_raw_cc_to_current_ma(c.raw_cc, sense_resistor_uohms);
                 info!(
                     "Raw CC: {}, Current: {} mA",
                     c.raw_cc,
-                    current_ma.get::<uom::si::electric_current::milliampere>()
+                    current_ma // Assuming this is already in mA (e.g., i32)
                 );
                 *current_ref = Some(current_ma); // Assign to the outer variable via mutable reference
             }
@@ -310,11 +313,7 @@ pub async fn bq76920_task(
                 temperatures: temps.unwrap_or_else(
                     bq769x0_async_rs::data_types::TemperatureSensorReadings::new,
                 ),
-                current: current.unwrap_or_else(|| {
-                    uom::si::electric_current::ElectricCurrent::new::<
-                        uom::si::electric_current::milliampere,
-                    >(0.0)
-                }),
+                current: current.unwrap_or_else(|| 0i32), // Default to 0 mA
                 system_status: system_status
                     .unwrap_or_else(|| bq769x0_async_rs::data_types::SystemStatus::new(0)),
                 mos_status: mos_status

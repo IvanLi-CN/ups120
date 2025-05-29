@@ -3,7 +3,6 @@ use defmt::Format;
 
 use bq769x0_async_rs::data_types::{Bq76920Measurements as Bq76920CoreMeasurements, SystemStatus};
 use bq25730_async_rs::data_types::{AdcMeasurements, ChargerStatus, ProchotStatus};
-use uom::si::{electric_current::milliampere, electric_potential::millivolt};
 
 /// BQ25730 测量数据
 #[derive(Debug, Copy, Clone, PartialEq, defmt::Format)]
@@ -63,19 +62,27 @@ impl<const N: usize> Format for AllMeasurements<N> {
             defmt::write!(
                 fmt,
                 "{:?}, ",
-                self.bq76920.core_measurements.cell_voltages.voltages[i].get::<millivolt>()
+                self.bq76920.core_measurements.cell_voltages.voltages[i] // Now u16 raw ADC
             );
         }
         defmt::write!(
             fmt,
-            "], temperatures: {{ ts1: {:?}, is_thermistor: {} }}, current: {}, system_status: {{ cc_ready: {}, device_xready: {}, ovrd_alert: {}, uv: {}, ov: {}, scd: {}, ocd: {} }}, mos_status: {{ charge_on: {}, discharge_on: {} }} }}, ina226: {{ voltage: {}, current: {}, power: {} }} }}",
-            self.bq76920
-                .core_measurements
-                .temperatures
-                .ts1
-                .get::<uom::si::electric_potential::volt>(),
+            "], temperatures: {{ ts1_0_01C: {:?}, ts2_0_01C: {:?}, ts3_0_01C: {:?}, is_thermistor: {} }}, current_mA: {}, system_status: {{ cc_ready: {}, device_xready: {}, ovrd_alert: {}, uv: {}, ov: {}, scd: {}, ocd: {} }}, mos_status: {{ charge_on: {}, discharge_on: {} }} }}, ina226: {{ voltage: {}, current: {}, power: {} }} }}",
+            {
+                // Convert to TemperatureData to get temperatures in 0.01°C
+                let temp_data = self.bq76920.core_measurements.temperatures.into_temperature_data(None);
+                temp_data.map(|td| td.ts1).ok() // Print Option<i16>
+            },
+            {
+                let temp_data = self.bq76920.core_measurements.temperatures.into_temperature_data(None);
+                temp_data.map(|td| td.ts2).unwrap_or(None) // Print Option<i16>
+            },
+            {
+                let temp_data = self.bq76920.core_measurements.temperatures.into_temperature_data(None);
+                temp_data.map(|td| td.ts3).unwrap_or(None) // Print Option<i16>
+            },
             self.bq76920.core_measurements.temperatures.is_thermistor,
-            self.bq76920.core_measurements.current.get::<milliampere>(),
+            self.bq76920.core_measurements.current, // Now i32 in mA
             self.bq76920
                 .core_measurements
                 .system_status

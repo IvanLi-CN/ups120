@@ -153,7 +153,7 @@ pub async fn usb_task(
                                                 core_measurements: bq769x0_async_rs::data_types::Bq76920Measurements {
                                                     cell_voltages: bq769x0_async_rs::data_types::CellVoltages::new(),
                                                     temperatures: bq769x0_async_rs::data_types::TemperatureSensorReadings::new(),
-                                                    current: uom::si::electric_current::ElectricCurrent::new::<uom::si::electric_current::milliampere>(0.0),
+                                                    current: 0i32, // Default to 0 mA
                                                     system_status: bq769x0_async_rs::data_types::SystemStatus::new(0),
                                                     mos_status: bq769x0_async_rs::data_types::MosStatus::new(0),
                                                 },
@@ -205,7 +205,7 @@ pub async fn usb_task(
                         core_measurements: bq769x0_async_rs::data_types::Bq76920Measurements {
                             cell_voltages: bq769x0_async_rs::data_types::CellVoltages::new(),
                             temperatures: bq769x0_async_rs::data_types::TemperatureSensorReadings::new(),
-                            current: uom::si::electric_current::ElectricCurrent::new::<uom::si::electric_current::milliampere>(0.0),
+                            current: 0i32, // Default to 0 mA
                             system_status: bq769x0_async_rs::data_types::SystemStatus::new(0),
                             mos_status: bq769x0_async_rs::data_types::MosStatus::new(0),
                         },
