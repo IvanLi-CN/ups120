@@ -1,10 +1,9 @@
 #![no_std]
 #![no_main]
-// #![feature(type_alias_impl_trait)] // Required for embassy tasks - Temporarily removed
+// #![feature(type_alias_impl_trait)] // Required for embassy tasks
 
 extern crate alloc; // Required for global allocator
 
-use bq769x0_async_rs::units::ElectricalResistance;
 use defmt::*;
 use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
 use embassy_executor::Spawner;
@@ -15,7 +14,6 @@ use embassy_stm32::{
     time::Hertz,
     usb::Driver, // Remove InterruptHandler as it's not directly used here
 };
-// use peripherals::USB; // Import peripherals::USB directly for bind_interrupts! - Removed, as it's already in `peripherals`
 
 bind_interrupts!(
     struct Irqs {
@@ -31,16 +29,9 @@ use {defmt_rtt as _, panic_probe as _};
 mod data_types;
 mod shared;
 mod usb; // Keep this for our local usb module
-
-// Import the BQ769x0 driver crate
-use bq769x0_async_rs::registers::*;
-use bq769x0_async_rs::{BatteryConfig, Bq769x0, RegisterAccess};
-
-// Import the BQ25730 driver crate
-use bq25730_async_rs::Bq25730;
-
-// Import the INA226 driver crate
-use ina226::INA226;
+mod bq25730_task;
+mod ina226_task;
+mod bq76920_task;
 
 // For sharing I2C bus
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
@@ -54,11 +45,9 @@ static HEAP: Heap = Heap::empty();
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
-    // Change _spawner to spawner
     info!("Starting UPS120 data sharing demo...");
 
     // Initialize global allocator
-    // Initialize the allocator BEFORE you use it
     {
         const HEAP_SIZE: usize = 16_384;
         static mut HEAP_MEM: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
@@ -73,35 +62,38 @@ async fn main(spawner: Spawner) {
     let (
         measurements_publisher,
         _measurements_subscriber1, // Mark as unused
-        measurements_subscriber2,
+        _measurements_subscriber2, // Used by usb_task
         bq25730_alerts_publisher,
         _bq25730_alerts_subscriber, // Mark as unused
         bq76920_alerts_publisher,
         _bq76920_alerts_subscriber, // Mark as unused
-        _ina226_measurements_publisher, // Add INA226 publisher
-        _ina226_measurements_subscriber, // Add INA226 subscriber (marked as unused)
+        bq25730_measurements_publisher, // Used by bq25730_task
+        bq25730_measurements_subscriber, // Used by usb_task
+        bq76920_measurements_publisher, // Used by bq76920_task
+        bq76920_measurements_subscriber, // Used by usb_task
+        ina226_measurements_publisher, // Used by ina226_task
+        ina226_measurements_subscriber, // Used by usb_task
     ) = shared::init_pubsubs(); // 初始化消息队列并获取生产者和消费者
 
     info!("消息队列初始化完成，已获取生产者和消费者。");
 
-    info!("Starting BQ76920 demo...");
-
     let config = embassy_stm32::Config::default();
-    // Clock configuration is handled by default config or external means as per user instruction.
-    // If specific clock speeds are needed, adjust the default config or provide a custom one.
-
     let p = embassy_stm32::init(config);
 
     info!("STM32 initialized.");
 
-    let usb_driver = Driver::new(p.USB, Irqs, p.PA12, p.PA11); // Use imported Driver, add D+ and D- pins
+    let usb_driver = Driver::new(p.USB, Irqs, p.PA12, p.PA11);
     spawner
-        .spawn(usb::usb_task(usb_driver, measurements_subscriber2))
-        .unwrap(); // Spawn usb_task
+        .spawn(usb::usb_task(
+            usb_driver,
+            measurements_publisher, // usb_task now publishes AllMeasurements
+            bq25730_measurements_subscriber, // Pass subscriber for BQ25730 data
+            ina226_measurements_subscriber, // Pass subscriber for INA226 data
+            bq76920_measurements_subscriber, // Pass subscriber for BQ76920 data
+        ))
+        .unwrap();
 
     // Configure I2C1 (PB6 SCL, PB7 SDA) with DMA
-    // Ensure these pins are configured as Alternate Function Open Drain with Pull-ups in your STM32CubeIDE or equivalent configuration tool
-    // Assuming DMA1_CH1 for TX and DMA1_CH2 for RX for I2C1 on STM32G031G8U6
     let mut i2c_config = i2c::Config::default();
     i2c_config.scl_pullup = true;
     i2c_config.sda_pullup = true;
@@ -111,507 +103,60 @@ async fn main(spawner: Spawner) {
         Mutex<CriticalSectionRawMutex, I2c<'static, embassy_stm32::mode::Async>>,
     > = static_cell::StaticCell::new();
     let i2c_instance = embassy_stm32::i2c::I2c::new(
-        p.I2C1, // 1. peri
-        p.PA15, // 2. scl
-        p.PB7,  // 3. sda
+        p.I2C1,
+        p.PA15,
+        p.PB7,
         Irqs,
         p.DMA1_CH3,
         p.DMA1_CH4,
-        Hertz(100_000), // 7. freq
-        i2c_config,     // 8. config
+        Hertz(100_000),
+        i2c_config,
     );
 
     info!("I2C1 initialized on PA15/PB7 with DMA.");
 
     // Initialize the static Mutex with the I2C instance
     let i2c_bus_mutex =
-        I2C_BUS_MUTEX_CELL.init(Mutex::new(unsafe { core::mem::transmute(i2c_instance) }));
+        I2C_BUS_MUTEX_CELL.init(Mutex::new(unsafe { core::mem::transmute::<
+            embassy_stm32::i2c::I2c<'_, embassy_stm32::mode::Async>,
+            embassy_stm32::i2c::I2c<'static, embassy_stm32::mode::Async>,
+        >(i2c_instance) }));
 
     // BQ76920 I2C address (7-bit)
     let bq76920_address = 0x08;
     // BQ25730 I2C address (7-bit)
     let bq25730_address = 0x6B; // Confirmed from bq25730.pdf
-    // Pass the I2C peripheral instance by value, wrapped in I2cAsynch
-    let mut bq: Bq769x0<_, bq769x0_async_rs::Enabled, 5> = {
-        let i2c_bus = I2cDevice::new(i2c_bus_mutex);
-        Bq769x0::new(i2c_bus, bq76920_address)
-    };
-    let mut bq25730 = {
-        let i2c_bus = I2cDevice::new(i2c_bus_mutex);
-        Bq25730::new(i2c_bus, bq25730_address, 4)
-    };
-
     // INA226 I2C address (7-bit)
     let ina226_address = 0x40;
-    let mut ina226 = {
-        let i2c_bus = I2cDevice::new(i2c_bus_mutex);
-        INA226::new(i2c_bus, ina226_address)
-    };
 
-    info!("BQ76920 driver instance created.");
+    // Spawn device tasks
+    let _bq25730_i2c_bus = I2cDevice::new(i2c_bus_mutex);
+    spawner.spawn(bq25730_task::bq25730_task(
+        I2cDevice::new(i2c_bus_mutex), // Create a new I2cDevice for the task using the static mutex
+        bq25730_address,
+        bq25730_alerts_publisher,
+        bq25730_measurements_publisher, // Pass the BQ25730 measurements publisher
+    )).unwrap();
 
-    // --- BQ76920 Initialization Sequence ---
+    spawner.spawn(ina226_task::ina226_task(
+        I2cDevice::new(i2c_bus_mutex), // Create a new I2cDevice for the task using the static mutex
+        ina226_address,
+        ina226_measurements_publisher,
+    )).unwrap();
 
-    // Note: Waking from SHIP mode is typically handled by external hardware (TS1 pin).
-    // Assuming the chip is already in NORMAL mode or has been woken up.
+    let bq76920_i2c_bus = I2cDevice::new(i2c_bus_mutex); // Create a new I2cDevice for the task using the static mutex
 
-    // Define battery configuration
-    let battery_config = BatteryConfig::default();
+    spawner.spawn(bq76920_task::bq76920_task(
+        bq76920_i2c_bus,
+        bq76920_address,
+        bq76920_alerts_publisher,
+        bq76920_measurements_publisher, // Pass the BQ76920 measurements publisher
+    )).unwrap();
 
-    info!("Applying battery configuration...");
-    if let Err(e) = bq.set_config(&battery_config).await {
-        error!("Failed to apply battery configuration: {:?}", e);
-        core::panic!("Failed to apply battery configuration: {:?}", e);
-    }
-    info!("Battery configuration applied successfully.");
-
-    // Set CC_CFG register to 0x19 for optimal performance
-    info!("Setting CC_CFG register to 0x19...");
-    if let Err(e) = bq.write_register(Register::CcCfg, 0x19).await {
-        error!("Failed to set CC_CFG: {:?}", e);
-        core::panic!("Failed to set CC_CFG: {:?}", e);
-    }
-    info!("CC_CFG set successfully.");
-
-    // 4. Clear initial fault flags
-    // Write 0xFF to SYS_STAT to clear all flags
-    info!("Clearing initial status flags (writing 0xFF to SYS_STAT)...");
-    if let Err(e) = bq.clear_status_flags(0xFF).await {
-        error!("Failed to clear status flags: {:?}", e);
-        core::panic!("Failed to clear status flags: {:?}", e);
-    }
-    info!("Initial status flags cleared successfully.");
-
-    info!("BQ76920 initialization complete.");
-
-    // --- Main Loop for Data Acquisition ---
-    let sense_resistor = ElectricalResistance::new::<uom::si::electrical_resistance::milliohm>(3.0); // Your sense resistor value in milliOhms
-
-    // Declare variables to hold read data, initialized to None
-    let mut _voltages = None;
-    let mut _temps = None;
-    let mut _current = None;
-    let mut _system_status = None;
-    let mut _mos_status = None;
-    let mut _bq25730_measurements = None;
+    // The main loop is no longer needed here as device logic is in separate tasks
+    // This task can now just idle or perform other high-level coordination if needed.
 
     loop {
-        info!("--- Reading BQ76920 Data ---");
-
-        /*
-        // Ensure CC_EN is enabled in SYS_CTRL2
-        info!("Ensuring CC_EN is enabled in SYS_CTRL2...");
-        let sys_ctrl2_val = bq.read_register(Register::SysCtrl2).await.unwrap_or(0);
-        if let Err(e) = bq
-            // .write_register(Register::SysCtrl2, sys_ctrl2_val | SYS_CTRL2_CC_EN).await; // Temporarily commented out
-        {
-            // The write_register call is commented out, so this block will not be executed.
-            // However, if it were active, the error handling would be here.
-            // error!("Failed to enable CC_EN: {:?}", e); // Keep the error message for when the code is uncommented
-        }
-        info!("CC_EN enable attempt complete.");
-        */
-
-        // --- Reading INA226 Data ---
-        info!("--- Reading INA226 Data ---");
-
-        // --- Reading BQ25730 Data ---
-        info!("--- Reading BQ25730 Data ---");
-
-        // Read Charger Status
-        let bq25730_charger_status = match bq25730.read_charger_status().await {
-            Ok(status) => {
-                info!("BQ25730 Charger Status:");
-                info!("  Input Present: {}", status.status_flags.contains(bq25730_async_rs::registers::ChargerStatusFlags::STAT_AC));
-                info!("  ICO Complete: {}", status.status_flags.contains(bq25730_async_rs::registers::ChargerStatusFlags::ICO_DONE));
-                info!("  In VAP Mode: {}", status.status_flags.contains(bq25730_async_rs::registers::ChargerStatusFlags::IN_VAP));
-                info!("  In VINDPM: {}", status.status_flags.contains(bq25730_async_rs::registers::ChargerStatusFlags::IN_VINDPM));
-                info!("  In IIN_DPM: {}", status.status_flags.contains(bq25730_async_rs::registers::ChargerStatusFlags::IN_IIN_DPM));
-                info!("  In Fast Charge: {}", status.status_flags.contains(bq25730_async_rs::registers::ChargerStatusFlags::IN_FCHRG));
-                info!("  In Pre-Charge: {}", status.status_flags.contains(bq25730_async_rs::registers::ChargerStatusFlags::IN_PCHRG));
-                info!("  In OTG Mode: {}", status.status_flags.contains(bq25730_async_rs::registers::ChargerStatusFlags::IN_OTG));
-                info!("  Fault ACOV: {}", status.fault_flags.contains(bq25730_async_rs::registers::ChargerStatusFaultFlags::FAULT_ACOV));
-                info!("  Fault BATOC: {}", status.fault_flags.contains(bq25730_async_rs::registers::ChargerStatusFaultFlags::FAULT_BATOC));
-                info!("  Fault ACOC: {}", status.fault_flags.contains(bq25730_async_rs::registers::ChargerStatusFaultFlags::FAULT_ACOC));
-                info!("  Fault SYSOVP: {}", status.fault_flags.contains(bq25730_async_rs::registers::ChargerStatusFaultFlags::FAULT_SYSOVP));
-                info!("  Fault VSYS_UVP: {}", status.fault_flags.contains(bq25730_async_rs::registers::ChargerStatusFaultFlags::FAULT_VSYS_UVP));
-                info!(
-                    "  Fault Force Converter Off: {}",
-                    status.fault_flags.contains(bq25730_async_rs::registers::ChargerStatusFaultFlags::FAULT_FORCE_CONVERTER_OFF)
-                );
-                info!("  Fault OTG OVP: {}", status.fault_flags.contains(bq25730_async_rs::registers::ChargerStatusFaultFlags::FAULT_OTG_OVP));
-                info!("  Fault OTG UVP: {}", status.fault_flags.contains(bq25730_async_rs::registers::ChargerStatusFaultFlags::FAULT_OTG_UVP));
-                Some(status)
-            }
-            Err(e) => {
-                error!("Failed to read BQ25730 Charger Status: {:?}", e);
-                None
-            }
-        };
-
-        // Read Prochot Status
-        let bq25730_prochot_status = match bq25730.read_prochot_status().await {
-            Ok(status) => {
-                info!("BQ25730 Prochot Status:");
-                info!("  VINDPM Triggered: {}", status.lsb_flags.contains(bq25730_async_rs::registers::ProchotStatusFlags::STAT_VINDPM));
-                info!("  Comparator Triggered: {}", status.lsb_flags.contains(bq25730_async_rs::registers::ProchotStatusFlags::STAT_COMP));
-                info!("  ICRIT Triggered: {}", status.lsb_flags.contains(bq25730_async_rs::registers::ProchotStatusFlags::STAT_ICRIT));
-                info!("  INOM Triggered: {}", status.lsb_flags.contains(bq25730_async_rs::registers::ProchotStatusFlags::STAT_INOM));
-                info!("  IDCHG1 Triggered: {}", status.lsb_flags.contains(bq25730_async_rs::registers::ProchotStatusFlags::STAT_IDCHG1));
-                info!("  VSYS Triggered: {}", status.lsb_flags.contains(bq25730_async_rs::registers::ProchotStatusFlags::STAT_VSYS));
-                info!("  Battery Removal: {}", status.lsb_flags.contains(bq25730_async_rs::registers::ProchotStatusFlags::STAT_BAT_REMOVAL));
-                info!("  Adapter Removal: {}", status.lsb_flags.contains(bq25730_async_rs::registers::ProchotStatusFlags::STAT_ADPT_REMOVAL));
-                // info!("  VAP Fail: {}", status.msb_flags.contains(bq25730_async_rs::registers::ProchotStatusMsbFlags::STAT_VAP_FAIL)); // STAT_VAP_FAIL not found in new version
-                // info!("  Exit VAP: {}", status.msb_flags.contains(bq25730_async_rs::registers::ProchotStatusMsbFlags::STAT_EXIT_VAP)); // STAT_EXIT_VAP not found in new version
-                // info!("  IDCHG2 Triggered: {}", status.lsb_flags.contains(bq25730_async_rs::registers::ProchotOption1Flags::PP_IDCHG2)); // STAT_IDCHG2 not found in new version
-                // info!("  PTM Operation: {}", status.lsb_flags.contains(bq25730_async_rs::registers::ChargeOption3Flags::EN_PTM)); // STAT_PTM not found in new version
-                Some(status)
-            }
-            Err(e) => {
-                error!("Failed to read BQ25730 Prochot Status: {:?}", e);
-                None
-            }
-        };
-
-        // 更新并发布 BQ25730 告警信息（包含 Prochot Status）
-        if let (Some(charger_status), Some(prochot_status)) =
-            (bq25730_charger_status, bq25730_prochot_status)
-        {
-            let alerts = crate::data_types::Bq25730Alerts {
-                charger_status,
-                prochot_status,
-            };
-            bq25730_alerts_publisher.publish_immediate(alerts);
-        }
-
-        // Read ADC Measurements for BQ25730
-        let bq25730_adc_measurements = match bq25730.read_adc_measurements().await {
-            Ok(measurements) => {
-                info!("BQ25730 ADC Measurements:");
-                info!("  PSYS: {} mW", measurements.psys.0);
-                info!("  VBUS: {} mV", measurements.vbus.0);
-                info!("  IDCHG: {} mA", measurements.idchg.0);
-                info!("  ICHG: {} mA", measurements.ichg.0);
-                info!("  CMPIN: {} mV", measurements.cmpin.0);
-                info!("  IIN: {} mA", measurements.iin.milliamps);
-                info!("  VBAT: {} mV", measurements.vbat.0);
-                info!("  VSYS: {} mV", measurements.vsys.0);
-                Some(measurements)
-            }
-            Err(e) => {
-                error!("Failed to read BQ25730 ADC Measurements: {:?}", e);
-                None
-            }
-        };
-
-        // Construct BQ25730 measurements
-        let measurements = crate::data_types::Bq25730Measurements {
-            adc_measurements: bq25730_adc_measurements.unwrap_or_else(|| {
-                bq25730_async_rs::data_types::AdcMeasurements {
-                    psys: bq25730_async_rs::data_types::AdcPsys::from_u8(
-                        bq25730_adc_measurements
-                            .as_ref()
-                            .map_or(0, |m| (m.psys.0 / 12) as u8), // Convert back to raw for default
-                    ),
-                    vbus: bq25730_async_rs::data_types::AdcVbus::from_u8(
-                        bq25730_adc_measurements
-                            .as_ref()
-                            .map_or(0, |m| (m.vbus.0 / 96) as u8), // Convert back to raw for default
-                    ),
-                    idchg: bq25730_async_rs::data_types::AdcIdchg::from_u8(
-                        bq25730_adc_measurements
-                            .as_ref()
-                            .map_or(0, |m| (m.idchg.0 / 512) as u8), // Convert back to raw for default
-                    ),
-                    ichg: bq25730_async_rs::data_types::AdcIchg::from_u8(
-                        bq25730_adc_measurements
-                            .as_ref()
-                            .map_or(0, |m| (m.ichg.0 / 128) as u8), // Convert back to raw for default
-                    ),
-                    cmpin: bq25730_async_rs::data_types::AdcCmpin::from_u8(
-                        bq25730_adc_measurements
-                            .as_ref()
-                            .map_or(0, |m| (m.cmpin.0 / 12) as u8), // Convert back to raw for default
-                    ),
-                    iin: bq25730_async_rs::data_types::AdcIin::from_u8(
-                        bq25730_adc_measurements
-                            .as_ref()
-                            .map_or(0, |m| (m.iin.milliamps / 100) as u8), // Convert back to raw for default
-                        true, // Assuming 5mOhm sense resistor for default
-                    ),
-                    vbat: bq25730_async_rs::data_types::AdcVbat::from_register_value(
-                        0, // LSB is not used in from_register_value
-                        bq25730_adc_measurements
-                            .as_ref()
-                            .map_or(0, |m| (m.vbat.0 / 64) as u8), // Convert back to raw for default
-                        0, // OFFSET_MV is 0
-                    ),
-                    vsys: bq25730_async_rs::data_types::AdcVsys::from_register_value(
-                        0, // LSB is not used in from_register_value
-                        bq25730_adc_measurements
-                            .as_ref()
-                            .map_or(0, |m| (m.vsys.0 / 64) as u8), // Convert back to raw for default
-                        0, // OFFSET_MV is 0
-                    ),
-                }
-            }),
-            // Add other BQ25730 measurement fields here when implemented
-        };
-        _bq25730_measurements = Some(measurements);
-
-        // Read Cell Voltages
-        match bq.read_cell_voltages().await {
-            Ok(v) => {
-                info!("Cell Voltages (mV):");
-                // BQ76920 supports up to 5 cells
-                for _i in 0..5 {
-                    // Get voltage in millivolts as i32 for printing
-                    info!(
-                        "  Cell {}: {} mV",
-                        _i + 1,
-                        v.voltages[_i].get::<uom::si::electric_potential::millivolt>()
-                    );
-                }
-                _voltages = Some(v); // Assign to the outer variable
-            }
-            Err(e) => {
-                error!("Failed to read cell voltages: {:?}", e);
-                _voltages = None; // Assign None on error
-            }
-        }
-
-        // Read Pack Voltage
-        match bq.read_pack_voltage().await {
-            Ok(voltage) => {
-                info!(
-                    "Pack Voltage: {} mV",
-                    voltage.get::<uom::si::electric_potential::millivolt>()
-                );
-            }
-            Err(e) => {
-                error!("Failed to read pack voltage: {:?}", e);
-            }
-        }
-
-        // Read Temperatures
-        // Read Temperatures
-        match bq.read_temperatures().await {
-            Ok(sensor_readings) => {
-                // Store the original sensor readings
-                _temps = Some(sensor_readings);
-
-                // Convert sensor readings to temperature data for display
-                match sensor_readings.into_temperature_data(None) {
-                    // Assuming internal sensor, no NTC params
-                    Ok(temp_data) => {
-                        info!("Temperatures (Celsius):");
-                        info!(
-                            "  TS1: {} °C",
-                            temp_data
-                                .ts1
-                                .get::<uom::si::temperature_interval::degree_celsius>()
-                        );
-                        if let Some(ts2) = temp_data.ts2 {
-                            info!(
-                                "  TS2: {} °C",
-                                ts2.get::<uom::si::temperature_interval::degree_celsius>()
-                            );
-                        }
-                        if let Some(ts3) = temp_data.ts3 {
-                            info!(
-                                "  TS3: {} °C",
-                                ts3.get::<uom::si::temperature_interval::degree_celsius>()
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        error!(
-                            "Failed to convert temperature sensor readings for display: {}",
-                            e
-                        );
-                    }
-                }
-            }
-            Err(e) => {
-                error!("Failed to read temperature sensor readings: {:?}", e);
-                _temps = None; // Assign None on error
-            }
-        }
-
-        // Read Current
-        match bq.read_current().await {
-            Ok(c) => {
-                let current_ma = bq.convert_raw_cc_to_current_ma(c.raw_cc, sense_resistor);
-                info!(
-                    "Raw CC: {}, Current: {} mA",
-                    c.raw_cc,
-                    current_ma.get::<uom::si::electric_current::milliampere>()
-                );
-                _current = Some(current_ma); // Assign to the outer variable, now as ElectricCurrent
-            }
-            Err(e) => {
-                error!("Failed to read current: {:?}", e);
-                _current = None; // Assign None on error
-            }
-        }
-
-        // Read System Status
-        match bq.read_status().await {
-            Ok(status) => {
-                info!("System Status:");
-                info!("  CC Ready: {}", status.0.contains(bq769x0_async_rs::registers::SysStatFlags::CC_READY));
-                // info!("  Overtemperature: {}", status.0.contains(bq769x0_async_rs::registers::SysStatFlags::OVR_TEMP)); // Removed OVR_TEMP check
-                info!("  Undervoltage (UV): {}", status.0.contains(bq769x0_async_rs::registers::SysStatFlags::UV));
-                info!("  Overvoltage (OV): {}", status.0.contains(bq769x0_async_rs::registers::SysStatFlags::OV));
-                info!("  Short Circuit Discharge (SCD): {}", status.0.contains(bq769x0_async_rs::registers::SysStatFlags::SCD));
-                info!("  Overcurrent Discharge (OCD): {}", status.0.contains(bq769x0_async_rs::registers::SysStatFlags::OCD));
-                info!("  Device X-Ready: {}", status.0.contains(bq769x0_async_rs::registers::SysStatFlags::DEVICE_XREADY));
-                info!("  Override Alert: {}", status.0.contains(bq769x0_async_rs::registers::SysStatFlags::OVRD_ALERT));
-                _system_status = Some(status); // Assign to the outer variable
-
-                // Clear status flags after reading
-                // Only clear flags that are set
-                let flags_to_clear = (status.0.contains(bq769x0_async_rs::registers::SysStatFlags::CC_READY) as u8 * bq769x0_async_rs::registers::SysStatFlags::CC_READY.bits())
-                    // | (status.0.contains(bq769x0_async_rs::registers::SysStatFlags::OVR_TEMP) as u8 * bq769x0_async_rs::registers::SysStatFlags::OVR_TEMP.bits()) // Removed OVR_TEMP check
-                    | (status.0.contains(bq769x0_async_rs::registers::SysStatFlags::DEVICE_XREADY) as u8 * bq769x0_async_rs::registers::SysStatFlags::DEVICE_XREADY.bits())
-                    | (status.0.contains(bq769x0_async_rs::registers::SysStatFlags::OVRD_ALERT) as u8 * bq769x0_async_rs::registers::SysStatFlags::OVRD_ALERT.bits())
-                    | (status.0.contains(bq769x0_async_rs::registers::SysStatFlags::UV) as u8 * bq769x0_async_rs::registers::SysStatFlags::UV.bits())
-                    | (status.0.contains(bq769x0_async_rs::registers::SysStatFlags::OV) as u8 * bq769x0_async_rs::registers::SysStatFlags::OV.bits())
-                    | (status.0.contains(bq769x0_async_rs::registers::SysStatFlags::SCD) as u8 * bq769x0_async_rs::registers::SysStatFlags::SCD.bits())
-                    | (status.0.contains(bq769x0_async_rs::registers::SysStatFlags::OCD) as u8 * bq769x0_async_rs::registers::SysStatFlags::OCD.bits());
-
-                if flags_to_clear != 0 {
-                    if let Err(e) = bq.clear_status_flags(flags_to_clear).await {
-                        error!("Failed to clear status flags: {:?}", e);
-                    } else {
-                        info!("Cleared status flags: {:#010b}", flags_to_clear);
-                    }
-                }
-            }
-            Err(e) => {
-                error!("Failed to read system status: {:?}", e);
-                _system_status = None; // Assign None on error
-            }
-        }
-
-        // Read SYS_CTRL2 for MOS status
-        match bq.read_register(Register::SysCtrl2).await {
-            Ok(sys_ctrl2_byte) => {
-                let mos = bq769x0_async_rs::data_types::MosStatus::new(sys_ctrl2_byte);
-                info!("MOS Status:");
-                info!("  Charge ON: {}", mos.0.contains(bq769x0_async_rs::registers::SysCtrl2Flags::CHG_ON));
-                info!("  Discharge ON: {}", mos.0.contains(bq769x0_async_rs::registers::SysCtrl2Flags::DSG_ON));
-                _mos_status = Some(mos); // Assign to the outer variable
-            }
-            Err(e) => {
-                error!("Failed to read SYS_CTRL2 for MOS status: {:?}", e);
-                _mos_status = None; // Assign None on error
-            }
-        }
-
-        // 发布 BQ76920 告警信息
-        if let Ok(status) = bq.read_status().await {
-            let alerts = crate::data_types::Bq76920Alerts {
-                system_status: status,
-            };
-            bq76920_alerts_publisher.publish_immediate(alerts);
-        }
-
-        info!("----------------------------");
-
-        // 构造并发布聚合测量数据
-        // 假设 voltages, temps, current, system_status, mos_status and bq25730_measurements variables were successfully obtained
-        // If reading failed, handle accordingly, e.g., use default values or skip publishing
-        let all_measurements = crate::data_types::AllMeasurements {
-            bq25730: crate::data_types::Bq25730Measurements {
-                adc_measurements: bq25730_adc_measurements.unwrap_or_else(|| {
-                    bq25730_async_rs::data_types::AdcMeasurements {
-                        psys: bq25730_async_rs::data_types::AdcPsys::from_u8(
-                            bq25730_adc_measurements
-                                .as_ref()
-                                .map_or(0, |m| (m.psys.0 / 12) as u8), // Convert back to raw for default
-                        ),
-                        vbus: bq25730_async_rs::data_types::AdcVbus::from_u8(
-                            bq25730_adc_measurements
-                                .as_ref()
-                                .map_or(0, |m| (m.vbus.0 / 96) as u8), // Convert back to raw for default
-                        ),
-                        idchg: bq25730_async_rs::data_types::AdcIdchg::from_u8(
-                            bq25730_adc_measurements
-                                .as_ref()
-                                .map_or(0, |m| (m.idchg.0 / 512) as u8), // Convert back to raw for default
-                        ),
-                        ichg: bq25730_async_rs::data_types::AdcIchg::from_u8(
-                            bq25730_adc_measurements
-                                .as_ref()
-                                .map_or(0, |m| (m.ichg.0 / 128) as u8), // Convert back to raw for default
-                        ),
-                        cmpin: bq25730_async_rs::data_types::AdcCmpin::from_u8(
-                            bq25730_adc_measurements
-                                .as_ref()
-                                .map_or(0, |m| (m.cmpin.0 / 12) as u8), // Convert back to raw for default
-                        ),
-                        iin: bq25730_async_rs::data_types::AdcIin::from_u8(
-                            bq25730_adc_measurements
-                                .as_ref()
-                                .map_or(0, |m| (m.iin.milliamps / 100) as u8), // Convert back to raw for default
-                            true, // Assuming 5mOhm sense resistor for default
-                        ),
-                        vbat: bq25730_async_rs::data_types::AdcVbat::from_register_value(
-                            0, // LSB is not used in from_register_value
-                            bq25730_adc_measurements
-                                .as_ref()
-                                .map_or(0, |m| (m.vbat.0 / 64) as u8), // Convert back to raw for default
-                            0, // OFFSET_MV is 0
-                        ),
-                        vsys: bq25730_async_rs::data_types::AdcVsys::from_register_value(
-                            0, // LSB is not used in from_register_value
-                            bq25730_adc_measurements
-                                .as_ref()
-                                .map_or(0, |m| (m.vsys.0 / 64) as u8), // Convert back to raw for default
-                            0, // OFFSET_MV is 0
-                        ),
-                    }
-                }),
-            },
-            bq76920: crate::data_types::Bq76920Measurements {
-                core_measurements: bq769x0_async_rs::data_types::Bq76920Measurements {
-                    cell_voltages: _voltages
-                        .unwrap_or_else(bq769x0_async_rs::data_types::CellVoltages::new),
-                    temperatures: _temps.unwrap_or_else(
-                        bq769x0_async_rs::data_types::TemperatureSensorReadings::new,
-                    ),
-                    current: _current.unwrap_or_else(|| {
-                        uom::si::electric_current::ElectricCurrent::new::<
-                            uom::si::electric_current::milliampere,
-                        >(0.0)
-                    }),
-                    system_status: _system_status
-                        .unwrap_or_else(|| bq769x0_async_rs::data_types::SystemStatus::new(0)),
-                    mos_status: _mos_status
-                        .unwrap_or_else(|| bq769x0_async_rs::data_types::MosStatus::new(0)), // Use default if read failed
-                },
-            },
-            ina226: { // Add INA226 measurements
-                let voltage_f64 = ina226.bus_voltage_millivolts().await.unwrap_or(0.0);
-                let current_amps_f64 = ina226.current_amps().await.unwrap_or(None);
-                let current_f64 = current_amps_f64.map_or(0.0, |c| c * 1000.0); // Convert to mA or default to 0.0
-
-                let voltage: f32 = voltage_f64 as f32;
-                let current: f32 = current_f64 as f32;
-                let power: f32 = (voltage * current / 1000.0) as f32; // Calculate power (V * I / 1000 for mW if V in mV, I in mA)
-
-                crate::data_types::Ina226Measurements {
-                    voltage,
-                    current,
-                    power,
-                }
-            },
-        };
-
-        measurements_publisher.publish_immediate(all_measurements);
-
-        // Wait for 1 second
         Timer::after(Duration::from_secs(1)).await;
     }
 }

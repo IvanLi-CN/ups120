@@ -1,45 +1,61 @@
-# 在 `src/shared.rs` 中添加 INA226 PubSub 相关代码的计划
+# 设备逻辑拆分到独立的 Embassy 任务计划
 
-## 目标
+**目标：** 将 Bq25730、Ina226 和 Bq76920 这三个设备的逻辑拆分到独立的 Embassy 任务中，并分别存放在以硬件命名的文件中，以更好地管理设备状态和错误处理。
 
-在项目中集成 INA226 测量数据的 PubSub 机制，以便在不同模块间共享 INA226 的测量数据。
+**计划步骤：**
 
-## 计划步骤
+1.  **分析现有实现：**
+    *   仔细阅读 `src/main.rs` 中当前处理 Bq25730、Ina226 和 Bq76920 的代码段。
+    *   理解设备初始化、数据读取、状态检查和错误处理是如何在当前的 `main` 异步函数中实现的。
+    *   分析 `src/shared.rs` 中定义的 pub/sub 机制，确认其如何用于设备数据和警报的共享。
 
-1. **定义 INA226 测量数据类型 (`src/data_types.rs`)：**
-    * 在 `src/data_types.rs` 中创建一个新的结构体 `Ina226Measurements`，用于存储 INA226 的电压、电流和功率测量数据。
-    * 为该结构体添加必要的派生宏，如 `Debug`, `Copy`, `Clone`, `PartialEq`, `defmt::Format`, `binrw::binrw`。
-    * 包含电压、电流和功率的字段，可能会使用 `uom` 类型来表示单位。
+2.  **创建新的设备模块和文件：**
+    *   在 `src/` 目录下创建新的文件：
+        *   `src/bq25730_task.rs`
+        *   `src/ina226_task.rs`
+        *   `src/bq76920_task.rs`
+    *   在这些文件中，分别定义对应设备的异步任务函数（例如 `bq25730_task`）。
 
-2. **更新 `AllMeasurements` 结构体 (`src/data_types.rs`)：**
-    * 在 `src/data_types.rs` 的 `AllMeasurements` 结构体中添加一个 `Ina226Measurements` 类型的字段。
-    * 更新 `AllMeasurements` 的 `Format` 实现，以包含新的 INA226 数据。
+3.  **重构设备逻辑：**
+    *   将 `src/main.rs` 中与特定设备相关的初始化代码、I2C 通信（或其他总线通信）逻辑、数据解析、状态更新和错误处理代码，迁移到相应的设备任务文件中。
+    *   每个任务文件将包含该设备的驱动实例、状态变量以及任务函数。
+    *   在 `src/lib.rs` 或 `src/main.rs` 中声明这些新的模块。
 
-3. **添加 INA226 PubSub 通道 (`src/shared.rs`)：**
-    * 在 `src/shared.rs` 中定义 INA226 PubSub 的深度和读者数量常量，类似于现有的常量。
-    * 声明一个 `static StaticCell` 用于 INA226 的 `PubSubChannel`，使用新的 `Ina226Measurements` 数据类型。
+4.  **更新 `main` 函数：**
+    *   修改 `src/main.rs` 中的 `main` 异步函数。
+    *   `main` 函数将保留系统级别的初始化（如时钟、外设配置）。
+    *   从新创建的模块中导入设备任务函数。
+    *   使用 embassy 的 `spawner` 来启动（spawn）导入的设备任务函数。
+    *   `main` 函数在启动任务后可以进入一个空循环或执行其他高级协调逻辑（如果需要）。
 
-4. **添加 INA226 PubSub 类型别名 (`src/shared.rs`)：**
-    * 在 `src/shared.rs` 中定义 `Ina226MeasurementsPublisher` 和 `Ina226MeasurementsSubscriber` 类型别名，类似于现有的别名。
+5.  **维护任务间通信：**
+    *   确保新的设备任务继续使用 `src/shared.rs` 中定义的 pub/sub 机制来发布测量数据和警报。
+    *   可能需要在设备任务文件中引入 `src/shared.rs` 中的相关定义。
+    *   其他需要这些数据的任务（例如，处理 USB 通信的任务）将继续通过订阅相应的 pub/sub 通道来获取数据。
 
-5. **更新 `init_pubsubs` 函数 (`src/shared.rs`)：**
-    * 在 `src/shared.rs` 的 `init_pubsubs` 函数中初始化 INA226 的 `PubSubChannel`。
-    * 将 INA226 的发布者和订阅者添加到 `init_pubsubs` 函数的返回值元组中。
-    * 相应地更新函数的签名和返回类型。
+6.  **增强错误处理：**
+    *   在每个设备任务文件内部实现更精细的错误处理逻辑。
+    *   当设备通信失败或检测到异常状态时，任务可以记录错误、尝试恢复操作，或者通过 pub/sub 机制发布错误事件，以便其他任务能够感知并作出响应。
 
-## 计划图示
+7.  **测试：**
+    *   编写或修改测试用例，验证每个设备任务能够独立正确地初始化和运行。
+    *   测试任务之间通过 pub/sub 进行数据通信的正确性。
+    *   模拟设备错误情况，验证错误处理逻辑是否按预期工作。
+
+**计划流程图：**
 
 ```mermaid
 graph TD
-    A[src/data_types.rs] --> B{添加 Ina226Measurements 结构体};
-    A --> C{更新 AllMeasurements 结构体};
-    A --> D{更新 AllMeasurements Format 实现};
-    E[src/shared.rs] --> F{添加 INA226 PubSub 常量};
-    E --> G{添加 INA226 PubSub StaticCell};
-    E --> H{添加 INA226 PubSub 类型别名};
-    E --> I{更新 init_pubsubs 函数};
-    B --> C;
-    C --> D;
-    F --> G;
-    G --> I;
-    H --> I;
+    A[系统初始化] --> B(启动 bq25730_task)
+    A --> C(启动 ina2226_task)
+    A --> D(启动 bq76920_task)
+    B --> B1{bq25730_task.rs 逻辑}
+    C --> C1{ina226_task.rs 逻辑}
+    D --> D1{bq76920_task.rs 逻辑}
+    B1 --> E[发布 Bq25730 数据/警报]
+    C1 --> F[发布 Ina226 数据]
+    D1 --> G[发布 Bq76920 数据/警报]
+    E --> H(Pub/Sub)
+    F --> H
+    G --> H
+    H --> I[其他任务 (例如 USB)]

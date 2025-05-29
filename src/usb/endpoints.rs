@@ -66,21 +66,41 @@ impl<'d, D: Driver<'d>> UsbEndpoints<'d, D> {
         Ok(cmd)
     }
 
-    pub async fn process_command(&mut self, command: UsbData) -> Result<(), EndpointError> {
+    pub async fn send_response(&mut self, data: UsbData) -> Result<(), EndpointError> {
+        let mut writer = Cursor::new(&mut self.write_buffer[..]);
+        data.write_be(&mut writer)
+            .map_err(|_| EndpointError::BufferOverflow)?;
+        let len = writer.position() as usize;
+        defmt::info!("固件发送响应原始字节: {:x}", &self.write_buffer[..len]);
+
+        let mut cur = 0;
+        let max_packet = 64; // Assuming max packet size for interrupt endpoint
+        while cur < len {
+            let size = core::cmp::min(len - cur, max_packet);
+            self.response_write_ep
+                .write(&self.write_buffer[cur..(cur + size)])
+                .await?;
+            cur += size;
+        }
+        Ok(())
+    }
+
+    pub async fn process_command(&mut self, command: UsbData, current_measurements: &AllMeasurements<5>) -> Result<(), EndpointError> {
         match command {
             UsbData::SubscribeStatus => {
                 self.status_subscription_active = true;
                 defmt::info!("Status subscription active");
-                // Optionally send a response to confirm subscription
-                // let response = UsbData::StatusResponse(...);
-                // self.send_response(response).await?;
+                // Send a response to confirm subscription with current data
+                let response = UsbData::StatusResponse(current_measurements.clone()); // Clone because AllMeasurements is not Copy
+                if let Err(e) = self.send_response(response).await {
+                    defmt::error!("Failed to send subscription confirmation response: {:?}", e);
+                }
             }
             UsbData::UnsubscribeStatus => {
                 self.status_subscription_active = false;
                 defmt::info!("Status subscription inactive");
                 // Optionally send a response to confirm unsubscription
-                // let response = UsbData::StatusResponse(...);
-                // self.send_response(response).await?;
+                // We could send a simple ACK here if needed, but for now, just logging is sufficient.
             }
             _ => {
                 // Handle unknown commands or other data types if necessary
