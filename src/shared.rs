@@ -44,6 +44,18 @@ static BQ76920_ALERTS_PUBSUB: StaticCell<
         1,
     >,
 > = StaticCell::new();
+// INA226 测量数据 PubSub
+const INA226_MEASUREMENTS_PUBSUB_DEPTH: usize = 4; // 消息队列深度
+const INA226_MEASUREMENTS_PUBSUB_READERS: usize = 2; // 消费者数量
+static INA226_MEASUREMENTS_PUBSUB: StaticCell<
+    PubSubChannel<
+        CriticalSectionRawMutex,
+        crate::data_types::Ina226Measurements,
+        INA226_MEASUREMENTS_PUBSUB_DEPTH,
+        INA226_MEASUREMENTS_PUBSUB_READERS,
+        1,
+    >,
+> = StaticCell::new();
 
 pub type MeasurementsPublisher<'a, const N: usize> = Publisher<
     'a,
@@ -95,6 +107,22 @@ pub type Bq76920AlertsSubscriber<'a> = Subscriber<
     BQ76920_ALERTS_PUBSUB_READERS,
     1,
 >;
+pub type Ina226MeasurementsPublisher<'a> = Publisher<
+    'a,
+    CriticalSectionRawMutex,
+    crate::data_types::Ina226Measurements,
+    INA226_MEASUREMENTS_PUBSUB_DEPTH,
+    INA226_MEASUREMENTS_PUBSUB_READERS,
+    1,
+>;
+pub type Ina226MeasurementsSubscriber<'a> = Subscriber<
+    'a,
+    CriticalSectionRawMutex,
+    crate::data_types::Ina226Measurements,
+    INA226_MEASUREMENTS_PUBSUB_DEPTH,
+    INA226_MEASUREMENTS_PUBSUB_READERS,
+    1,
+>;
 
 // 初始化 PubSubChannel 实例的函数
 pub fn init_pubsubs() -> (
@@ -105,6 +133,8 @@ pub fn init_pubsubs() -> (
     Bq25730AlertsSubscriber<'static>,
     Bq76920AlertsPublisher<'static>,
     Bq76920AlertsSubscriber<'static>,
+    Ina226MeasurementsPublisher<'static>,
+    Ina226MeasurementsSubscriber<'static>,
 ) {
     let measurements_pubsub: &'static PubSubChannel<
         CriticalSectionRawMutex,
@@ -127,6 +157,13 @@ pub fn init_pubsubs() -> (
         BQ76920_ALERTS_PUBSUB_READERS,
         1,
     > = BQ76920_ALERTS_PUBSUB.init(PubSubChannel::new());
+    let ina226_measurements_pubsub: &'static PubSubChannel<
+        CriticalSectionRawMutex,
+        crate::data_types::Ina226Measurements,
+        INA226_MEASUREMENTS_PUBSUB_DEPTH,
+        INA226_MEASUREMENTS_PUBSUB_READERS,
+        1,
+    > = INA226_MEASUREMENTS_PUBSUB.init(PubSubChannel::new());
 
     (
         measurements_pubsub.publisher().unwrap(),
@@ -136,5 +173,7 @@ pub fn init_pubsubs() -> (
         bq25730_alerts_pubsub.subscriber().unwrap(),
         bq76920_alerts_pubsub.publisher().unwrap(),
         bq76920_alerts_pubsub.subscriber().unwrap(),
+        ina226_measurements_pubsub.publisher().unwrap(),
+        ina226_measurements_pubsub.subscriber().unwrap(),
     )
 }

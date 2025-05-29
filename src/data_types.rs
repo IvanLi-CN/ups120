@@ -34,6 +34,14 @@ pub struct Bq76920Measurements<const N: usize> {
 pub struct Bq76920Alerts {
     pub system_status: SystemStatus,
 }
+/// INA226 测量数据
+#[derive(Debug, Copy, Clone, PartialEq, defmt::Format)]
+#[binrw]
+pub struct Ina226Measurements {
+    pub voltage: f32,
+    pub current: f32,
+    pub power: f32, // 假设需要功率，如果不需要可以调整
+}
 
 /// 聚合所有设备的测量数据
 #[derive(Debug, Copy, Clone, PartialEq)]
@@ -41,6 +49,7 @@ pub struct Bq76920Alerts {
 pub struct AllMeasurements<const N: usize> {
     pub bq25730: Bq25730Measurements,
     pub bq76920: Bq76920Measurements<N>,
+    pub ina226: Ina226Measurements,
 }
 
 impl<const N: usize> Format for AllMeasurements<N> {
@@ -59,7 +68,7 @@ impl<const N: usize> Format for AllMeasurements<N> {
         }
         defmt::write!(
             fmt,
-            "], temperatures: {{ ts1: {:?}, is_thermistor: {} }}, current: {}, system_status: {{ cc_ready: {}, device_xready: {}, ovrd_alert: {}, uv: {}, ov: {}, scd: {}, ocd: {} }}, mos_status: {{ charge_on: {}, discharge_on: {} }} }} }}",
+            "], temperatures: {{ ts1: {:?}, is_thermistor: {} }}, current: {}, system_status: {{ cc_ready: {}, device_xready: {}, ovrd_alert: {}, uv: {}, ov: {}, scd: {}, ocd: {} }}, mos_status: {{ charge_on: {}, discharge_on: {} }} }}, ina226: {{ voltage: {}, current: {}, power: {} }} }}",
             self.bq76920
                 .core_measurements
                 .temperatures
@@ -112,7 +121,10 @@ impl<const N: usize> Format for AllMeasurements<N> {
                 .core_measurements
                 .mos_status
                 .0
-                .contains(bq769x0_async_rs::registers::SysCtrl2Flags::DSG_ON)
+                .contains(bq769x0_async_rs::registers::SysCtrl2Flags::DSG_ON),
+            self.ina226.voltage,
+            self.ina226.current,
+            self.ina226.power
         );
     }
 }
