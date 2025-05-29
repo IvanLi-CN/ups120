@@ -72,6 +72,7 @@ bq769x0-async-rs = { version = "0.1.1", path = "./bq76920", features = [
 bq25730-async-rs = { version = "0.1.1", path = "./bq25730", features = [
   "async",
   "defmt",
+  "binrw",
 ] }
 
 ina226 = { version = "0.3.0", features = ["async"] }

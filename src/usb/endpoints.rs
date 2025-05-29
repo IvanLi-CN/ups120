@@ -4,7 +4,7 @@ use embassy_usb::Builder;
 use embassy_usb::driver::EndpointError;
 use embassy_usb::driver::{Driver, Endpoint, EndpointIn, EndpointOut};
 
-use crate::shared::AllMeasurements;
+use crate::data_types::AllMeasurements;
 
 #[repr(u8)]
 #[derive(BinRead, BinWrite, Debug, Clone, Copy, defmt::Format)]

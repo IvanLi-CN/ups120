@@ -9,7 +9,8 @@ use embassy_usb::{
 };
 use static_cell::StaticCell;
 
-use crate::shared::{AllMeasurements, MEASUREMENTS_PUBSUB_DEPTH, MEASUREMENTS_PUBSUB_READERS}; // Remove MEASUREMENTS_PUBSUB as it's not directly used here
+use crate::data_types::AllMeasurements;
+use crate::shared::{MEASUREMENTS_PUBSUB_DEPTH, MEASUREMENTS_PUBSUB_READERS}; // Keep other imports from shared
 
 pub mod endpoints;
 

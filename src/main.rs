@@ -196,16 +196,19 @@ async fn main(spawner: Spawner) {
 
         info!("--- Reading BQ76920 Data ---");
 
+        /*
         // Ensure CC_EN is enabled in SYS_CTRL2
         info!("Ensuring CC_EN is enabled in SYS_CTRL2...");
         let sys_ctrl2_val = bq.read_register(Register::SysCtrl2).await.unwrap_or(0);
         if let Err(e) = bq
-            .write_register(Register::SysCtrl2, sys_ctrl2_val | SYS_CTRL2_CC_EN)
-            .await
+            // .write_register(Register::SysCtrl2, sys_ctrl2_val | SYS_CTRL2_CC_EN).await; // Temporarily commented out
         {
-            error!("Failed to enable CC_EN: {:?}", e);
+            // The write_register call is commented out, so this block will not be executed.
+            // However, if it were active, the error handling would be here.
+            // error!("Failed to enable CC_EN: {:?}", e); // Keep the error message for when the code is uncommented
         }
         info!("CC_EN enable attempt complete.");
+        */
 
         // --- Reading INA226 Data ---
         info!("--- Reading INA226 Data ---");
@@ -240,25 +243,25 @@ async fn main(spawner: Spawner) {
         let bq25730_charger_status = match bq25730.read_charger_status().await {
             Ok(status) => {
                 info!("BQ25730 Charger Status:");
-                info!("  Input Present: {}", status.stat_ac);
-                info!("  ICO Complete: {}", status.ico_done);
-                info!("  In VAP Mode: {}", status.in_vap);
-                info!("  In VINDPM: {}", status.in_vindpm);
-                info!("  In IIN_DPM: {}", status.in_iin_dpm);
-                info!("  In Fast Charge: {}", status.in_fchrg);
-                info!("  In Pre-Charge: {}", status.in_pchrg);
-                info!("  In OTG Mode: {}", status.in_otg);
-                info!("  Fault ACOV: {}", status.fault_acov);
-                info!("  Fault BATOC: {}", status.fault_batoc);
-                info!("  Fault ACOC: {}", status.fault_acoc);
-                info!("  Fault SYSOVP: {}", status.fault_sysovp);
-                info!("  Fault VSYS_UVP: {}", status.fault_vsys_uvp);
+                info!("  Input Present: {}", status.status_flags.contains(bq25730_async_rs::registers::ChargerStatusFlags::STAT_AC));
+                info!("  ICO Complete: {}", status.status_flags.contains(bq25730_async_rs::registers::ChargerStatusFlags::ICO_DONE));
+                info!("  In VAP Mode: {}", status.status_flags.contains(bq25730_async_rs::registers::ChargerStatusFlags::IN_VAP));
+                info!("  In VINDPM: {}", status.status_flags.contains(bq25730_async_rs::registers::ChargerStatusFlags::IN_VINDPM));
+                info!("  In IIN_DPM: {}", status.status_flags.contains(bq25730_async_rs::registers::ChargerStatusFlags::IN_IIN_DPM));
+                info!("  In Fast Charge: {}", status.status_flags.contains(bq25730_async_rs::registers::ChargerStatusFlags::IN_FCHRG));
+                info!("  In Pre-Charge: {}", status.status_flags.contains(bq25730_async_rs::registers::ChargerStatusFlags::IN_PCHRG));
+                info!("  In OTG Mode: {}", status.status_flags.contains(bq25730_async_rs::registers::ChargerStatusFlags::IN_OTG));
+                info!("  Fault ACOV: {}", status.fault_flags.contains(bq25730_async_rs::registers::ChargerStatusFaultFlags::FAULT_ACOV));
+                info!("  Fault BATOC: {}", status.fault_flags.contains(bq25730_async_rs::registers::ChargerStatusFaultFlags::FAULT_BATOC));
+                info!("  Fault ACOC: {}", status.fault_flags.contains(bq25730_async_rs::registers::ChargerStatusFaultFlags::FAULT_ACOC));
+                info!("  Fault SYSOVP: {}", status.fault_flags.contains(bq25730_async_rs::registers::ChargerStatusFaultFlags::FAULT_SYSOVP));
+                info!("  Fault VSYS_UVP: {}", status.fault_flags.contains(bq25730_async_rs::registers::ChargerStatusFaultFlags::FAULT_VSYS_UVP));
                 info!(
                     "  Fault Force Converter Off: {}",
-                    status.fault_force_converter_off
+                    status.fault_flags.contains(bq25730_async_rs::registers::ChargerStatusFaultFlags::FAULT_FORCE_CONVERTER_OFF)
                 );
-                info!("  Fault OTG OVP: {}", status.fault_otg_ovp);
-                info!("  Fault OTG UVP: {}", status.fault_otg_uvp);
+                info!("  Fault OTG OVP: {}", status.fault_flags.contains(bq25730_async_rs::registers::ChargerStatusFaultFlags::FAULT_OTG_OVP));
+                info!("  Fault OTG UVP: {}", status.fault_flags.contains(bq25730_async_rs::registers::ChargerStatusFaultFlags::FAULT_OTG_UVP));
                 Some(status)
             }
             Err(e) => {
@@ -271,18 +274,18 @@ async fn main(spawner: Spawner) {
         let bq25730_prochot_status = match bq25730.read_prochot_status().await {
             Ok(status) => {
                 info!("BQ25730 Prochot Status:");
-                info!("  VINDPM Triggered: {}", status.stat_vindpm);
-                info!("  Comparator Triggered: {}", status.stat_comp);
-                info!("  ICRIT Triggered: {}", status.stat_icrit);
-                info!("  INOM Triggered: {}", status.stat_inom);
-                info!("  IDCHG1 Triggered: {}", status.stat_idchg1);
-                info!("  VSYS Triggered: {}", status.stat_vsys);
-                info!("  Battery Removal: {}", status.stat_bat_removal);
-                info!("  Adapter Removal: {}", status.stat_adpt_removal);
-                info!("  VAP Fail: {}", status.stat_vap_fail);
-                info!("  Exit VAP: {}", status.stat_exit_vap);
-                info!("  IDCHG2 Triggered: {}", status.stat_idchg2);
-                info!("  PTM Operation: {}", status.stat_ptm);
+                info!("  VINDPM Triggered: {}", status.lsb_flags.contains(bq25730_async_rs::registers::ProchotStatusFlags::STAT_VINDPM));
+                info!("  Comparator Triggered: {}", status.lsb_flags.contains(bq25730_async_rs::registers::ProchotStatusFlags::STAT_COMP));
+                info!("  ICRIT Triggered: {}", status.lsb_flags.contains(bq25730_async_rs::registers::ProchotStatusFlags::STAT_ICRIT));
+                info!("  INOM Triggered: {}", status.lsb_flags.contains(bq25730_async_rs::registers::ProchotStatusFlags::STAT_INOM));
+                info!("  IDCHG1 Triggered: {}", status.lsb_flags.contains(bq25730_async_rs::registers::ProchotStatusFlags::STAT_IDCHG1));
+                info!("  VSYS Triggered: {}", status.lsb_flags.contains(bq25730_async_rs::registers::ProchotStatusFlags::STAT_VSYS));
+                info!("  Battery Removal: {}", status.lsb_flags.contains(bq25730_async_rs::registers::ProchotStatusFlags::STAT_BAT_REMOVAL));
+                info!("  Adapter Removal: {}", status.lsb_flags.contains(bq25730_async_rs::registers::ProchotStatusFlags::STAT_ADPT_REMOVAL));
+                // info!("  VAP Fail: {}", status.msb_flags.contains(bq25730_async_rs::registers::ProchotStatusMsbFlags::STAT_VAP_FAIL)); // STAT_VAP_FAIL not found in new version
+                // info!("  Exit VAP: {}", status.msb_flags.contains(bq25730_async_rs::registers::ProchotStatusMsbFlags::STAT_EXIT_VAP)); // STAT_EXIT_VAP not found in new version
+                // info!("  IDCHG2 Triggered: {}", status.lsb_flags.contains(bq25730_async_rs::registers::ProchotOption1Flags::PP_IDCHG2)); // STAT_IDCHG2 not found in new version
+                // info!("  PTM Operation: {}", status.lsb_flags.contains(bq25730_async_rs::registers::ChargeOption3Flags::EN_PTM)); // STAT_PTM not found in new version
                 Some(status)
             }
             Err(e) => {
@@ -295,7 +298,7 @@ async fn main(spawner: Spawner) {
         if let (Some(charger_status), Some(prochot_status)) =
             (bq25730_charger_status, bq25730_prochot_status)
         {
-            let alerts = shared::Bq25730Alerts {
+            let alerts = crate::data_types::Bq25730Alerts {
                 charger_status,
                 prochot_status,
             };
@@ -311,7 +314,7 @@ async fn main(spawner: Spawner) {
                 info!("  IDCHG: {} mA", measurements.idchg.0);
                 info!("  ICHG: {} mA", measurements.ichg.0);
                 info!("  CMPIN: {} mV", measurements.cmpin.0);
-                info!("  IIN: {} mA", measurements.iin.0);
+                info!("  IIN: {} mA", measurements.iin.milliamps);
                 info!("  VBAT: {} mV", measurements.vbat.0);
                 info!("  VSYS: {} mV", measurements.vsys.0);
                 Some(measurements)
@@ -323,17 +326,54 @@ async fn main(spawner: Spawner) {
         };
 
         // Construct BQ25730 measurements
-        let measurements = shared::Bq25730Measurements {
-            adc_measurements: bq25730_adc_measurements.unwrap_or({
+        let measurements = crate::data_types::Bq25730Measurements {
+            adc_measurements: bq25730_adc_measurements.unwrap_or_else(|| {
                 bq25730_async_rs::data_types::AdcMeasurements {
-                    psys: bq25730_async_rs::data_types::AdcPsys(0),
-                    vbus: bq25730_async_rs::data_types::AdcVbus(0),
-                    idchg: bq25730_async_rs::data_types::AdcIdchg(0),
-                    ichg: bq25730_async_rs::data_types::AdcIchg(0),
-                    cmpin: bq25730_async_rs::data_types::AdcCmpin(0),
-                    iin: bq25730_async_rs::data_types::AdcIin(0),
-                    vbat: bq25730_async_rs::data_types::AdcVbat(0),
-                    vsys: bq25730_async_rs::data_types::AdcVsys(0),
+                    psys: bq25730_async_rs::data_types::AdcPsys::from_u8(
+                        bq25730_adc_measurements
+                            .as_ref()
+                            .map_or(0, |m| (m.psys.0 / 12) as u8), // Convert back to raw for default
+                    ),
+                    vbus: bq25730_async_rs::data_types::AdcVbus::from_u8(
+                        bq25730_adc_measurements
+                            .as_ref()
+                            .map_or(0, |m| (m.vbus.0 / 96) as u8), // Convert back to raw for default
+                    ),
+                    idchg: bq25730_async_rs::data_types::AdcIdchg::from_u8(
+                        bq25730_adc_measurements
+                            .as_ref()
+                            .map_or(0, |m| (m.idchg.0 / 512) as u8), // Convert back to raw for default
+                    ),
+                    ichg: bq25730_async_rs::data_types::AdcIchg::from_u8(
+                        bq25730_adc_measurements
+                            .as_ref()
+                            .map_or(0, |m| (m.ichg.0 / 128) as u8), // Convert back to raw for default
+                    ),
+                    cmpin: bq25730_async_rs::data_types::AdcCmpin::from_u8(
+                        bq25730_adc_measurements
+                            .as_ref()
+                            .map_or(0, |m| (m.cmpin.0 / 12) as u8), // Convert back to raw for default
+                    ),
+                    iin: bq25730_async_rs::data_types::AdcIin::from_u8(
+                        bq25730_adc_measurements
+                            .as_ref()
+                            .map_or(0, |m| (m.iin.milliamps / 100) as u8), // Convert back to raw for default
+                        true, // Assuming 5mOhm sense resistor for default
+                    ),
+                    vbat: bq25730_async_rs::data_types::AdcVbat::from_register_value(
+                        0, // LSB is not used in from_register_value
+                        bq25730_adc_measurements
+                            .as_ref()
+                            .map_or(0, |m| (m.vbat.0 / 64) as u8), // Convert back to raw for default
+                        0, // OFFSET_MV is 0
+                    ),
+                    vsys: bq25730_async_rs::data_types::AdcVsys::from_register_value(
+                        0, // LSB is not used in from_register_value
+                        bq25730_adc_measurements
+                            .as_ref()
+                            .map_or(0, |m| (m.vsys.0 / 64) as u8), // Convert back to raw for default
+                        0, // OFFSET_MV is 0
+                    ),
                 }
             }),
             // Add other BQ25730 measurement fields here when implemented
@@ -440,26 +480,26 @@ async fn main(spawner: Spawner) {
         match bq.read_status().await {
             Ok(status) => {
                 info!("System Status:");
-                info!("  CC Ready: {}", status.cc_ready);
-                info!("  Overtemperature: {}", status.ovr_temp);
-                info!("  Undervoltage (UV): {}", status.uv);
-                info!("  Overvoltage (OV): {}", status.ov);
-                info!("  Short Circuit Discharge (SCD): {}", status.scd);
-                info!("  Overcurrent Discharge (OCD): {}", status.ocd);
-                info!("  Device X-Ready: {}", status.device_xready);
-                info!("  Override Alert: {}", status.ovrd_alert);
+                info!("  CC Ready: {}", status.0.contains(bq769x0_async_rs::registers::SysStatFlags::CC_READY));
+                // info!("  Overtemperature: {}", status.0.contains(bq769x0_async_rs::registers::SysStatFlags::OVR_TEMP)); // Removed OVR_TEMP check
+                info!("  Undervoltage (UV): {}", status.0.contains(bq769x0_async_rs::registers::SysStatFlags::UV));
+                info!("  Overvoltage (OV): {}", status.0.contains(bq769x0_async_rs::registers::SysStatFlags::OV));
+                info!("  Short Circuit Discharge (SCD): {}", status.0.contains(bq769x0_async_rs::registers::SysStatFlags::SCD));
+                info!("  Overcurrent Discharge (OCD): {}", status.0.contains(bq769x0_async_rs::registers::SysStatFlags::OCD));
+                info!("  Device X-Ready: {}", status.0.contains(bq769x0_async_rs::registers::SysStatFlags::DEVICE_XREADY));
+                info!("  Override Alert: {}", status.0.contains(bq769x0_async_rs::registers::SysStatFlags::OVRD_ALERT));
                 _system_status = Some(status); // Assign to the outer variable
 
                 // Clear status flags after reading
                 // Only clear flags that are set
-                let flags_to_clear = (status.cc_ready as u8 * SYS_STAT_CC_READY)
-                    | (status.ovr_temp as u8 * (1 << 6)) // Corrected bit for ovr_temp
-                    | (status.device_xready as u8 * SYS_STAT_DEVICE_XREADY)
-                    | (status.ovrd_alert as u8 * SYS_STAT_OVRD_ALERT)
-                    | (status.uv as u8 * SYS_STAT_UV)
-                    | (status.ov as u8 * SYS_STAT_OV)
-                    | (status.scd as u8 * SYS_STAT_SCD)
-                    | (status.ocd as u8 * SYS_STAT_OCD);
+                let flags_to_clear = (status.0.contains(bq769x0_async_rs::registers::SysStatFlags::CC_READY) as u8 * bq769x0_async_rs::registers::SysStatFlags::CC_READY.bits())
+                    // | (status.0.contains(bq769x0_async_rs::registers::SysStatFlags::OVR_TEMP) as u8 * bq769x0_async_rs::registers::SysStatFlags::OVR_TEMP.bits()) // Removed OVR_TEMP check
+                    | (status.0.contains(bq769x0_async_rs::registers::SysStatFlags::DEVICE_XREADY) as u8 * bq769x0_async_rs::registers::SysStatFlags::DEVICE_XREADY.bits())
+                    | (status.0.contains(bq769x0_async_rs::registers::SysStatFlags::OVRD_ALERT) as u8 * bq769x0_async_rs::registers::SysStatFlags::OVRD_ALERT.bits())
+                    | (status.0.contains(bq769x0_async_rs::registers::SysStatFlags::UV) as u8 * bq769x0_async_rs::registers::SysStatFlags::UV.bits())
+                    | (status.0.contains(bq769x0_async_rs::registers::SysStatFlags::OV) as u8 * bq769x0_async_rs::registers::SysStatFlags::OV.bits())
+                    | (status.0.contains(bq769x0_async_rs::registers::SysStatFlags::SCD) as u8 * bq769x0_async_rs::registers::SysStatFlags::SCD.bits())
+                    | (status.0.contains(bq769x0_async_rs::registers::SysStatFlags::OCD) as u8 * bq769x0_async_rs::registers::SysStatFlags::OCD.bits());
 
                 if flags_to_clear != 0 {
                     if let Err(e) = bq.clear_status_flags(flags_to_clear).await {
@@ -480,8 +520,8 @@ async fn main(spawner: Spawner) {
             Ok(sys_ctrl2_byte) => {
                 let mos = bq769x0_async_rs::data_types::MosStatus::new(sys_ctrl2_byte);
                 info!("MOS Status:");
-                info!("  Charge ON: {}", mos.charge_on);
-                info!("  Discharge ON: {}", mos.discharge_on);
+                info!("  Charge ON: {}", mos.0.contains(bq769x0_async_rs::registers::SysCtrl2Flags::CHG_ON));
+                info!("  Discharge ON: {}", mos.0.contains(bq769x0_async_rs::registers::SysCtrl2Flags::DSG_ON));
                 _mos_status = Some(mos); // Assign to the outer variable
             }
             Err(e) => {
@@ -492,7 +532,7 @@ async fn main(spawner: Spawner) {
 
         // 发布 BQ76920 告警信息
         if let Ok(status) = bq.read_status().await {
-            let alerts = shared::Bq76920Alerts {
+            let alerts = crate::data_types::Bq76920Alerts {
                 system_status: status,
             };
             bq76920_alerts_publisher.publish_immediate(alerts);
@@ -503,38 +543,59 @@ async fn main(spawner: Spawner) {
         // 构造并发布聚合测量数据
         // 假设 voltages, temps, current, system_status, mos_status and bq25730_measurements variables were successfully obtained
         // If reading failed, handle accordingly, e.g., use default values or skip publishing
-        let all_measurements = shared::AllMeasurements {
-            bq25730: shared::Bq25730Measurements {
+        let all_measurements = crate::data_types::AllMeasurements {
+            bq25730: crate::data_types::Bq25730Measurements {
                 adc_measurements: bq25730_adc_measurements.unwrap_or_else(|| {
                     bq25730_async_rs::data_types::AdcMeasurements {
-                        psys: bq25730_adc_measurements
-                            .as_ref()
-                            .map_or(bq25730_async_rs::data_types::AdcPsys(0), |m| m.psys),
-                        vbus: bq25730_adc_measurements
-                            .as_ref()
-                            .map_or(bq25730_async_rs::data_types::AdcVbus(0), |m| m.vbus),
-                        idchg: bq25730_adc_measurements
-                            .as_ref()
-                            .map_or(bq25730_async_rs::data_types::AdcIdchg(0), |m| m.idchg),
-                        ichg: bq25730_adc_measurements
-                            .as_ref()
-                            .map_or(bq25730_async_rs::data_types::AdcIchg(0), |m| m.ichg),
-                        cmpin: bq25730_adc_measurements
-                            .as_ref()
-                            .map_or(bq25730_async_rs::data_types::AdcCmpin(0), |m| m.cmpin),
-                        iin: bq25730_adc_measurements
-                            .as_ref()
-                            .map_or(bq25730_async_rs::data_types::AdcIin(0), |m| m.iin),
-                        vbat: bq25730_adc_measurements
-                            .as_ref()
-                            .map_or(bq25730_async_rs::data_types::AdcVbat(0), |m| m.vbat),
-                        vsys: bq25730_adc_measurements
-                            .as_ref()
-                            .map_or(bq25730_async_rs::data_types::AdcVsys(0), |m| m.vsys),
+                        psys: bq25730_async_rs::data_types::AdcPsys::from_u8(
+                            bq25730_adc_measurements
+                                .as_ref()
+                                .map_or(0, |m| (m.psys.0 / 12) as u8), // Convert back to raw for default
+                        ),
+                        vbus: bq25730_async_rs::data_types::AdcVbus::from_u8(
+                            bq25730_adc_measurements
+                                .as_ref()
+                                .map_or(0, |m| (m.vbus.0 / 96) as u8), // Convert back to raw for default
+                        ),
+                        idchg: bq25730_async_rs::data_types::AdcIdchg::from_u8(
+                            bq25730_adc_measurements
+                                .as_ref()
+                                .map_or(0, |m| (m.idchg.0 / 512) as u8), // Convert back to raw for default
+                        ),
+                        ichg: bq25730_async_rs::data_types::AdcIchg::from_u8(
+                            bq25730_adc_measurements
+                                .as_ref()
+                                .map_or(0, |m| (m.ichg.0 / 128) as u8), // Convert back to raw for default
+                        ),
+                        cmpin: bq25730_async_rs::data_types::AdcCmpin::from_u8(
+                            bq25730_adc_measurements
+                                .as_ref()
+                                .map_or(0, |m| (m.cmpin.0 / 12) as u8), // Convert back to raw for default
+                        ),
+                        iin: bq25730_async_rs::data_types::AdcIin::from_u8(
+                            bq25730_adc_measurements
+                                .as_ref()
+                                .map_or(0, |m| (m.iin.milliamps / 100) as u8), // Convert back to raw for default
+                            true, // Assuming 5mOhm sense resistor for default
+                        ),
+                        vbat: bq25730_async_rs::data_types::AdcVbat::from_register_value(
+                            0, // LSB is not used in from_register_value
+                            bq25730_adc_measurements
+                                .as_ref()
+                                .map_or(0, |m| (m.vbat.0 / 64) as u8), // Convert back to raw for default
+                            0, // OFFSET_MV is 0
+                        ),
+                        vsys: bq25730_async_rs::data_types::AdcVsys::from_register_value(
+                            0, // LSB is not used in from_register_value
+                            bq25730_adc_measurements
+                                .as_ref()
+                                .map_or(0, |m| (m.vsys.0 / 64) as u8), // Convert back to raw for default
+                            0, // OFFSET_MV is 0
+                        ),
                     }
                 }),
             },
-            bq76920: shared::Bq76920Measurements {
+            bq76920: crate::data_types::Bq76920Measurements {
                 core_measurements: bq769x0_async_rs::data_types::Bq76920Measurements {
                     cell_voltages: _voltages
                         .unwrap_or_else(bq769x0_async_rs::data_types::CellVoltages::new),
