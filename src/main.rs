@@ -78,6 +78,8 @@ async fn main(spawner: Spawner) {
         _bq25730_alerts_subscriber, // Mark as unused
         bq76920_alerts_publisher,
         _bq76920_alerts_subscriber, // Mark as unused
+        _ina226_measurements_publisher, // Add INA226 publisher
+        _ina226_measurements_subscriber, // Add INA226 subscriber (marked as unused)
     ) = shared::init_pubsubs(); // 初始化消息队列并获取生产者和消费者
 
     info!("消息队列初始化完成，已获取生产者和消费者。");
@@ -185,15 +187,15 @@ async fn main(spawner: Spawner) {
     // --- Main Loop for Data Acquisition ---
     let sense_resistor = ElectricalResistance::new::<uom::si::electrical_resistance::milliohm>(3.0); // Your sense resistor value in milliOhms
 
-    loop {
-        // Declare variables to hold read data, initialized to None
-        let mut _voltages = None;
-        let mut _temps = None;
-        let mut _current = None;
-        let mut _system_status = None;
-        let mut _mos_status = None;
-        let mut _bq25730_measurements = None;
+    // Declare variables to hold read data, initialized to None
+    let mut _voltages = None;
+    let mut _temps = None;
+    let mut _current = None;
+    let mut _system_status = None;
+    let mut _mos_status = None;
+    let mut _bq25730_measurements = None;
 
+    loop {
         info!("--- Reading BQ76920 Data ---");
 
         /*
@@ -212,29 +214,6 @@ async fn main(spawner: Spawner) {
 
         // --- Reading INA226 Data ---
         info!("--- Reading INA226 Data ---");
-
-        match ina226.bus_voltage_millivolts().await {
-            Ok(voltage) => {
-                info!("INA226 Voltage: {} mV", voltage);
-            }
-            Err(e) => {
-                error!("Failed to read INA226 voltage: {:?}", e);
-            }
-        }
-
-        match ina226.current_amps().await {
-            Ok(current) => {
-                if let Some(current_amps) = current {
-                    let current_ma = current_amps * 1000.0; // Convert to mA
-                    info!("INA226 Current: {} mA", current_ma);
-                } else {
-                    info!("INA226 Current: None");
-                }
-            }
-            Err(e) => {
-                error!("Failed to read INA226 current: {:?}", e);
-            }
-        }
 
         // --- Reading BQ25730 Data ---
         info!("--- Reading BQ25730 Data ---");
@@ -612,6 +591,21 @@ async fn main(spawner: Spawner) {
                     mos_status: _mos_status
                         .unwrap_or_else(|| bq769x0_async_rs::data_types::MosStatus::new(0)), // Use default if read failed
                 },
+            },
+            ina226: { // Add INA226 measurements
+                let voltage_f64 = ina226.bus_voltage_millivolts().await.unwrap_or(0.0);
+                let current_amps_f64 = ina226.current_amps().await.unwrap_or(None);
+                let current_f64 = current_amps_f64.map_or(0.0, |c| c * 1000.0); // Convert to mA or default to 0.0
+
+                let voltage: f32 = voltage_f64 as f32;
+                let current: f32 = current_f64 as f32;
+                let power: f32 = (voltage * current / 1000.0) as f32; // Calculate power (V * I / 1000 for mW if V in mV, I in mA)
+
+                crate::data_types::Ina226Measurements {
+                    voltage,
+                    current,
+                    power,
+                }
             },
         };
 
