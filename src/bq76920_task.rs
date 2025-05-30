@@ -102,23 +102,21 @@ pub async fn bq76920_task(
 
         // Read Cell Voltages
         let voltages_ref = &mut voltages;
-        match bq.read_cell_voltages().await {
-            Ok(v) => {
+        match bq.read_cell_voltages().await { // This now returns CellVoltages with [i32; N] (converted mV)
+            Ok(v_converted) => {
                 info!("Cell Voltages (mV):");
-                // BQ76920 supports up to 5 cells
-                for _i in 0..5 {
-                    // Get voltage in millivolts as i32 for printing
+                for i in 0..5 {
                     info!(
                         "  Cell {}: {} mV",
-                        _i + 1,
-                        v.voltages[_i] // Assuming this is already in mV (e.g., u16)
+                        i + 1,
+                        v_converted.voltages[i] // This is already in mV
                     );
                 }
-                *voltages_ref = Some(v); // Assign to the outer variable via mutable reference
+                *voltages_ref = Some(v_converted); // Store the converted CellVoltages
             }
             Err(e) => {
                 error!("Failed to read cell voltages: {:?}", e);
-                *voltages_ref = None; // Assign None on error via mutable reference
+                *voltages_ref = None;
             }
         }
 
@@ -149,18 +147,18 @@ pub async fn bq76920_task(
                         info!("Temperatures (Celsius):");
                         info!(
                             "  TS1: {} °C",
-                            temp_data.ts1
+                            temp_data.ts1 as f32 / 100.0
                         );
                         if let Some(ts2_val) = temp_data.ts2 {
                             info!(
                                 "  TS2: {} °C",
-                                ts2_val
+                                ts2_val as f32 / 100.0
                             );
                         }
                         if let Some(ts3_val) = temp_data.ts3 {
                             info!(
                                 "  TS3: {} °C",
-                                ts3_val
+                                ts3_val as f32 / 100.0
                             );
                         }
                     }

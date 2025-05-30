@@ -305,7 +305,7 @@ pub async fn bq25730_task(
         }
 
         // Implement battery charge logic based on BQ76920 total battery voltage and final_charge_permission
-        let total_voltage_mv: u16 = bq76920_measurements.core_measurements.cell_voltages.voltages.iter().sum();
+        let total_voltage_mv: i32 = bq76920_measurements.core_measurements.cell_voltages.voltages.iter().sum();
         info!("BQ76920 Total Voltage: {} mV for BQ25730 parameter decision.", total_voltage_mv);
 
         // Define charging parameters
