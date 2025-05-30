@@ -60,36 +60,37 @@ async fn main(spawner: Spawner) {
 
     // 初始化消息队列并获取生产者和消费者
     let (
-        measurements_publisher,
-        _measurements_subscriber1, // Mark as unused
-        _measurements_subscriber2, // Used by usb_task
+        measurements_publisher, // Publisher for AllMeasurements
+        _measurements_channel,   // Channel for AllMeasurements, if needed to create more subs
         bq25730_alerts_publisher,
-        _bq25730_alerts_subscriber, // Mark as unused
+        bq25730_alerts_channel,  // Channel for BQ25730 Alerts
         bq76920_alerts_publisher,
-        _bq76920_alerts_subscriber, // Mark as unused
-        bq25730_measurements_publisher, // Used by bq25730_task
-        bq25730_measurements_subscriber, // Used by usb_task
-        bq76920_measurements_publisher, // Used by bq76920_task
-        bq76920_measurements_subscriber, // Used by usb_task
-        ina226_measurements_publisher, // Used by ina226_task
-        ina226_measurements_subscriber, // Used by usb_task
-    ) = shared::init_pubsubs(); // 初始化消息队列并获取生产者和消费者
+        bq76920_alerts_channel,  // Channel for BQ76920 Alerts
+        bq25730_measurements_publisher,
+        bq25730_measurements_channel, // Channel for BQ25730 Measurements
+        bq76920_measurements_publisher,
+        bq76920_measurements_channel, // Channel for BQ76920 Measurements
+        ina226_measurements_publisher,
+        ina226_measurements_channel,   // Channel for INA226 Measurements
+    ) = shared::init_pubsubs();
 
     info!("消息队列初始化完成，已获取生产者和消费者。");
 
     let config = embassy_stm32::Config::default();
     let p = embassy_stm32::init(config);
-
+    
     info!("STM32 initialized.");
 
     let usb_driver = Driver::new(p.USB, Irqs, p.PA12, p.PA11);
     spawner
         .spawn(usb::usb_task(
             usb_driver,
-            measurements_publisher, // usb_task now publishes AllMeasurements
-            bq25730_measurements_subscriber, // Pass subscriber for BQ25730 data
-            ina226_measurements_subscriber, // Pass subscriber for INA226 data
-            bq76920_measurements_subscriber, // Pass subscriber for BQ76920 data
+            measurements_publisher, // This is MeasurementsPublisher<'static, 5>
+            bq25730_measurements_channel.subscriber().unwrap(), // Create BQ25730 measurements subscriber
+            ina226_measurements_channel.subscriber().unwrap(),   // Create INA226 measurements subscriber
+            bq76920_measurements_channel.subscriber().unwrap(), // Create BQ76920 measurements subscriber
+            bq25730_alerts_channel.subscriber().unwrap(),          // Create BQ25730 alerts subscriber
+            bq76920_alerts_channel.subscriber().unwrap(),  // Create BQ76920 alerts subscriber
         ))
         .unwrap();
 
@@ -135,7 +136,8 @@ async fn main(spawner: Spawner) {
         I2cDevice::new(i2c_bus_mutex), // Create a new I2cDevice for the task using the static mutex
         bq25730_address,
         bq25730_alerts_publisher,
-        bq25730_measurements_publisher, // Pass the BQ25730 measurements publisher
+        bq25730_measurements_publisher, // This is Bq25730MeasurementsPublisher
+        bq76920_measurements_channel.subscriber().unwrap(), // Create BQ76920 measurements subscriber for bq25730_task
     )).unwrap();
 
     spawner.spawn(ina226_task::ina226_task(

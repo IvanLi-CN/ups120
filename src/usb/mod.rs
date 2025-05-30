@@ -8,12 +8,14 @@ use embassy_usb::{
 };
 use static_cell::StaticCell;
 
-use crate::data_types::{AllMeasurements, Bq25730Measurements, Ina226Measurements, Bq76920Measurements}; // Import necessary data types
+use crate::data_types::{AllMeasurements, Bq25730Measurements, Ina226Measurements, Bq76920Measurements, Bq25730Alerts, Bq76920Alerts}; // Import necessary data types
 use crate::shared::{
     MeasurementsPublisher, // Import MeasurementsPublisher
     Bq25730MeasurementsSubscriber, // Import BQ25730 subscriber
     Ina226MeasurementsSubscriber, // Import INA226 subscriber
     Bq76920MeasurementsSubscriber, // Import BQ76920 subscriber
+    Bq25730AlertsSubscriber,     // Import BQ25730 alerts subscriber
+    Bq76920AlertsSubscriber,     // Import BQ76920 alerts subscriber
 };
 
 pub mod endpoints;
@@ -38,6 +40,8 @@ pub async fn usb_task(
     mut bq25730_measurements_subscriber: Bq25730MeasurementsSubscriber<'static>, // BQ25730 subscriber
     mut ina226_measurements_subscriber: Ina226MeasurementsSubscriber<'static>, // INA226 subscriber
     mut bq76920_measurements_subscriber: Bq76920MeasurementsSubscriber<'static, 5>, // BQ76920 subscriber - Added generic parameter
+    mut bq25730_alerts_subscriber: Bq25730AlertsSubscriber<'static>,         // BQ25730 alerts subscriber
+    mut bq76920_alerts_subscriber: Bq76920AlertsSubscriber<'static>,         // BQ76920 alerts subscriber
 ) {
     let vid: u16 =
         u16::from_str_radix(env!("USB_VID").trim_start_matches("0x"), 16).expect("Invalid USB_VID");
@@ -81,91 +85,74 @@ pub async fn usb_task(
         // Variables to hold the latest measurements from each task
         let mut latest_bq25730_measurements: Option<Bq25730Measurements> = None;
         let mut latest_ina226_measurements: Option<Ina226Measurements> = None;
-        let mut latest_bq76920_measurements: Option<Bq76920Measurements<5>> = None; // Added generic parameter
+        let mut latest_bq76920_measurements: Option<Bq76920Measurements<5>> = None;
+        let mut latest_bq25730_alerts: Option<Bq25730Alerts> = None;
+        let mut latest_bq76920_alerts: Option<Bq76920Alerts> = None;
 
         loop {
             usb_endpoints.wait_connected().await;
 
-            // Use select to prioritize handling USB commands
+            // Use select to prioritize handling USB commands and new data
             match select(
                 bq25730_measurements_subscriber.next_message(),
                 select(
                     ina226_measurements_subscriber.next_message(),
                     select(
                         bq76920_measurements_subscriber.next_message(),
-                        usb_endpoints.parse_command()
+                        select(
+                            bq25730_alerts_subscriber.next_message(),
+                            select(
+                                bq76920_alerts_subscriber.next_message(),
+                                usb_endpoints.parse_command()
+                            )
+                        )
                     )
                 )
             ).await {
-                Either::First(bq25730_res) => {
-                    match bq25730_res {
+                Either::First(bq25730_meas_res) => { // BQ25730 Measurements
+                    match bq25730_meas_res {
                         embassy_sync::pubsub::WaitResult::Message(msg) => latest_bq25730_measurements = Some(msg),
-                        embassy_sync::pubsub::WaitResult::Lagged(c) => defmt::warn!("USB BQ25730 sub: lagged {} messages", c),
+                        embassy_sync::pubsub::WaitResult::Lagged(c) => defmt::warn!("USB BQ25730 Meas sub: lagged {} messages", c),
                     }
                 },
-                Either::Second(either_b_c_d) => match either_b_c_d {
-                    Either::First(ina226_res) => {
-                        match ina226_res {
+                Either::Second(either_b_c_d_e_f) => match either_b_c_d_e_f {
+                    Either::First(ina226_meas_res) => { // INA226 Measurements
+                        match ina226_meas_res {
                             embassy_sync::pubsub::WaitResult::Message(msg) => latest_ina226_measurements = Some(msg),
-                            embassy_sync::pubsub::WaitResult::Lagged(c) => defmt::warn!("USB INA226 sub: lagged {} messages", c),
+                            embassy_sync::pubsub::WaitResult::Lagged(c) => defmt::warn!("USB INA226 Meas sub: lagged {} messages", c),
                         }
                     },
-                    Either::Second(either_c_d) => match either_c_d {
-                        Either::First(bq76920_res) => {
-                            match bq76920_res {
+                    Either::Second(either_c_d_e_f) => match either_c_d_e_f {
+                        Either::First(bq76920_meas_res) => { // BQ76920 Measurements
+                            match bq76920_meas_res {
                                 embassy_sync::pubsub::WaitResult::Message(msg) => latest_bq76920_measurements = Some(msg),
-                                embassy_sync::pubsub::WaitResult::Lagged(c) => defmt::warn!("USB BQ76920 sub: lagged {} messages", c),
+                                embassy_sync::pubsub::WaitResult::Lagged(c) => defmt::warn!("USB BQ76920 Meas sub: lagged {} messages", c),
                             }
                         },
-                        Either::Second(cmd_result) => {
-                            // A new command is received, process it
-                            match cmd_result {
-                                Ok(cmd) => {
-                                    defmt::info!("USB command received: {:?}", cmd);
-                                    // Aggregate the latest measurements before processing the command
-                                    let all_measurements = AllMeasurements {
-                                        bq25730: latest_bq25730_measurements.unwrap_or_else(|| {
-                                            // Provide a default if no message has been received yet
-                                            Bq25730Measurements {
-                                                adc_measurements: bq25730_async_rs::data_types::AdcMeasurements {
-                                                    psys: bq25730_async_rs::data_types::AdcPsys::from_u8(0),
-                                                    vbus: bq25730_async_rs::data_types::AdcVbus::from_u8(0),
-                                                    idchg: bq25730_async_rs::data_types::AdcIdchg::from_u8(0),
-                                                    ichg: bq25730_async_rs::data_types::AdcIchg::from_u8(0), // Corrected spelling
-                                                    cmpin: bq25730_async_rs::data_types::AdcCmpin::from_u8(0),
-                                                    iin: bq25730_async_rs::data_types::AdcIin::from_u8(0, true),
-                                                    vbat: bq25730_async_rs::data_types::AdcVbat::from_register_value(0, 0, 0),
-                                                    vsys: bq25730_async_rs::data_types::AdcVsys::from_register_value(0, 0, 0),
-                                                },
-                                            }
-                                        }),
-                                        ina226: latest_ina226_measurements.unwrap_or({
-                                            // Provide a default if no message has been received yet
-                                            Ina226Measurements {
-                                                voltage: 0.0,
-                                                current: 0.0,
-                                                power: 0.0,
-                                            }
-                                        }),
-                                        bq76920: latest_bq76920_measurements.unwrap_or_else(|| {
-                                            // Provide a default if no message has been received yet
-                                            Bq76920Measurements {
-                                                core_measurements: bq769x0_async_rs::data_types::Bq76920Measurements {
-                                                    cell_voltages: bq769x0_async_rs::data_types::CellVoltages::new(),
-                                                    temperatures: bq769x0_async_rs::data_types::TemperatureSensorReadings::new(),
-                                                    current: 0i32, // Default to 0 mA
-                                                    system_status: bq769x0_async_rs::data_types::SystemStatus::new(0),
-                                                    mos_status: bq769x0_async_rs::data_types::MosStatus::new(0),
-                                                },
-                                            }
-                                        }),
-                                    };
-                                    if let Err(e) = usb_endpoints.process_command(cmd, &all_measurements).await {
-                                        defmt::error!("Error processing command: {:?}", e);
-                                    }
+                        Either::Second(either_d_e_f) => match either_d_e_f {
+                            Either::First(bq25730_alert_res) => { // BQ25730 Alerts
+                                match bq25730_alert_res {
+                                    embassy_sync::pubsub::WaitResult::Message(msg) => latest_bq25730_alerts = Some(msg),
+                                    embassy_sync::pubsub::WaitResult::Lagged(c) => defmt::warn!("USB BQ25730 Alerts sub: lagged {} messages", c),
                                 }
-                                Err(e) => {
-                                    defmt::error!("USB command endpoint error: {:?}", e);
+                            },
+                            Either::Second(either_e_f) => match either_e_f {
+                                Either::First(bq76920_alert_res) => { // BQ76920 Alerts
+                                    match bq76920_alert_res {
+                                        embassy_sync::pubsub::WaitResult::Message(msg) => latest_bq76920_alerts = Some(msg),
+                                        embassy_sync::pubsub::WaitResult::Lagged(c) => defmt::warn!("USB BQ76920 Alerts sub: lagged {} messages", c),
+                                    }
+                                },
+                                Either::Second(cmd_result) => { // USB Command
+                                    match cmd_result {
+                                        Ok(cmd) => {
+                                            defmt::info!("USB command received: {:?}", cmd);
+                                            // Aggregation will happen outside this specific arm, before publishing/sending
+                                        }
+                                        Err(e) => {
+                                            defmt::error!("USB command endpoint error: {:?}", e);
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -173,53 +160,56 @@ pub async fn usb_task(
                 }
             }
 
-            // Aggregate the latest measurements (already done in the command processing branch)
-            // If no command was received, we still need to aggregate for publishing and pushing
-            let all_measurements = AllMeasurements {
-                bq25730: latest_bq25730_measurements.unwrap_or_else(|| {
-                    // Provide a default if no message has been received yet
-                    Bq25730Measurements {
-                        adc_measurements: bq25730_async_rs::data_types::AdcMeasurements {
-                            psys: bq25730_async_rs::data_types::AdcPsys::from_u8(0),
-                            vbus: bq25730_async_rs::data_types::AdcVbus::from_u8(0),
-                            idchg: bq25730_async_rs::data_types::AdcIdchg::from_u8(0),
-                            ichg: bq25730_async_rs::data_types::AdcIchg::from_u8(0), // Corrected spelling
-                            cmpin: bq25730_async_rs::data_types::AdcCmpin::from_u8(0),
-                            iin: bq25730_async_rs::data_types::AdcIin::from_u8(0, true),
-                            vbat: bq25730_async_rs::data_types::AdcVbat::from_register_value(0, 0, 0),
-                            vsys: bq25730_async_rs::data_types::AdcVsys::from_register_value(0, 0, 0),
-                        },
-                    }
+            // Aggregate all latest data (measurements and alerts)
+            let all_measurements_and_alerts = AllMeasurements {
+                bq25730: latest_bq25730_measurements.unwrap_or_else(|| Bq25730Measurements {
+                    adc_measurements: bq25730_async_rs::data_types::AdcMeasurements {
+                        psys: bq25730_async_rs::data_types::AdcPsys::from_u8(0),
+                        vbus: bq25730_async_rs::data_types::AdcVbus::from_u8(0),
+                        idchg: bq25730_async_rs::data_types::AdcIdchg::from_u8(0),
+                        ichg: bq25730_async_rs::data_types::AdcIchg::from_u8(0),
+                        cmpin: bq25730_async_rs::data_types::AdcCmpin::from_u8(0),
+                        iin: bq25730_async_rs::data_types::AdcIin::from_u8(0, true),
+                        vbat: bq25730_async_rs::data_types::AdcVbat::from_register_value(0, 0, 0),
+                        vsys: bq25730_async_rs::data_types::AdcVsys::from_register_value(0, 0, 0),
+                    },
                 }),
-                ina226: latest_ina226_measurements.unwrap_or({
-                    // Provide a default if no message has been received yet
-                    Ina226Measurements {
-                        voltage: 0.0,
-                        current: 0.0,
-                        power: 0.0,
-                    }
+                ina226: latest_ina226_measurements.unwrap_or_else(|| Ina226Measurements {
+                    voltage: 0.0,
+                    current: 0.0,
+                    power: 0.0,
                 }),
-                bq76920: latest_bq76920_measurements.unwrap_or_else(|| {
-                    // Provide a default if no message has been received yet
-                    Bq76920Measurements {
-                        core_measurements: bq769x0_async_rs::data_types::Bq76920Measurements {
-                            cell_voltages: bq769x0_async_rs::data_types::CellVoltages::new(),
-                            temperatures: bq769x0_async_rs::data_types::TemperatureSensorReadings::new(),
-                            current: 0i32, // Default to 0 mA
-                            system_status: bq769x0_async_rs::data_types::SystemStatus::new(0),
-                            mos_status: bq769x0_async_rs::data_types::MosStatus::new(0),
-                        },
-                    }
+                bq76920: latest_bq76920_measurements.unwrap_or_else(|| Bq76920Measurements {
+                    core_measurements: bq769x0_async_rs::data_types::Bq76920Measurements {
+                        cell_voltages: bq769x0_async_rs::data_types::CellVoltages::new(),
+                        temperatures: bq769x0_async_rs::data_types::TemperatureSensorReadings::new(),
+                        current: 0i32,
+                        system_status: bq769x0_async_rs::data_types::SystemStatus::new(0),
+                        mos_status: bq769x0_async_rs::data_types::MosStatus::new(0),
+                    },
+                }),
+                bq25730_alerts: latest_bq25730_alerts.unwrap_or_else(|| Bq25730Alerts {
+                    charger_status: bq25730_async_rs::data_types::ChargerStatus {
+                        status_flags: bq25730_async_rs::registers::ChargerStatusFlags::empty(),
+                        fault_flags: bq25730_async_rs::registers::ChargerStatusFaultFlags::empty(),
+                    },
+                    prochot_status: bq25730_async_rs::data_types::ProchotStatus {
+                        msb_flags: bq25730_async_rs::registers::ProchotStatusMsbFlags::empty(),
+                        lsb_flags: bq25730_async_rs::registers::ProchotStatusFlags::empty(),
+                        prochot_width: 0,
+                    },
+                }),
+                bq76920_alerts: latest_bq76920_alerts.unwrap_or_else(|| Bq76920Alerts {
+                    system_status: bq769x0_async_rs::data_types::SystemStatus::new(0),
                 }),
             };
 
+            // Publish the aggregated data
+            measurements_publisher.publish_immediate(all_measurements_and_alerts.clone());
 
-            // Publish the aggregated measurements
-            measurements_publisher.publish_immediate(all_measurements.clone()); // Clone to send over USB
-
-            // Send the aggregated measurements over USB if subscription is active
+            // Send the aggregated data over USB if subscription is active
             if usb_endpoints.status_subscription_active {
-                 if let Err(e) = usb_endpoints.send_status_update(all_measurements).await {
+                 if let Err(e) = usb_endpoints.send_status_update(all_measurements_and_alerts).await {
                       defmt::error!("Failed to send status update over USB: {:?}", e);
                  }
             }

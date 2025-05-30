@@ -6,23 +6,34 @@ use embassy_stm32::i2c::I2c;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 
 use bq25730_async_rs::Bq25730;
+// use bq25730_async_rs::RegisterAccess; // Import the RegisterAccess trait // Commented out as unused
+use bq25730_async_rs::registers::{
+    ChargeOption0Flags, ChargeOption3MsbFlags, // Register as Bq25730Register, // Commented out as unused
+};
+// use bq25730_async_rs::data_types::{ChargeOption0, ChargeOption3}; // Import register data types // Commented out as unused
+use bq769x0_async_rs::registers::{SysCtrl2Flags as Bq76920SysCtrl2Flags, SysStatFlags as Bq76920SysStatFlags}; // Import BQ76920 flags with alias
 
- // Removed unused imports
-use crate::shared::{Bq25730AlertsPublisher, Bq25730MeasurementsPublisher}; // Import Bq25730MeasurementsPublisher
+use crate::shared::{
+    Bq25730AlertsPublisher, Bq25730MeasurementsPublisher, Bq76920MeasurementsSubscriber,
+};
 
 #[embassy_executor::task]
 pub async fn bq25730_task(
     i2c_bus: I2cDevice<'static, CriticalSectionRawMutex, I2c<'static, embassy_stm32::mode::Async>>,
     address: u8,
     bq25730_alerts_publisher: Bq25730AlertsPublisher<'static>,
-    bq25730_measurements_publisher: Bq25730MeasurementsPublisher<'static>, // Add publisher for measurements
+    bq25730_measurements_publisher: Bq25730MeasurementsPublisher<'static>,
+    mut bq76920_measurements_subscriber: Bq76920MeasurementsSubscriber<'static, 5>,
 ) {
     info!("BQ25730 task started.");
 
-    // Create temporary I2cDevice instance for BQ25730
-    let mut bq25730 = Bq25730::new(i2c_bus, address, 4); // Use a clone for Bq25730
+    let mut bq25730 = Bq25730::new(i2c_bus, address, 4);
 
     loop {
+        // Receive latest BQ76920 measurements
+        let bq76920_measurements = bq76920_measurements_subscriber.next_message_pure().await;
+        info!("Received BQ76920 measurements in BQ25730 task.");
+
         // --- Reading BQ25730 Data ---
         info!("--- Reading BQ25730 Data ---");
 
@@ -184,10 +195,6 @@ pub async fn bq25730_task(
                         bq25730_async_rs::registers::ProchotStatusFlags::STAT_ADPT_REMOVAL
                     )
                 );
-                // info!("  VAP Fail: {}", status.msb_flags.contains(bq25730_async_rs::registers::ProchotStatusMsbFlags::STAT_VAP_FAIL)); // STAT_VAP_FAIL not found in new version
-                // info!("  Exit VAP: {}", status.msb_flags.contains(bq25730_async_rs::registers::ProchotStatusMsbFlags::STAT_EXIT_VAP)); // STAT_EXIT_VAP not found in new version
-                // info!("  IDCHG2 Triggered: {}", status.lsb_flags.contains(bq25730_async_rs::registers::ProchotOption1Flags::PP_IDCHG2)); // STAT_IDCHG2 not found in new version
-                // info!("  PTM Operation: {}", status.lsb_flags.contains(bq25730_async_rs::registers::ChargeOption3Flags::EN_PTM)); // STAT_PTM not found in new version
                 Some(status)
             }
             Err(e) => {
@@ -226,6 +233,106 @@ pub async fn bq25730_task(
                 None
             }
         };
+
+        // Implement BQ25730 charge/discharge control based on BQ76920 MOS and System status
+        // Directly use mos_status and sys_status as they are not Options here
+        let mos_status = bq76920_measurements.core_measurements.mos_status;
+        let sys_status = bq76920_measurements.core_measurements.system_status;
+
+        let bq76920_charge_allowed_by_mos = mos_status.0.contains(Bq76920SysCtrl2Flags::CHG_ON);
+        let bq76920_discharge_allowed_by_mos = mos_status.0.contains(Bq76920SysCtrl2Flags::DSG_ON);
+
+        // Check BQ76920 system status for faults that should prevent charging
+        let can_charge_from_sys_status = !sys_status.0.intersects(
+            Bq76920SysStatFlags::OV // Over-voltage
+            // Add other critical flags if needed, e.g., OVR_TEMP if it's a charging fault
+        );
+
+        // Check BQ76920 system status for faults that should prevent discharging
+        let can_discharge_from_sys_status = !sys_status.0.intersects(
+            Bq76920SysStatFlags::UV   | // Under-voltage
+            Bq76920SysStatFlags::SCD  | // Short-circuit discharge
+            Bq76920SysStatFlags::OCD    // Over-current discharge
+            // Add other critical flags if needed
+        );
+
+        // `final_charge_permission` and `final_discharge_permission` are now declared in the correct scope
+        let final_charge_permission = bq76920_charge_allowed_by_mos && can_charge_from_sys_status;
+        let final_discharge_permission = bq76920_discharge_allowed_by_mos && can_discharge_from_sys_status;
+
+        info!("BQ76920 MOS: CHG_ON={}, DSG_ON={}", bq76920_charge_allowed_by_mos, bq76920_discharge_allowed_by_mos);
+        info!("BQ76920 SYS: CanCharge={}, CanDischarge={}", can_charge_from_sys_status, can_discharge_from_sys_status);
+        info!("Final BQ25730 Control: AllowCharge={}, AllowDischarge={}", final_charge_permission, final_discharge_permission);
+
+        // Control BQ25730 charging (via ChargeOption0.CHRG_INHIBIT)
+        match bq25730.read_charge_option0().await {
+            Ok(mut charge_option_0) => {
+                if final_charge_permission {
+                    let lsb = &mut charge_option_0.lsb_flags;
+                    lsb.remove(ChargeOption0Flags::CHRG_INHIBIT); // CHRG_INHIBIT = 0 to enable charging
+                    info!("Attempting to ENABLE BQ25730 charging (CHRG_INHIBIT=0).");
+                } else {
+                    let lsb = &mut charge_option_0.lsb_flags;
+                    lsb.insert(ChargeOption0Flags::CHRG_INHIBIT); // CHRG_INHIBIT = 1 to disable charging
+                    info!("Attempting to DISABLE BQ25730 charging (CHRG_INHIBIT=1).");
+                }
+                match bq25730.set_charge_option0(charge_option_0).await {
+                    Ok(_) => info!("BQ25730 ChargeOption0 (CHRG_INHIBIT) updated."),
+                    Err(e) => error!("Failed to update BQ25730 ChargeOption0 (CHRG_INHIBIT): {:?}", e),
+                }
+            },
+            Err(e) => error!("Failed to read BQ25730 ChargeOption0 for charging control: {:?}", e),
+        }
+
+        // Control BQ25730 discharging (OTG Mode via ChargeOption3.EN_OTG)
+        match bq25730.read_charge_option3().await {
+            Ok(mut charge_option_3) => {
+                if final_discharge_permission {
+                    let msb = &mut charge_option_3.msb_flags;
+                    msb.insert(ChargeOption3MsbFlags::EN_OTG); // EN_OTG = 1 to enable OTG
+                    info!("Attempting to ENABLE BQ25730 discharging (EN_OTG=1).");
+                } else {
+                    let msb = &mut charge_option_3.msb_flags;
+                    msb.remove(ChargeOption3MsbFlags::EN_OTG); // EN_OTG = 0 to disable OTG
+                    info!("Attempting to DISABLE BQ25730 discharging (EN_OTG=0).");
+                }
+                match bq25730.set_charge_option3(charge_option_3).await {
+                    Ok(_) => info!("BQ25730 ChargeOption3 (EN_OTG) updated."),
+                    Err(e) => error!("Failed to update BQ25730 ChargeOption3 (EN_OTG): {:?}", e),
+                }
+            },
+            Err(e) => error!("Failed to read BQ25730 ChargeOption3 for OTG control: {:?}", e),
+        }
+
+        // Implement battery charge logic based on BQ76920 total battery voltage and final_charge_permission
+        let total_voltage_mv: u16 = bq76920_measurements.core_measurements.cell_voltages.voltages.iter().sum();
+        info!("BQ76920 Total Voltage: {} mV for BQ25730 parameter decision.", total_voltage_mv);
+
+        // Define charging parameters
+        let charge_stop_threshold_mv = 3600 * 5; // Example: Stop charging if total voltage is above 18V (3.6V per cell for 5 cells)
+        let charge_current_ma = 1000;            // Example: Charge current 1000mA
+        let charge_voltage_mv = 18000;           // Example: Charge voltage 18000mV (18V)
+
+        // Set charging parameters only if charging is permitted AND battery voltage is below stop threshold.
+        // CHRG_INHIBIT bit itself is controlled by `final_charge_permission` logic block above.
+        if final_charge_permission {
+            if total_voltage_mv < charge_stop_threshold_mv {
+                info!("Setting/Re-asserting BQ25730 charge voltage ({} mV) and current ({} mA).", charge_voltage_mv, charge_current_ma);
+                match bq25730.set_charge_voltage(bq25730_async_rs::data_types::ChargeVoltage(charge_voltage_mv)).await {
+                    Ok(_) => info!("BQ25730 charge voltage set to {} mV.", charge_voltage_mv),
+                    Err(e) => error!("Failed to set BQ25730 charge voltage: {:?}", e),
+                }
+                match bq25730.set_charge_current(bq25730_async_rs::data_types::ChargeCurrent(charge_current_ma)).await {
+                    Ok(_) => info!("BQ25730 charge current set to {} mA.", charge_current_ma),
+                    Err(e) => error!("Failed to set BQ25730 charge current: {:?}", e),
+                }
+            } else { // total_voltage_mv >= charge_stop_threshold_mv
+                info!("Total voltage ({}) at or above stop threshold ({}). Charging should be inhibited by CHRG_INHIBIT logic or BQ25730 internal protection. Not setting parameters.",
+                      total_voltage_mv, charge_stop_threshold_mv);
+            }
+        } else { // !final_charge_permission
+            info!("BQ25730 charging is not permitted by BQ76920 (final_charge_permission=false). Not setting charge parameters.");
+        }
 
         // Construct BQ25730 measurements
         let bq25730_measurements = crate::data_types::Bq25730Measurements {
@@ -282,6 +389,7 @@ pub async fn bq25730_task(
         // Publish BQ25730 measurements
         bq25730_measurements_publisher.publish_immediate(bq25730_measurements);
         // Add other BQ25730 measurement fields here when implemented
+        info!("BQ25730 task loop end."); // Add a log to mark the end of the loop iteration
         Timer::after(Duration::from_secs(1)).await; // Adjust delay as needed
     }
 }
