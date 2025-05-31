@@ -1,4 +1,3 @@
-use binrw::binrw;
 use defmt::Format;
 
 use bq769x0_async_rs::data_types::{Bq76920Measurements as Bq76920CoreMeasurements, SystemStatus};
@@ -6,7 +5,7 @@ use bq25730_async_rs::data_types::{AdcMeasurements, ChargerStatus, ProchotStatus
 
 /// BQ25730 测量数据
 #[derive(Debug, Copy, Clone, PartialEq, defmt::Format)]
-#[binrw]
+
 pub struct Bq25730Measurements {
     pub adc_measurements: AdcMeasurements,
     // 添加其他非告警相关的测量数据字段（如果需要）
@@ -14,7 +13,7 @@ pub struct Bq25730Measurements {
 
 /// BQ25730 安全告警信息
 #[derive(Debug, Copy, Clone, PartialEq)]
-#[binrw]
+
 pub struct Bq25730Alerts {
     pub charger_status: ChargerStatus,
     pub prochot_status: ProchotStatus,
@@ -22,20 +21,20 @@ pub struct Bq25730Alerts {
 
 /// BQ76920 测量数据
 #[derive(Debug, Copy, Clone, PartialEq)]
-#[binrw]
+
 pub struct Bq76920Measurements<const N: usize> {
     pub core_measurements: Bq76920CoreMeasurements<N>,
 }
 
 /// BQ76920 安全告警信息
 #[derive(Debug, Copy, Clone, PartialEq)]
-#[binrw]
+
 pub struct Bq76920Alerts {
     pub system_status: SystemStatus,
 }
 /// INA226 测量数据
 #[derive(Debug, Copy, Clone, PartialEq, defmt::Format)]
-#[binrw]
+
 pub struct Ina226Measurements {
     pub voltage: f32,
     pub current: f32,
@@ -44,13 +43,55 @@ pub struct Ina226Measurements {
 
 /// 聚合所有设备的测量数据
 #[derive(Debug, Copy, Clone, PartialEq)]
-#[binrw]
+
 pub struct AllMeasurements<const N: usize> {
     pub bq25730: Bq25730Measurements,
     pub bq76920: Bq76920Measurements<N>,
     pub ina226: Ina226Measurements,
     pub bq25730_alerts: Bq25730Alerts,
     pub bq76920_alerts: Bq76920Alerts,
+}
+
+/// Payload structure for USB communication, containing flattened data from AllMeasurements.
+#[derive(Debug, Copy, Clone, PartialEq, binrw::BinRead, binrw::BinWrite, defmt::Format)] // Added defmt::Format
+pub struct AllMeasurementsUsbPayload {
+    // Fields from Bq25730Measurements -> AdcMeasurements
+    pub bq25730_adc_vbat_raw: u16, // Raw u16 value after AdcVbat.to_u16()
+    pub bq25730_adc_vsys_raw: u16, // Raw u16 value after AdcVsys.to_u16()
+    pub bq25730_adc_ichg_raw: u16, // Raw u16 value after AdcIchg.to_u16()
+    pub bq25730_adc_idchg_raw: u16, // Raw u16 value after AdcIdchg.to_u16()
+    pub bq25730_adc_iin_raw: u16, // Raw u16 value after AdcIin.to_u16() (represents milliamps part)
+    pub bq25730_adc_psys_raw: u16, // Raw u16 value after AdcPsys.to_u16()
+    pub bq25730_adc_vbus_raw: u16, // Raw u16 value after AdcVbus.to_u16()
+    pub bq25730_adc_cmpin_raw: u16, // Raw u16 value after AdcCmpin.to_u16()
+
+    // Fields from Bq76920Measurements -> Bq76920CoreMeasurements<5>
+    pub bq76920_cell1_mv: i32,
+    pub bq76920_cell2_mv: i32,
+    pub bq76920_cell3_mv: i32,
+    pub bq76920_cell4_mv: i32,
+    pub bq76920_cell5_mv: i32,
+    pub bq76920_ts1_raw_adc: u16,
+    pub bq76920_ts2_present: u8,   // 1 if Some, 0 if None
+    pub bq76920_ts2_raw_adc: u16,  // value or 0 if not present
+    pub bq76920_ts3_present: u8,   // 1 if Some, 0 if None
+    pub bq76920_ts3_raw_adc: u16,  // value or 0 if not present
+    pub bq76920_is_thermistor: u8, // 0 or 1
+    pub bq76920_current_ma: i32,
+    pub bq76920_system_status_bits: u8,
+    pub bq76920_mos_status_bits: u8,
+
+    // Fields from Ina226Measurements
+    pub ina226_voltage_f32: f32,
+    pub ina226_current_f32: f32,
+    pub ina226_power_f32: f32,
+
+    // Fields from Bq25730Alerts
+    pub bq25730_charger_status_raw_u16: u16, // Raw u16 from ChargerStatus.to_u16()
+    pub bq25730_prochot_status_raw_u16: u16, // Raw u16 from ProchotStatus.to_u16()
+
+    // Fields from Bq76920Alerts
+    pub bq76920_alerts_system_status_bits: u8, // Raw u8 from SystemStatus.0.bits()
 }
 
 impl<const N: usize> Format for AllMeasurements<N> {

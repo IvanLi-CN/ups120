@@ -4,7 +4,7 @@ use embassy_usb::Builder;
 use embassy_usb::driver::EndpointError;
 use embassy_usb::driver::{Driver, Endpoint, EndpointIn, EndpointOut};
 
-use crate::data_types::AllMeasurements;
+use crate::data_types::AllMeasurementsUsbPayload; // Added AllMeasurementsUsbPayload
 
 #[repr(u8)]
 #[derive(BinRead, BinWrite, Debug, Clone, Copy, defmt::Format)]
@@ -17,11 +17,11 @@ pub enum UsbData {
 
     // Responses
     #[brw(magic = 0x80u8)]
-    StatusResponse(AllMeasurements<5>),
+    StatusResponse(AllMeasurementsUsbPayload),
 
     // Push Data
     #[brw(magic = 0xC0u8)]
-    StatusPush(AllMeasurements<5>),
+    StatusPush(AllMeasurementsUsbPayload),
 }
 
 pub struct UsbEndpoints<'d, D: Driver<'d>> {
@@ -116,7 +116,7 @@ impl<'d, D: Driver<'d>> UsbEndpoints<'d, D> {
     pub async fn process_command(
         &mut self,
         command: UsbData,
-        current_measurements: &AllMeasurements<5>,
+        current_payload: &AllMeasurementsUsbPayload, // Changed parameter type and name
     ) -> Result<(), EndpointError> {
         defmt::info!(
             "process_command: Received command: {:?}, current_subscription_status: {}",
@@ -135,12 +135,12 @@ impl<'d, D: Driver<'d>> UsbEndpoints<'d, D> {
                     self.status_subscription_active
                 );
                 // Send a response to confirm subscription with current data
-                let response_data = current_measurements.clone();
+                // current_payload is a reference to a Copy type, so dereference it.
                 defmt::debug!(
                     "process_command: Preparing StatusResponse with data: {:?}",
-                    response_data
+                    *current_payload
                 );
-                let response = UsbData::StatusResponse(response_data);
+                let response = UsbData::StatusResponse(*current_payload); // Use dereferenced current_payload
                 match self.send_response(response).await {
                     Ok(_) => defmt::info!(
                         "process_command: Successfully sent subscription confirmation response."
@@ -177,7 +177,7 @@ impl<'d, D: Driver<'d>> UsbEndpoints<'d, D> {
 
     pub async fn send_status_update(
         &mut self,
-        data: AllMeasurements<5>,
+        data: AllMeasurementsUsbPayload, // Changed parameter type
     ) -> Result<(), EndpointError> {
         defmt::trace!(
             "send_status_update: Entered. Current status_subscription_active: {}",

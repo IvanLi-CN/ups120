@@ -9,6 +9,7 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use bq769x0_async_rs::registers::*;
 // use bq769x0_async_rs::units::ElectricalResistance; // Removed as uom is no longer used by the lib
 use bq769x0_async_rs::{BatteryConfig, Bq769x0, errors::Error as BQ769x0Error}; // Import Error, removed RegisterAccess
+use bq769x0_async_rs::ProtectionConfig; // Added to resolve E0422
 
 // Import necessary data types
 use crate::shared::{
@@ -81,19 +82,18 @@ pub async fn bq76920_task(
 
     // Define the battery configuration.
     // Start with default values and then override specific parameters.
-    let mut battery_config = BatteryConfig::default();
-
-    // Example: Configure for a 5-cell LiFePO4 battery.
-    // Overvoltage trip threshold per cell (e.g., 3.6V).
-    battery_config.overvoltage_trip = 3600u32;
-    // Undervoltage trip threshold per cell (e.g., 2.5V).
-    battery_config.undervoltage_trip = 2500u32;
-    // Overcurrent in Discharge (OCD) limit (e.g., 10A).
-    // Note: The driver converts this current limit to a voltage threshold based on Rsense.
-    battery_config.protection_config.ocd_limit = 10_000i32; // 10_000 mA = 10A
-    // Short Circuit in Discharge (SCD) limit is also part of ProtectionConfig, using default here.
-    // Rsense value is part of BatteryConfig and used for current limit calculations.
-    battery_config.rsense = sense_resistor_uohms / 1000; // rsense in mOhms for BatteryConfig
+    // Define the battery configuration using struct update syntax.
+    // `sense_resistor_uohms` is defined earlier in the function.
+    let battery_config = BatteryConfig {
+        overvoltage_trip: 3600u32,  // Set to 3.6V
+        undervoltage_trip: 2500u32, // Set to 2.5V
+        protection_config: ProtectionConfig {
+            ocd_limit: 10_000i32, // Set to 10A (10_000 mA)
+            ..BatteryConfig::default().protection_config // Inherit other protection_config fields
+        },
+        rsense: sense_resistor_uohms / 1000, // Calculate rsense in mOhms
+        ..Default::default() // Inherit other BatteryConfig fields
+    };
 
     let mut fets_enabled_after_config = false;
 
@@ -278,9 +278,9 @@ pub async fn bq76920_task(
         let bq76920_measurements_payload = crate::data_types::Bq76920Measurements {
             core_measurements: bq769x0_async_rs::data_types::Bq76920Measurements {
                 cell_voltages: _voltages
-                    .unwrap_or_else(bq769x0_async_rs::data_types::CellVoltages::new),
+                    .unwrap_or_default(),
                 temperatures: _temps
-                    .unwrap_or_else(bq769x0_async_rs::data_types::TemperatureSensorReadings::new),
+                    .unwrap_or_default(),
                 current: _current.unwrap_or(0i32), // Default to 0 mA if current read failed.
                 system_status: _system_status
                     .unwrap_or_else(|| bq769x0_async_rs::data_types::SystemStatus::new(0)),

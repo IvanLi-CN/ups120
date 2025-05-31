@@ -93,8 +93,7 @@ pub async fn bq25730_task(
             "Failed to set BQ25730 ChargeOption1 (sense resistors): {:?}",
             e
         );
-    } else {
-    }
+    } 
 
     let initial_charge_current = ChargeCurrent(0);
     if let Err(e) = bq25730.set_charge_current(initial_charge_current).await {
@@ -102,14 +101,12 @@ pub async fn bq25730_task(
             "Failed to set initial BQ25730 charge current to 0mA: {:?}",
             e
         );
-    } else {
-    }
+    } 
 
     let target_charge_voltage = ChargeVoltage(18000);
     if let Err(e) = bq25730.set_charge_voltage(target_charge_voltage).await {
         error!("Failed to set BQ25730 target charge voltage: {:?}", e);
-    } else {
-    }
+    } 
 
     info!("Configuring and enabling BQ25730 ADC for continuous conversion...");
     let adc_option = bq25730_async_rs::data_types::AdcOption {
@@ -127,8 +124,7 @@ pub async fn bq25730_task(
     };
     if let Err(e) = bq25730.set_adc_option(adc_option).await {
         error!("Failed to set BQ25730 ADC options: {:?}", e);
-    } else {
-    }
+    } 
 
     match bq25730.set_vsys_min(VsysMin(12000)).await {
         Ok(()) => { /* Log removed */ }

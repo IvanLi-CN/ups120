@@ -56,9 +56,9 @@ embedded-hal = "1.0.0"
 panic-probe = { version = "1.0.0", features = ["print-defmt"] }
 heapless = { version = "0.8", default-features = false }
 portable-atomic = { version = "1.11.0", features = ["critical-section"] }
-static_cell = "2.1.0" # Add static_cell dependency
-libm = "0.2.8" # Add libm dependency
-embedded-alloc = "0.6.0" # Change embedded-alloc version to 0.6.0
+static_cell = "2.1.0"
+libm = "0.2.8"
+embedded-alloc = "0.6.0"
 
 embedded-io-async = { version = "0.6.1" }
 binrw = { version = "0.15", default-features = false }
@@ -66,16 +66,18 @@ binrw = { version = "0.15", default-features = false }
 bq769x0-async-rs = { version = "0.0.0", path = "./bq76920", features = [
   "async",
   "defmt",
-  "binrw",
 ] }
 bq25730-async-rs = { version = "0.0.0", path = "./bq25730", features = [
   "async",
   "defmt",
-  "binrw",
 ] }
 
 ina226 = { version = "0.3.0", features = ["async"] }
 
+[[bin]]
+name = "ups120"
+path = "src/main.rs"
+test = false
 [profile.dev]
 codegen-units = 1
 debug = 2

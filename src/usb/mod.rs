@@ -189,54 +189,56 @@ pub async fn usb_task(
                                                             // ** CRITICAL FIX: Process the command **
                                                             // Aggregate data *before* processing command, as process_command might need current_measurements
                                                             let current_aggregated_data_for_command = AllMeasurements {
-                                               bq25730: latest_bq25730_measurements.clone().unwrap_or_else(|| Bq25730Measurements {
-                                                   adc_measurements: bq25730_async_rs::data_types::AdcMeasurements {
-                                                       psys: bq25730_async_rs::data_types::AdcPsys::from_u8(0),
-                                                       vbus: bq25730_async_rs::data_types::AdcVbus::from_u8(0),
-                                                       idchg: bq25730_async_rs::data_types::AdcIdchg::from_u8(0),
-                                                       ichg: bq25730_async_rs::data_types::AdcIchg::from_u8(0),
-                                                       cmpin: bq25730_async_rs::data_types::AdcCmpin::from_u8(0),
-                                                       iin: bq25730_async_rs::data_types::AdcIin::from_u8(0, true),
-                                                       vbat: bq25730_async_rs::data_types::AdcVbat::from_register_value(0, 0, 0),
-                                                       vsys: bq25730_async_rs::data_types::AdcVsys::from_register_value(0, 0, 0),
-                                                   },
-                                               }),
-                                               ina226: latest_ina226_measurements.clone().unwrap_or_else(|| Ina226Measurements {
-                                                   voltage: 0.0,
-                                                   current: 0.0,
-                                                   power: 0.0,
-                                               }),
-                                               bq76920: latest_bq76920_measurements.clone().unwrap_or_else(|| Bq76920Measurements {
-                                                   core_measurements: bq769x0_async_rs::data_types::Bq76920Measurements {
-                                                       cell_voltages: bq769x0_async_rs::data_types::CellVoltages::new(),
-                                                       temperatures: bq769x0_async_rs::data_types::TemperatureSensorReadings::new(),
-                                                       current: 0i32,
-                                                       system_status: bq769x0_async_rs::data_types::SystemStatus::new(0),
-                                                       mos_status: bq769x0_async_rs::data_types::MosStatus::new(0),
-                                                   },
-                                               }),
-                                               bq25730_alerts: latest_bq25730_alerts.clone().unwrap_or_else(|| Bq25730Alerts {
-                                                   charger_status: bq25730_async_rs::data_types::ChargerStatus {
-                                                       status_flags: bq25730_async_rs::registers::ChargerStatusFlags::empty(),
-                                                       fault_flags: bq25730_async_rs::registers::ChargerStatusFaultFlags::empty(),
-                                                   },
-                                                   prochot_status: bq25730_async_rs::data_types::ProchotStatus {
-                                                       msb_flags: bq25730_async_rs::registers::ProchotStatusMsbFlags::empty(),
-                                                       lsb_flags: bq25730_async_rs::registers::ProchotStatusFlags::empty(),
-                                                       prochot_width: 0,
-                                                   },
-                                               }),
-                                               bq76920_alerts: latest_bq76920_alerts.clone().unwrap_or_else(|| Bq76920Alerts {
-                                                   system_status: bq769x0_async_rs::data_types::SystemStatus::new(0),
-                                               }),
-                                           };
+                                                bq25730: latest_bq25730_measurements.unwrap_or_else(|| Bq25730Measurements { // .clone() removed as unwrap_or_else takes ownership or default
+                                                    adc_measurements: bq25730_async_rs::data_types::AdcMeasurements {
+                                                        psys: bq25730_async_rs::data_types::AdcPsys::from_u8(0),
+                                                        vbus: bq25730_async_rs::data_types::AdcVbus::from_u8(0),
+                                                        idchg: bq25730_async_rs::data_types::AdcIdchg::from_u8(0),
+                                                        ichg: bq25730_async_rs::data_types::AdcIchg::from_u8(0),
+                                                        cmpin: bq25730_async_rs::data_types::AdcCmpin::from_u8(0),
+                                                        iin: bq25730_async_rs::data_types::AdcIin::from_u8(0, true),
+                                                        vbat: bq25730_async_rs::data_types::AdcVbat::from_register_value(0, 0, 0),
+                                                        vsys: bq25730_async_rs::data_types::AdcVsys::from_register_value(0, 0, 0),
+                                                    },
+                                                }),
+                                                ina226: latest_ina226_measurements.unwrap_or(Ina226Measurements { // .clone() removed
+                                                    voltage: 0.0,
+                                                    current: 0.0,
+                                                    power: 0.0,
+                                                }),
+                                                bq76920: latest_bq76920_measurements.unwrap_or_else(|| Bq76920Measurements { // .clone() removed
+                                                    core_measurements: bq769x0_async_rs::data_types::Bq76920Measurements {
+                                                        cell_voltages: bq769x0_async_rs::data_types::CellVoltages::new(),
+                                                        temperatures: bq769x0_async_rs::data_types::TemperatureSensorReadings::new(),
+                                                        current: 0i32,
+                                                        system_status: bq769x0_async_rs::data_types::SystemStatus::new(0),
+                                                        mos_status: bq769x0_async_rs::data_types::MosStatus::new(0),
+                                                    },
+                                                }),
+                                                bq25730_alerts: latest_bq25730_alerts.unwrap_or_else(|| Bq25730Alerts { // .clone() removed
+                                                    charger_status: bq25730_async_rs::data_types::ChargerStatus {
+                                                        status_flags: bq25730_async_rs::registers::ChargerStatusFlags::empty(),
+                                                        fault_flags: bq25730_async_rs::registers::ChargerStatusFaultFlags::empty(),
+                                                    },
+                                                    prochot_status: bq25730_async_rs::data_types::ProchotStatus {
+                                                        msb_flags: bq25730_async_rs::registers::ProchotStatusMsbFlags::empty(),
+                                                        lsb_flags: bq25730_async_rs::registers::ProchotStatusFlags::empty(),
+                                                        prochot_width: 0,
+                                                    },
+                                                }),
+                                                bq76920_alerts: latest_bq76920_alerts.unwrap_or_else(|| Bq76920Alerts { // .clone() removed
+                                                    system_status: bq769x0_async_rs::data_types::SystemStatus::new(0),
+                                                }),
+                                            };
+                                            // Convert to AllMeasurementsUsbPayload
+                                            let command_payload = convert_to_payload(&current_aggregated_data_for_command);
 
                                                             defmt::debug!(
-                                                                "usb_task: Calling process_command with command: {:?} and current_measurements: {:?}",
+                                                                "usb_task: Calling process_command with command: {:?} and payload: {:?}",
                                                                 cmd,
-                                                                current_aggregated_data_for_command
+                                                                command_payload // Log the payload
                                                             );
-                                                            if let Err(e) = usb_endpoints.process_command(cmd, &current_aggregated_data_for_command).await {
+                                                            if let Err(e) = usb_endpoints.process_command(cmd, &command_payload).await { // Pass reference to payload
                                                 defmt::error!("usb_task: Error processing USB command: {:?}", e);
                                             }
                                                             defmt::debug!(
@@ -277,7 +279,7 @@ pub async fn usb_task(
                         vsys: bq25730_async_rs::data_types::AdcVsys::from_register_value(0, 0, 0),
                     },
                 }),
-                ina226: latest_ina226_measurements.unwrap_or_else(|| Ina226Measurements {
+                ina226: latest_ina226_measurements.unwrap_or(Ina226Measurements {
                     voltage: 0.0,
                     current: 0.0,
                     power: 0.0,
@@ -314,7 +316,7 @@ pub async fn usb_task(
             );
 
             // Publish the aggregated data
-            measurements_publisher.publish_immediate(all_measurements_and_alerts.clone());
+            measurements_publisher.publish_immediate(all_measurements_and_alerts);
             defmt::debug!("usb_task: Published aggregated data.");
 
             // Send the aggregated data over USB if subscription is active
@@ -326,8 +328,10 @@ pub async fn usb_task(
                 defmt::info!(
                     "usb_task: Subscription active, attempting to send status update via USB."
                 );
+                // Convert to AllMeasurementsUsbPayload before sending
+                let status_update_payload = convert_to_payload(&all_measurements_and_alerts);
                 if let Err(e) = usb_endpoints
-                    .send_status_update(all_measurements_and_alerts)
+                    .send_status_update(status_update_payload) // Pass the converted payload
                     .await
                 {
                     defmt::error!("usb_task: Failed to send status update over USB: {:?}", e);
@@ -353,6 +357,48 @@ pub async fn usb_task(
     embassy_futures::join::join(usb_fut, main_usb_processing_fut).await;
 }
 
+// Helper function to convert AllMeasurements<5> to AllMeasurementsUsbPayload
+fn convert_to_payload(data: &AllMeasurements<5>) -> crate::data_types::AllMeasurementsUsbPayload {
+    crate::data_types::AllMeasurementsUsbPayload {
+        // BQ25730 Measurements
+        bq25730_adc_vbat_raw: data.bq25730.adc_measurements.vbat.to_u16(),
+        bq25730_adc_vsys_raw: data.bq25730.adc_measurements.vsys.to_u16(),
+        bq25730_adc_ichg_raw: data.bq25730.adc_measurements.ichg.to_u16(),
+        bq25730_adc_idchg_raw: data.bq25730.adc_measurements.idchg.to_u16(),
+        bq25730_adc_iin_raw: data.bq25730.adc_measurements.iin.to_u16(),
+        bq25730_adc_psys_raw: data.bq25730.adc_measurements.psys.to_u16(),
+        bq25730_adc_vbus_raw: data.bq25730.adc_measurements.vbus.to_u16(),
+        bq25730_adc_cmpin_raw: data.bq25730.adc_measurements.cmpin.to_u16(),
+
+        // BQ76920 Measurements
+        bq76920_cell1_mv: data.bq76920.core_measurements.cell_voltages.voltages[0],
+        bq76920_cell2_mv: data.bq76920.core_measurements.cell_voltages.voltages[1],
+        bq76920_cell3_mv: data.bq76920.core_measurements.cell_voltages.voltages[2],
+        bq76920_cell4_mv: data.bq76920.core_measurements.cell_voltages.voltages[3],
+        bq76920_cell5_mv: data.bq76920.core_measurements.cell_voltages.voltages[4],
+        bq76920_ts1_raw_adc: data.bq76920.core_measurements.temperatures.ts1,
+        bq76920_ts2_present: data.bq76920.core_measurements.temperatures.ts2.is_some() as u8,
+        bq76920_ts2_raw_adc: data.bq76920.core_measurements.temperatures.ts2.unwrap_or(0),
+        bq76920_ts3_present: data.bq76920.core_measurements.temperatures.ts3.is_some() as u8,
+        bq76920_ts3_raw_adc: data.bq76920.core_measurements.temperatures.ts3.unwrap_or(0),
+        bq76920_is_thermistor: data.bq76920.core_measurements.temperatures.is_thermistor as u8,
+        bq76920_current_ma: data.bq76920.core_measurements.current,
+        bq76920_system_status_bits: data.bq76920.core_measurements.system_status.0.bits(),
+        bq76920_mos_status_bits: data.bq76920.core_measurements.mos_status.0.bits(),
+
+        // Ina226 Measurements
+        ina226_voltage_f32: data.ina226.voltage,
+        ina226_current_f32: data.ina226.current,
+        ina226_power_f32: data.ina226.power,
+
+        // Bq25730 Alerts
+        bq25730_charger_status_raw_u16: data.bq25730_alerts.charger_status.to_u16(),
+        bq25730_prochot_status_raw_u16: data.bq25730_alerts.prochot_status.to_u16(),
+
+        // Bq76920 Alerts
+        bq76920_alerts_system_status_bits: data.bq76920_alerts.system_status.0.bits(),
+    }
+}
 struct Disconnected {}
 
 impl From<EndpointError> for Disconnected {
