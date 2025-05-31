@@ -84,7 +84,6 @@ pub async fn bq25730_task(
 
     let mut bq25730 = Bq25730::new(i2c_bus, address, 4);
 
-
     let charge_option1 = bq25730_async_rs::data_types::ChargeOption1 {
         msb_flags: bq25730_async_rs::registers::ChargeOption1MsbFlags::from_bits_truncate(0x37),
         lsb_flags: bq25730_async_rs::registers::ChargeOption1Flags::from_bits_truncate(0x01),
@@ -132,7 +131,7 @@ pub async fn bq25730_task(
     }
 
     match bq25730.set_vsys_min(VsysMin(12000)).await {
-        Ok(()) => { /* Log removed */ },
+        Ok(()) => { /* Log removed */ }
         Err(e) => error!("Failed to set BQ25730 VsysMin: {}", e),
     }
 

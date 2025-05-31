@@ -60,19 +60,45 @@ impl<'d, D: Driver<'d>> UsbEndpoints<'d, D> {
     }
 
     pub async fn parse_command(&mut self) -> Result<UsbData, EndpointError> {
+        defmt::trace!("parse_command: Waiting for data on command_read_ep");
         let n = self.command_read_ep.read(&mut self.read_buffer).await?;
+        defmt::info!(
+            "parse_command: Received {} bytes: {:x}",
+            n,
+            &self.read_buffer[..n]
+        );
         let mut reader = Cursor::new(&self.read_buffer[..n]);
-        let cmd = UsbData::read_be(&mut reader).map_err(|_| EndpointError::BufferOverflow)?; // Use direct BinRead trait method
-        Ok(cmd)
+        match UsbData::read_be(&mut reader) {
+            Ok(cmd) => {
+                defmt::info!("parse_command: Parsed command: {:?}", cmd);
+                Ok(cmd)
+            }
+            Err(_e) => {
+                // Changed `e` to `_e` as it's not directly formatted
+                defmt::error!(
+                    "parse_command: Failed to parse command (binrw::Error). Raw data: {:x}",
+                    &self.read_buffer[..n]
+                );
+                Err(EndpointError::BufferOverflow) // Or a more specific error if available
+            }
+        }
     }
 
     #[allow(dead_code)]
     pub async fn send_response(&mut self, data: UsbData) -> Result<(), EndpointError> {
+        defmt::trace!("send_response: Preparing to send response: {:?}", data);
         let mut writer = Cursor::new(&mut self.write_buffer[..]);
-        data.write_be(&mut writer)
-            .map_err(|_| EndpointError::BufferOverflow)?;
+        data.write_be(&mut writer).map_err(|_e| {
+            // Changed `e` to `_e` as it's not directly formatted
+            defmt::error!("send_response: Error writing data to buffer (binrw::Error).");
+            EndpointError::BufferOverflow
+        })?;
         let len = writer.position() as usize;
-        defmt::info!("固件发送响应原始字节: {:x}", &self.write_buffer[..len]);
+        defmt::info!(
+            "send_response: Sending response, len={}, raw_bytes={:x}",
+            len,
+            &self.write_buffer[..len]
+        );
 
         let mut cur = 0;
         let max_packet = 64; // Assuming max packet size for interrupt endpoint
@@ -92,24 +118,58 @@ impl<'d, D: Driver<'d>> UsbEndpoints<'d, D> {
         command: UsbData,
         current_measurements: &AllMeasurements<5>,
     ) -> Result<(), EndpointError> {
+        defmt::info!(
+            "process_command: Received command: {:?}, current_subscription_status: {}",
+            command,
+            self.status_subscription_active
+        );
         match command {
             UsbData::SubscribeStatus => {
+                defmt::debug!(
+                    "process_command: Processing SubscribeStatus. Old status_subscription_active: {}",
+                    self.status_subscription_active
+                );
                 self.status_subscription_active = true;
-                defmt::info!("Status subscription active");
+                defmt::info!(
+                    "process_command: Status subscription ACTIVATED. New status_subscription_active: {}",
+                    self.status_subscription_active
+                );
                 // Send a response to confirm subscription with current data
-                let response = UsbData::StatusResponse(current_measurements.clone()); // Clone because AllMeasurements is not Copy
-                if let Err(e) = self.send_response(response).await {
-                    defmt::error!("Failed to send subscription confirmation response: {:?}", e);
+                let response_data = current_measurements.clone();
+                defmt::debug!(
+                    "process_command: Preparing StatusResponse with data: {:?}",
+                    response_data
+                );
+                let response = UsbData::StatusResponse(response_data);
+                match self.send_response(response).await {
+                    Ok(_) => defmt::info!(
+                        "process_command: Successfully sent subscription confirmation response."
+                    ),
+                    Err(e) => defmt::error!(
+                        "process_command: Failed to send subscription confirmation response: {:?}",
+                        e
+                    ),
                 }
             }
             UsbData::UnsubscribeStatus => {
+                defmt::debug!(
+                    "process_command: Processing UnsubscribeStatus. Old status_subscription_active: {}",
+                    self.status_subscription_active
+                );
                 self.status_subscription_active = false;
-                defmt::info!("Status subscription inactive");
+                defmt::info!(
+                    "process_command: Status subscription DEACTIVATED. New status_subscription_active: {}",
+                    self.status_subscription_active
+                );
                 // Optionally send a response to confirm unsubscription
                 // We could send a simple ACK here if needed, but for now, just logging is sufficient.
+                defmt::debug!("process_command: UnsubscribeStatus processed.");
             }
             _ => {
-                // Handle unknown commands or other data types if necessary
+                defmt::warn!(
+                    "process_command: Received unhandled command type: {:?}",
+                    command
+                );
             }
         }
         Ok(())
@@ -119,9 +179,18 @@ impl<'d, D: Driver<'d>> UsbEndpoints<'d, D> {
         &mut self,
         data: AllMeasurements<5>,
     ) -> Result<(), EndpointError> {
+        defmt::trace!(
+            "send_status_update: Entered. Current status_subscription_active: {}",
+            self.status_subscription_active
+        );
         if !self.status_subscription_active {
+            defmt::debug!("send_status_update: Subscription not active, skipping send.");
             return Ok(());
         }
+        defmt::debug!(
+            "send_status_update: Subscription active, preparing to send data: {:?}",
+            data
+        );
 
         let mut writer = Cursor::new(&mut self.write_buffer[..]);
         UsbData::StatusPush(data)

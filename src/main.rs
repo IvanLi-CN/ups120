@@ -4,7 +4,7 @@
 
 extern crate alloc; // Required for global allocator
 
-use defmt::*;
+// use defmt::*; // Removed unused import
 use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
 use embassy_executor::Spawner;
 use embassy_stm32::{
@@ -45,7 +45,6 @@ static HEAP: Heap = Heap::empty();
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
-
     // Initialize global allocator
     {
         const HEAP_SIZE: usize = 16_384;
@@ -62,9 +61,9 @@ async fn main(spawner: Spawner) {
         measurements_publisher, // Publisher for AllMeasurements
         _measurements_channel,  // Channel for AllMeasurements, if needed to create more subs
         bq25730_alerts_publisher,
-        bq25730_alerts_channel, // Channel for BQ25730 Alerts
-        bq76920_alerts_publisher,   // Publisher for BQ76920 Alerts
-        bq76920_alerts_channel, // Channel for BQ76920 Alerts, used to create subscriber
+        bq25730_alerts_channel,   // Channel for BQ25730 Alerts
+        bq76920_alerts_publisher, // Publisher for BQ76920 Alerts
+        bq76920_alerts_channel,   // Channel for BQ76920 Alerts, used to create subscriber
         bq25730_measurements_publisher,
         bq25730_measurements_channel, // Channel for BQ25730 Measurements, used to create subscriber
         bq76920_measurements_publisher,
@@ -73,10 +72,8 @@ async fn main(spawner: Spawner) {
         ina226_measurements_channel, // Channel for INA226 Measurements, used to create subscriber
     ) = shared::init_pubsubs();
 
-
     let config = embassy_stm32::Config::default();
     let p = embassy_stm32::init(config);
-
 
     let usb_driver = Driver::new(p.USB, Irqs, p.PA12, p.PA11);
     spawner
@@ -110,7 +107,6 @@ async fn main(spawner: Spawner) {
         Hertz(100_000),
         i2c_config,
     );
-
 
     // Initialize the static Mutex with the I2C instance
     let i2c_bus_mutex = I2C_BUS_MUTEX_CELL.init(Mutex::new(unsafe {
