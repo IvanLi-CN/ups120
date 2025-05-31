@@ -216,10 +216,7 @@ pub async fn bq25730_task(
                                     error!("[BQ25730] Failed to write ChargerStatusMsb to clear FAULT_SYSOVP: {:?}", e);
                                 } else {
                                     info!("[BQ25730] Wrote to ChargerStatusMsb (0x{:02x}) to clear FAULT_SYSOVP. Original: 0x{:02x}", fault_msb, original_fault_msb);
-                                    // Re-read status to confirm immediately after clearing
-                                    if let Ok(new_status) = bq25730.read_charger_status().await {
-                                        info!("[BQ25730] New ChargerStatus after attempting clear: Status={:?}, Fault={:?}", new_status.status_flags, new_status.fault_flags);
-                                    }
+                                    // Status will be re-read at the beginning of the next loop iteration, immediate confirmation removed.
                                 }
                             } else {
                                 info!("[BQ25730] FAULT_SYSOVP was not set in the re-read of ChargerStatusMsb (before attempted clear). No clear needed or already cleared by previous read.");

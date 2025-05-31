@@ -210,47 +210,11 @@ pub async fn usb_task(
 
             // Unified aggregation of all latest data (measurements and alerts)
             let aggregated_data = AllMeasurements {
-                bq25730: latest_bq25730_measurements.unwrap_or_else(|| Bq25730Measurements {
-                    adc_measurements: bq25730_async_rs::data_types::AdcMeasurements {
-                        psys: bq25730_async_rs::data_types::AdcPsys::from_u8(0),
-                        vbus: bq25730_async_rs::data_types::AdcVbus::from_u8(0),
-                        idchg: bq25730_async_rs::data_types::AdcIdchg::from_u8(0),
-                        ichg: bq25730_async_rs::data_types::AdcIchg::from_u8(0),
-                        cmpin: bq25730_async_rs::data_types::AdcCmpin::from_u8(0),
-                        iin: bq25730_async_rs::data_types::AdcIin::from_u8(0, true),
-                        vbat: bq25730_async_rs::data_types::AdcVbat::from_register_value(0, 0, 0),
-                        vsys: bq25730_async_rs::data_types::AdcVsys::from_register_value(0, 0, 0),
-                    },
-                }),
-                ina226: latest_ina226_measurements.unwrap_or(Ina226Measurements {
-                    voltage: 0.0,
-                    current: 0.0,
-                    power: 0.0,
-                }),
-                bq76920: latest_bq76920_measurements.unwrap_or_else(|| Bq76920Measurements {
-                    core_measurements: bq769x0_async_rs::data_types::Bq76920Measurements {
-                        cell_voltages: bq769x0_async_rs::data_types::CellVoltages::new(),
-                        temperatures: bq769x0_async_rs::data_types::TemperatureSensorReadings::new(
-                        ),
-                        current: 0i32,
-                        system_status: bq769x0_async_rs::data_types::SystemStatus::new(0),
-                        mos_status: bq769x0_async_rs::data_types::MosStatus::new(0),
-                    },
-                }),
-                bq25730_alerts: latest_bq25730_alerts.unwrap_or_else(|| Bq25730Alerts {
-                    charger_status: bq25730_async_rs::data_types::ChargerStatus {
-                        status_flags: bq25730_async_rs::registers::ChargerStatusFlags::empty(),
-                        fault_flags: bq25730_async_rs::registers::ChargerStatusFaultFlags::empty(),
-                    },
-                    prochot_status: bq25730_async_rs::data_types::ProchotStatus {
-                        msb_flags: bq25730_async_rs::registers::ProchotStatusMsbFlags::empty(),
-                        lsb_flags: bq25730_async_rs::registers::ProchotStatusFlags::empty(),
-                        prochot_width: 0,
-                    },
-                }),
-                bq76920_alerts: latest_bq76920_alerts.unwrap_or_else(|| Bq76920Alerts {
-                    system_status: bq769x0_async_rs::data_types::SystemStatus::new(0),
-                }),
+                bq25730: latest_bq25730_measurements.unwrap_or_default(),
+                ina226: latest_ina226_measurements.unwrap_or_default(),
+                bq76920: latest_bq76920_measurements.unwrap_or_default(),
+                bq25730_alerts: latest_bq25730_alerts.unwrap_or_default(),
+                bq76920_alerts: latest_bq76920_alerts.unwrap_or_default(),
             };
 // Process USB command if one was stored from select!
             if let Some(cmd) = usb_command_to_process.take() {

@@ -11,12 +11,29 @@ pub struct Bq25730Measurements {
     // 添加其他非告警相关的测量数据字段（如果需要）
 }
 
+impl Default for Bq25730Measurements {
+    fn default() -> Self {
+        Self {
+            adc_measurements: AdcMeasurements::default(),
+        }
+    }
+}
+
 /// BQ25730 安全告警信息
 #[derive(Debug, Copy, Clone, PartialEq)]
 
 pub struct Bq25730Alerts {
     pub charger_status: ChargerStatus,
     pub prochot_status: ProchotStatus,
+}
+
+impl Default for Bq25730Alerts {
+    fn default() -> Self {
+        Self {
+            charger_status: ChargerStatus::default(),
+            prochot_status: ProchotStatus::default(),
+        }
+    }
 }
 
 /// BQ76920 测量数据
@@ -26,11 +43,27 @@ pub struct Bq76920Measurements<const N: usize> {
     pub core_measurements: Bq76920CoreMeasurements<N>,
 }
 
+impl<const N: usize> Default for Bq76920Measurements<N> {
+    fn default() -> Self {
+        Self {
+            core_measurements: Bq76920CoreMeasurements::default(),
+        }
+    }
+}
+
 /// BQ76920 安全告警信息
 #[derive(Debug, Copy, Clone, PartialEq)]
 
 pub struct Bq76920Alerts {
     pub system_status: SystemStatus,
+}
+
+impl Default for Bq76920Alerts {
+    fn default() -> Self {
+        Self {
+            system_status: SystemStatus::default(),
+        }
+    }
 }
 /// INA226 测量数据
 #[derive(Debug, Copy, Clone, PartialEq, defmt::Format)]
@@ -39,6 +72,16 @@ pub struct Ina226Measurements {
     pub voltage: f32,
     pub current: f32,
     pub power: f32, // 假设需要功率，如果不需要可以调整
+}
+
+impl Default for Ina226Measurements {
+    fn default() -> Self {
+        Self {
+            voltage: 0.0,
+            current: 0.0,
+            power: 0.0,
+        }
+    }
 }
 
 /// 聚合所有设备的测量数据
@@ -50,6 +93,18 @@ pub struct AllMeasurements<const N: usize> {
     pub ina226: Ina226Measurements,
     pub bq25730_alerts: Bq25730Alerts,
     pub bq76920_alerts: Bq76920Alerts,
+}
+
+impl<const N: usize> Default for AllMeasurements<N> {
+    fn default() -> Self {
+        Self {
+            bq25730: Bq25730Measurements::default(),
+            bq76920: Bq76920Measurements::default(),
+            ina226: Ina226Measurements::default(),
+            bq25730_alerts: Bq25730Alerts::default(),
+            bq76920_alerts: Bq76920Alerts::default(),
+        }
+    }
 }
 
 /// Payload structure for USB communication, containing flattened data from AllMeasurements.
