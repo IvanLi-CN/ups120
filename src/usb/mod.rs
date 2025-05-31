@@ -280,11 +280,11 @@ pub async fn usb_task(
 fn convert_to_payload(data: &AllMeasurements<5>) -> crate::data_types::AllMeasurementsUsbPayload {
     crate::data_types::AllMeasurementsUsbPayload {
         // BQ25730 Measurements
-        bq25730_adc_vbat_raw: data.bq25730.adc_measurements.vbat.to_u16(),
+        bq25730_adc_vbat_raw: data.bq25730.adc_measurements.vbat.to_u16(), // Assuming these voltage/power types still have to_u16
         bq25730_adc_vsys_raw: data.bq25730.adc_measurements.vsys.to_u16(),
-        bq25730_adc_ichg_raw: data.bq25730.adc_measurements.ichg.to_u16(),
-        bq25730_adc_idchg_raw: data.bq25730.adc_measurements.idchg.to_u16(),
-        bq25730_adc_iin_raw: data.bq25730.adc_measurements.iin.to_u16(),
+        bq25730_adc_ichg_raw: data.bq25730.adc_measurements.ichg.to_raw() as u16, // Send raw u8, cast to u16 for payload
+        bq25730_adc_idchg_raw: data.bq25730.adc_measurements.idchg.to_raw() as u16, // Send raw u8, cast to u16 for payload
+        bq25730_adc_iin_raw: data.bq25730.adc_measurements.iin.to_raw() as u16,   // Send raw u8, cast to u16 for payload
         bq25730_adc_psys_raw: data.bq25730.adc_measurements.psys.to_u16(),
         bq25730_adc_vbus_raw: data.bq25730.adc_measurements.vbus.to_u16(),
         bq25730_adc_cmpin_raw: data.bq25730.adc_measurements.cmpin.to_u16(),

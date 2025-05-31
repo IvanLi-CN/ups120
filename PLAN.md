@@ -1,76 +1,125 @@
-# BQ25730 `read_adc_measurements` 函数优化计划
+# BQ25730 ADC电流测量重构计划
 
 ## 目标
+重构电流相关ADC测量和设置的结构体，使其正确反映RSNS电阻值的影响，确保物理值计算准确。
 
-优化 [`bq25730/src/lib.rs`](bq25730/src/lib.rs) 中的 `read_adc_measurements` 函数 ([`bq25730/src/lib.rs:272-309`](bq25730/src/lib.rs:272))，通过将多次单独的 ADC 寄存器读取操作合并为一次批量读取，以减少 I2C 通信次数，提高效率。
+## 详细重构步骤
 
-## 背景
+### 1. 定义 RSNS 枚举类型
+- 文件: [`bq25730/src/lib.rs`](bq25730/src/lib.rs)
+- 添加枚举:
+  ```rust
+  #[derive(Debug, Copy, Clone, PartialEq)]
+  pub enum Rsns {
+      R5mOhm,  // 5mΩ 电流采样电阻
+      R10mOhm, // 10mΩ 电流采样电阻
+  }
+  ```
 
-当前 `read_adc_measurements` 函数通过多次调用 `self.read_registers()` 来分别读取各个 ADC 相关的寄存器。分析表明，这些 ADC 寄存器（从 `ADCPSYS` (0x26) 到 `ADCVSYS` (0x2D)）地址是连续的，共 8 个字节，适合进行批量读取。
+### 2. 重构 Bq25730 结构体
+- 文件: [`bq25730/src/lib.rs`](bq25730/src/lib.rs)
+- 修改字段:
+  ```diff
+  pub struct Bq25730<I2C> {
+      address: u8,
+      pub i2c: I2C,
+      cell_count: u8,
+  -   rsns_rac_is_5m_ohm: bool,
+  +   rsns: Rsns,  // 电流采样电阻类型
+  }
+  ```
+- 更新 `new()` 方法
+- 更新 `init()` 方法从寄存器读取 RSNS 设置
 
-## 详细计划
+### 3. 重构电流相关结构体
+- 文件: [`bq25730/src/data_types.rs`](bq25730/src/data_types.rs)
+- 为以下结构体添加 `rsns: Rsns` 字段:
+  - `AdcIchg` (充电电流ADC)
+  - `AdcIdchg` (放电电流ADC)
+  - `AdcIin` (输入电流ADC)
+  - `ChargeCurrent` (充电电流设置)
+  - `OtgCurrent` (OTG电流设置)
+  - `IinHost` (主机输入电流)
+  - `IinDpm` (DPM输入电流)
 
-1.  **修改 `read_adc_measurements` 函数** ([`bq25730/src/lib.rs:272-309`](bq25730/src/lib.rs:272)):
-    *   移除当前对 `ADCPSYS`, `ADCVBUS`, `ADCIDCHG`, `ADCICHG`, `ADCCMPIN`, `ADCIIN`, `ADCVBAT` 的多次单独 `self.read_registers()` 调用。
-    *   替换为一次批量读取调用：
-        ```rust
-        let adc_data_raw = self.read_registers(Register::ADCPSYS, 8).await?;
-        ```
-    *   从 `adc_data_raw` (一个包含 8 个字节的 `heapless::Vec<u8, 30>`) 中解析出各个 ADC 值。字节与寄存器的对应关系如下：
-        *   `adc_data_raw[0]`: `ADCPSYS`
-        *   `adc_data_raw[1]`: `ADCVBUS`
-        *   `adc_data_raw[2]`: `ADCIDCHG`
-        *   `adc_data_raw[3]`: `ADCICHG`
-        *   `adc_data_raw[4]`: `ADCCMPIN`
-        *   `adc_data_raw[5]`: `ADCIIN`
-        *   `adc_data_raw[6]`: `ADCVBAT` (LSB, 0x2C)
-        *   `adc_data_raw[7]`: `ADCVSYS` (MSB of `ADCVBAT`, 0x2D, and also MSB for `ADCVSYS`)
-    *   相应地更新 `AdcMeasurements` 结构体的初始化逻辑：
-        ```rust
-        Ok(AdcMeasurements {
-            vbat: AdcVbat::from_register_value(adc_data_raw[6], adc_data_raw[7], offset_mv),
-            vsys: AdcVsys::from_register_value(0, adc_data_raw[7], offset_mv), // LSB for VSYS ADC is not used from a separate reg
-            ichg: AdcIchg::from_u8(adc_data_raw[3]),
-            idchg: AdcIdchg::from_u8(adc_data_raw[2]),
-            iin: AdcIin::from_u8(adc_data_raw[5], self.rsns_rac_is_5m_ohm),
-            psys: AdcPsys::from_u8(adc_data_raw[0]),
-            vbus: AdcVbus::from_u8(adc_data_raw[1]),
-            cmpin: AdcCmpin::from_u8(adc_data_raw[4]),
-        })
-        ```
-    *   `offset_mv` 的计算逻辑和 `self.rsns_rac_is_5m_ohm` 的使用保持不变。
+### 4. 实现新的转换方法
+- 为每个电流相关结构体实现:
+  ```rust
+  pub fn from_raw(raw: u8, rsns: Rsns) -> Self {
+      // 根据 RSNS 选择正确的 LSB 值
+      let lsb = match rsns {
+          Rsns::R5mOhm => 128, // mA/LSB for 5mΩ
+          Rsns::R10mOhm => 64, // mA/LSB for 10mΩ
+      };
+      Self {
+          milliamps: (raw as u16) * lsb,
+          rsns,
+      }
+  }
+  
+  pub fn to_raw(&self) -> u8 {
+      let lsb = match self.rsns {
+          Rsns::R5mOhm => 128,
+          Rsns::R10mOhm => 64,
+      };
+      (self.milliamps / lsb) as u8
+  }
+  ```
 
-2.  **确保根项目兼容性与构建成功**：
-    *   `read_adc_measurements` 函数的外部接口（函数签名和返回类型）保持不变。
-    *   在代码模式下完成对 [`bq25730/src/lib.rs`](bq25730/src/lib.rs) 的修改后，需要在根项目目录下运行 `cargo check` (以及可能的 `cargo build`) 来验证更改。
-    *   如果 `cargo check` 报告任何错误或警告，将进行分析和修复，直至项目成功构建。
+### 5. 更新 ADC 读取方法
+- 文件: [`bq25730/src/lib.rs`](bq25730/src/lib.rs)
+- 修改 `read_adc_measurements()`:
+  ```diff
+  Ok(AdcMeasurements {
+      vbat: ...,
+      vsys: ...,
+  -   ichg: AdcIchg::from_u8(adc_data_raw.as_ref()[3]),
+  +   ichg: AdcIchg::from_raw(adc_data_raw.as_ref()[3], self.rsns),
+      // 同样更新其他电流字段
+  })
+  ```
 
-## 流程对比 Mermaid 图
+### 6. 更新电流设置方法
+- 修改所有电流设置方法如 `set_charge_current()`:
+  ```diff
+  pub async fn set_charge_current(&mut self, current: ChargeCurrent) -> Result<(), Error<E>> {
+  -   let raw_value = current.to_u16();
+  +   let raw_value = current.to_raw();
+      self.write_registers(Register::ChargeCurrent, &[raw_value])
+          .await
+  }
+  ```
 
+### 7. 更新测试用例
+- 更新 `bq25730/tests/` 目录下所有测试
+- 添加针对不同 RSNS 值的测试用例
+- 验证电流计算在不同配置下的正确性
+
+### 8. 验证其他相关字段
+- 检查以下字段是否受 RSNS 影响：
+  - `ChargeOption1` (充电选项1)
+  - `AdcOption` (ADC选项)
+  - `ProchotOption0` (PROCHOT选项0)
+- 根据数据手册更新相关转换逻辑
+
+## 需要修改的文件清单
+1. [`bq25730/src/lib.rs`](bq25730/src/lib.rs)
+2. [`bq25730/src/data_types.rs`](bq25730/src/data_types.rs)
+3. [`bq25730/tests/status_and_adc.rs`](bq25730/tests/status_and_adc.rs)
+4. [`bq25730/tests/charge_control.rs`](bq25730/tests/charge_control.rs)
+5. [`bq25730/tests/input_power_management.rs`](bq25730/tests/input_power_management.rs)
+6. [`bq25730/tests/otg_control.rs`](bq25730/tests/otg_control.rs)
+
+## 实施路线图
 ```mermaid
 graph TD
-    A[开始 read_adc_measurements] --> B{计算 offset_mv};
-
-    subgraph 当前实现
-        B --> C1[读 ADCPSYS (1 byte)];
-        C1 --> C2[读 ADCVBUS (1 byte)];
-        C2 --> C3[读 ADCIDCHG (1 byte)];
-        C3 --> C4[读 ADCICHG (1 byte)];
-        C4 --> C5[读 ADCCMPIN (1 byte)];
-        C5 --> C6[读 ADCIIN (1 byte)];
-        C6 --> C7[读 ADCVBAT (2 bytes)];
-        C7 --> D1[解析各个 ADC 值];
-    end
-
-    subgraph 优化后实现
-        B --> E1[批量读取 ADC 寄存器 (0x26-0x2D, 8 bytes)];
-        E1 --> F1[从批量数据中解析各个 ADC 值];
-    end
-
-    D1 --> G[构造 AdcMeasurements 结果];
-    F1 --> G;
-    G --> H[结束];
+    A[定义 Rsns 枚举] --> B[重构 Bq25730 结构体]
+    B --> C[重构电流相关结构体]
+    C --> D[实现转换方法]
+    D --> E[更新 ADC 读取]
+    E --> F[更新电流设置]
+    F --> G[更新测试用例]
+    G --> H[验证其他字段]
 ```
 
-## 下一步
-在用户确认此计划后，将请求切换到“代码”模式以实施这些更改。
+计划生成时间: 2025-06-01 00:50:13 (UTC+8)
