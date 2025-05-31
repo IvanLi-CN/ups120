@@ -74,7 +74,6 @@ pub async fn bq76920_task(
     let mut _mos_status: Option<bq769x0_async_rs::MosStatus> = None;
 
     // --- BQ76920 Initialization Sequence ---
-    info!("Starting BQ76920 initialization sequence...");
 
     // Note: Waking the BQ76920 from SHIP mode (if it was in that mode)
     // is typically handled by external hardware, e.g., by pulling the TS1 pin high.
@@ -98,7 +97,6 @@ pub async fn bq76920_task(
 
     let mut fets_enabled_after_config = false;
 
-    info!("Applying and verifying BQ76920 configuration...");
     // Attempt to apply the configuration and, critically, verify that key safety registers
     // have been written correctly by reading them back.
     match bq.try_apply_config(&battery_config).await {
@@ -134,13 +132,18 @@ pub async fn bq76920_task(
             error!("  Register: {:?}", register);
             error!("  Expected: {:#04x}", expected);
             error!("  Actual:   {:#04x}", actual);
-            error!("FETs will NOT be enabled due to this configuration error. System may be unsafe.");
+            error!(
+                "FETs will NOT be enabled due to this configuration error. System may be unsafe."
+            );
             // Depending on system requirements, this might warrant a panic or a safe shutdown procedure.
         }
         Err(e) => {
             // Handles other errors from try_apply_config, such as I2C communication errors.
             // Also a CRITICAL failure scenario.
-            error!("CRITICAL: Failed to apply BQ76920 configuration due to other error: {:?}", e);
+            error!(
+                "CRITICAL: Failed to apply BQ76920 configuration due to other error: {:?}",
+                e
+            );
             error!("FETs will NOT be enabled. System may be unsafe.");
         }
     }
@@ -148,11 +151,12 @@ pub async fn bq76920_task(
     if fets_enabled_after_config {
         info!("BQ76920 initialization and FET enable sequence complete.");
     } else {
-        warn!("BQ76920 initialization complete, but FETs were NOT enabled due to prior configuration issues.");
+        warn!(
+            "BQ76920 initialization complete, but FETs were NOT enabled due to prior configuration issues."
+        );
     }
 
     // Main loop for continuous data acquisition and publishing.
-    info!("BQ76920 entering main data acquisition loop...");
     loop {
         // This task focuses on reading data from the BQ76920 itself.
         // Communication with other chips (like BQ25730 charger) is handled in their respective tasks.
@@ -187,11 +191,14 @@ pub async fn bq76920_task(
         match bq.read_temperatures().await {
             Ok(sensor_readings) => {
                 _temps = Some(sensor_readings); // Store raw temperature readings.
-                                               // Conversion to Celsius would typically happen when processing/displaying this data,
-                                               // potentially using thermistor characteristics if external sensors are used.
+                // Conversion to Celsius would typically happen when processing/displaying this data,
+                // potentially using thermistor characteristics if external sensors are used.
             }
             Err(e) => {
-                error!("Failed to read BQ76920 temperature sensor readings: {:?}", e);
+                error!(
+                    "Failed to read BQ76920 temperature sensor readings: {:?}",
+                    e
+                );
                 _temps = None;
             }
         }
@@ -206,7 +213,10 @@ pub async fn bq76920_task(
                 // likely requiring the `rsense_m_ohm` value to be available (e.g., from `BatteryConfig`).
                 // For now, assuming it exists for the purpose of this task structure.
                 let current_ma = bq.convert_raw_cc_to_current_ma(c.raw_cc, sense_resistor_uohms);
-                info!("BQ76920 Raw CC: {}, Calculated Current: {} mA", c.raw_cc, current_ma);
+                info!(
+                    "BQ76920 Raw CC: {}, Calculated Current: {} mA",
+                    c.raw_cc, current_ma
+                );
                 _current = Some(current_ma);
             }
             Err(e) => {
@@ -258,9 +268,7 @@ pub async fn bq76920_task(
         // Publish BQ76920 alert information (derived from system status).
         // This uses the `system_status` variable which was updated just above.
         if let Some(ss) = _system_status {
-            let alerts = crate::data_types::Bq76920Alerts {
-                system_status: ss,
-            };
+            let alerts = crate::data_types::Bq76920Alerts { system_status: ss };
             bq76920_alerts_publisher.publish_immediate(alerts);
         }
 
@@ -269,11 +277,15 @@ pub async fn bq76920_task(
         // to ensure the overall structure can still be published.
         let bq76920_measurements_payload = crate::data_types::Bq76920Measurements {
             core_measurements: bq769x0_async_rs::data_types::Bq76920Measurements {
-                cell_voltages: _voltages.unwrap_or_else(bq769x0_async_rs::data_types::CellVoltages::new),
-                temperatures: _temps.unwrap_or_else(bq769x0_async_rs::data_types::TemperatureSensorReadings::new),
+                cell_voltages: _voltages
+                    .unwrap_or_else(bq769x0_async_rs::data_types::CellVoltages::new),
+                temperatures: _temps
+                    .unwrap_or_else(bq769x0_async_rs::data_types::TemperatureSensorReadings::new),
                 current: _current.unwrap_or(0i32), // Default to 0 mA if current read failed.
-                system_status: _system_status.unwrap_or_else(|| bq769x0_async_rs::data_types::SystemStatus::new(0)),
-                mos_status: _mos_status.unwrap_or_else(|| bq769x0_async_rs::data_types::MosStatus::new(0)),
+                system_status: _system_status
+                    .unwrap_or_else(|| bq769x0_async_rs::data_types::SystemStatus::new(0)),
+                mos_status: _mos_status
+                    .unwrap_or_else(|| bq769x0_async_rs::data_types::MosStatus::new(0)),
             },
         };
 

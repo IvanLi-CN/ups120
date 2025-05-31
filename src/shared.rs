@@ -1,9 +1,12 @@
 //! 共享数据模块，包含消息队列和数据结构定义。
 
+use crate::data_types::{
+    AllMeasurements, Bq25730Alerts, Bq25730Measurements, Bq76920Alerts, Bq76920Measurements,
+    Ina226Measurements,
+};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::pubsub::{PubSubChannel, Publisher, Subscriber};
 use static_cell::StaticCell;
-use crate::data_types::{AllMeasurements, Bq25730Alerts, Bq76920Alerts, Bq25730Measurements, Ina226Measurements, Bq76920Measurements};
 
 // 定义消息队列 (PubSub)
 // 测量数据 PubSub
@@ -144,7 +147,8 @@ pub type Bq25730MeasurementsSubscriber<'a> = Subscriber<
     1,
 >;
 
-pub type Bq76920MeasurementsPublisher<'a, const N: usize> = Publisher< // Added generic parameter
+pub type Bq76920MeasurementsPublisher<'a, const N: usize> = Publisher<
+    // Added generic parameter
     'a,
     CriticalSectionRawMutex,
     Bq76920Measurements<N>, // Added generic parameter
@@ -152,7 +156,8 @@ pub type Bq76920MeasurementsPublisher<'a, const N: usize> = Publisher< // Added 
     BQ76920_MEASUREMENTS_PUBSUB_READERS,
     1,
 >;
-pub type Bq76920MeasurementsSubscriber<'a, const N: usize> = Subscriber< // Added generic parameter
+pub type Bq76920MeasurementsSubscriber<'a, const N: usize> = Subscriber<
+    // Added generic parameter
     'a,
     CriticalSectionRawMutex,
     Bq76920Measurements<N>, // Added generic parameter
@@ -306,6 +311,6 @@ pub fn init_pubsubs() -> PubSubSetup<'static, 5> {
         // bq76920_measurements_pubsub.subscriber().unwrap(),// Subscriber - remove, create on demand
         ina226_measurements_pubsub.publisher().unwrap(),
         ina226_measurements_pubsub, // Return the channel itself
-        // ina226_measurements_pubsub.subscriber().unwrap(), // Subscriber - remove, create on demand
+                                    // ina226_measurements_pubsub.subscriber().unwrap(), // Subscriber - remove, create on demand
     )
 }

@@ -10,11 +10,11 @@ use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
 use embassy_stm32::i2c::I2c;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 
-use bq25730_async_rs::Bq25730;
-use bq25730_async_rs::RegisterAccess; // Import the RegisterAccess trait
 use bq769x0_async_rs::registers::{
     SysCtrl2Flags as Bq76920SysCtrl2Flags, SysStatFlags as Bq76920SysStatFlags,
 };
+use bq25730_async_rs::Bq25730;
+use bq25730_async_rs::RegisterAccess; // Import the RegisterAccess trait
 use bq25730_async_rs::registers::{
     ChargeOption0Flags,
     ChargeOption0MsbFlags,
@@ -84,7 +84,6 @@ pub async fn bq25730_task(
 
     let mut bq25730 = Bq25730::new(i2c_bus, address, 4);
 
-    info!("Initializing BQ25730...");
 
     let charge_option1 = bq25730_async_rs::data_types::ChargeOption1 {
         msb_flags: bq25730_async_rs::registers::ChargeOption1MsbFlags::from_bits_truncate(0x37),
@@ -96,7 +95,6 @@ pub async fn bq25730_task(
             e
         );
     } else {
-        info!("BQ25730 ChargeOption1 set for sense resistors (VBUS=10mOhm, VBAT=5mOhm).");
     }
 
     let initial_charge_current = ChargeCurrent(0);
@@ -106,20 +104,12 @@ pub async fn bq25730_task(
             e
         );
     } else {
-        info!(
-            "Initial BQ25730 charge current set to {} mA.",
-            initial_charge_current.0
-        );
     }
 
     let target_charge_voltage = ChargeVoltage(18000);
     if let Err(e) = bq25730.set_charge_voltage(target_charge_voltage).await {
         error!("Failed to set BQ25730 target charge voltage: {:?}", e);
     } else {
-        info!(
-            "BQ25730 target charge voltage set to {} mV.",
-            target_charge_voltage.0
-        );
     }
 
     info!("Configuring and enabling BQ25730 ADC for continuous conversion...");
@@ -139,16 +129,13 @@ pub async fn bq25730_task(
     if let Err(e) = bq25730.set_adc_option(adc_option).await {
         error!("Failed to set BQ25730 ADC options: {:?}", e);
     } else {
-        info!("BQ25730 ADC configured for continuous conversion of all channels.");
     }
 
     match bq25730.set_vsys_min(VsysMin(12000)).await {
-        Ok(()) => info!("BQ25730 VsysMin set to 12000 mV."),
+        Ok(()) => { /* Log removed */ },
         Err(e) => error!("Failed to set BQ25730 VsysMin: {}", e),
     }
-    info!("BQ25730 initialization complete.");
 
-    info!("BQ25730 entering main control loop...");
     loop {
         let bq76920_measurements = bq76920_measurements_subscriber.next_message_pure().await;
 
@@ -190,24 +177,41 @@ pub async fn bq25730_task(
         let bq25730_charger_status = bq25730_charger_status_option;
 
         // Attempt to clear FAULT_SYSOVP if it's set
-        if let Some(status) = &bq25730_charger_status { // Borrow charger_status
-            if status.fault_flags.contains(bq25730_async_rs::registers::ChargerStatusFaultFlags::FAULT_SYSOVP) {
+        if let Some(status) = &bq25730_charger_status {
+            // Borrow charger_status
+            if status
+                .fault_flags
+                .contains(bq25730_async_rs::registers::ChargerStatusFaultFlags::FAULT_SYSOVP)
+            {
                 info!("[BQ25730] FAULT_SYSOVP is active.");
-                
+
                 let mut attempt_clear_sys_ovp = false;
-                if let Some(adc_measurements) = &bq25730_adc_measurements_option { // Use the ADC measurements read at the start of the loop
-                    if adc_measurements.vsys.0 <= 19500 { // VSYS is in mV
-                        info!("[BQ25730] VSYS ({}mV) is not > 19.5V. Conditions met to attempt FAULT_SYSOVP clear.", adc_measurements.vsys.0);
+                if let Some(adc_measurements) = &bq25730_adc_measurements_option {
+                    // Use the ADC measurements read at the start of the loop
+                    if adc_measurements.vsys.0 <= 19500 {
+                        // VSYS is in mV
+                        info!(
+                            "[BQ25730] VSYS ({}mV) is not > 19.5V. Conditions met to attempt FAULT_SYSOVP clear.",
+                            adc_measurements.vsys.0
+                        );
                         attempt_clear_sys_ovp = true;
                     } else {
-                        info!("[BQ25730] VSYS ({}mV) is > 19.5V. Not attempting to clear FAULT_SYSOVP.", adc_measurements.vsys.0);
+                        info!(
+                            "[BQ25730] VSYS ({}mV) is > 19.5V. Not attempting to clear FAULT_SYSOVP.",
+                            adc_measurements.vsys.0
+                        );
                     }
                 } else {
-                    info!("[BQ25730] ADC measurements not available. Cannot verify VSYS voltage. Not clearing FAULT_SYSOVP.");
+                    info!(
+                        "[BQ25730] ADC measurements not available. Cannot verify VSYS voltage. Not clearing FAULT_SYSOVP."
+                    );
                 }
 
                 if attempt_clear_sys_ovp {
-                    match bq25730.read_register(bq25730_async_rs::registers::Register::ChargerStatus).await {
+                    match bq25730
+                        .read_register(bq25730_async_rs::registers::Register::ChargerStatus)
+                        .await
+                    {
                         Ok(mut fault_msb) => {
                             let original_fault_msb = fault_msb;
                             // Check if FAULT_SYSOVP is actually set in this fresh read before clearing
@@ -227,7 +231,10 @@ pub async fn bq25730_task(
                             }
                         }
                         Err(e) => {
-                            error!("[BQ25730] Failed to read ChargerStatusMsb before attempting to clear FAULT_SYSOVP: {:?}", e);
+                            error!(
+                                "[BQ25730] Failed to read ChargerStatusMsb before attempting to clear FAULT_SYSOVP: {:?}",
+                                e
+                            );
                         }
                     }
                 }
@@ -362,7 +369,8 @@ pub async fn bq25730_task(
         }
 
         let bq25730_measurements_payload = crate::data_types::Bq25730Measurements {
-            adc_measurements: bq25730_adc_measurements_option.unwrap_or_else(|| { // Use the option variable here
+            adc_measurements: bq25730_adc_measurements_option.unwrap_or_else(|| {
+                // Use the option variable here
                 bq25730_async_rs::data_types::AdcMeasurements {
                     vbat: bq25730_async_rs::data_types::AdcVbat(0),
                     vsys: bq25730_async_rs::data_types::AdcVsys(0),

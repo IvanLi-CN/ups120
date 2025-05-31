@@ -87,7 +87,11 @@ impl<'d, D: Driver<'d>> UsbEndpoints<'d, D> {
     }
 
     #[allow(dead_code)]
-    pub async fn process_command(&mut self, command: UsbData, current_measurements: &AllMeasurements<5>) -> Result<(), EndpointError> {
+    pub async fn process_command(
+        &mut self,
+        command: UsbData,
+        current_measurements: &AllMeasurements<5>,
+    ) -> Result<(), EndpointError> {
         match command {
             UsbData::SubscribeStatus => {
                 self.status_subscription_active = true;

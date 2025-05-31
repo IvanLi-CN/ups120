@@ -71,41 +71,110 @@ impl<const N: usize> Format for AllMeasurements<N> {
             fmt,
             "], temperatures: {{ ts1_0_01C: {:?}, ts2_0_01C: {:?}, ts3_0_01C: {:?}, is_thermistor: {} }}, current_mA: {}, system_status: {{ cc_ready: {}, device_xready: {}, ovrd_alert: {}, uv: {}, ov: {}, scd: {}, ocd: {} }}, mos_status: {{ charge_on: {}, discharge_on: {} }} }}, ina226_measurements: {}, bq25730_alerts: {{ charger_status: {{ status: {=u8:b}, fault: {=u8:b} }}, prochot_status: {{ msb: {=u8:b}, lsb: {=u8:b}, width: {} }} }}, bq76920_alerts: {{ system_status: {{ cc_ready: {}, device_xready: {}, ovrd_alert: {}, uv: {}, ov: {}, scd: {}, ocd: {} }} }} }}",
             {
-                let temp_data = self.bq76920.core_measurements.temperatures.into_temperature_data(None);
+                let temp_data = self
+                    .bq76920
+                    .core_measurements
+                    .temperatures
+                    .into_temperature_data(None);
                 temp_data.map(|td| td.ts1).ok()
             },
             {
-                let temp_data = self.bq76920.core_measurements.temperatures.into_temperature_data(None);
+                let temp_data = self
+                    .bq76920
+                    .core_measurements
+                    .temperatures
+                    .into_temperature_data(None);
                 temp_data.map(|td| td.ts2).unwrap_or(None)
             },
             {
-                let temp_data = self.bq76920.core_measurements.temperatures.into_temperature_data(None);
+                let temp_data = self
+                    .bq76920
+                    .core_measurements
+                    .temperatures
+                    .into_temperature_data(None);
                 temp_data.map(|td| td.ts3).unwrap_or(None)
             },
             self.bq76920.core_measurements.temperatures.is_thermistor,
             self.bq76920.core_measurements.current,
-            self.bq76920.core_measurements.system_status.0.contains(bq769x0_async_rs::registers::SysStatFlags::CC_READY),
-            self.bq76920.core_measurements.system_status.0.contains(bq769x0_async_rs::registers::SysStatFlags::DEVICE_XREADY),
-            self.bq76920.core_measurements.system_status.0.contains(bq769x0_async_rs::registers::SysStatFlags::OVRD_ALERT),
-            self.bq76920.core_measurements.system_status.0.contains(bq769x0_async_rs::registers::SysStatFlags::UV),
-            self.bq76920.core_measurements.system_status.0.contains(bq769x0_async_rs::registers::SysStatFlags::OV),
-            self.bq76920.core_measurements.system_status.0.contains(bq769x0_async_rs::registers::SysStatFlags::SCD),
-            self.bq76920.core_measurements.system_status.0.contains(bq769x0_async_rs::registers::SysStatFlags::OCD),
-            self.bq76920.core_measurements.mos_status.0.contains(bq769x0_async_rs::registers::SysCtrl2Flags::CHG_ON),
-            self.bq76920.core_measurements.mos_status.0.contains(bq769x0_async_rs::registers::SysCtrl2Flags::DSG_ON),
+            self.bq76920
+                .core_measurements
+                .system_status
+                .0
+                .contains(bq769x0_async_rs::registers::SysStatFlags::CC_READY),
+            self.bq76920
+                .core_measurements
+                .system_status
+                .0
+                .contains(bq769x0_async_rs::registers::SysStatFlags::DEVICE_XREADY),
+            self.bq76920
+                .core_measurements
+                .system_status
+                .0
+                .contains(bq769x0_async_rs::registers::SysStatFlags::OVRD_ALERT),
+            self.bq76920
+                .core_measurements
+                .system_status
+                .0
+                .contains(bq769x0_async_rs::registers::SysStatFlags::UV),
+            self.bq76920
+                .core_measurements
+                .system_status
+                .0
+                .contains(bq769x0_async_rs::registers::SysStatFlags::OV),
+            self.bq76920
+                .core_measurements
+                .system_status
+                .0
+                .contains(bq769x0_async_rs::registers::SysStatFlags::SCD),
+            self.bq76920
+                .core_measurements
+                .system_status
+                .0
+                .contains(bq769x0_async_rs::registers::SysStatFlags::OCD),
+            self.bq76920
+                .core_measurements
+                .mos_status
+                .0
+                .contains(bq769x0_async_rs::registers::SysCtrl2Flags::CHG_ON),
+            self.bq76920
+                .core_measurements
+                .mos_status
+                .0
+                .contains(bq769x0_async_rs::registers::SysCtrl2Flags::DSG_ON),
             self.ina226, // This is Ina226Measurements, which has its own Format impl
             self.bq25730_alerts.charger_status.status_flags.bits(),
             self.bq25730_alerts.charger_status.fault_flags.bits(),
             self.bq25730_alerts.prochot_status.msb_flags.bits(),
             self.bq25730_alerts.prochot_status.lsb_flags.bits(),
             self.bq25730_alerts.prochot_status.prochot_width,
-            self.bq76920_alerts.system_status.0.contains(bq769x0_async_rs::registers::SysStatFlags::CC_READY),
-            self.bq76920_alerts.system_status.0.contains(bq769x0_async_rs::registers::SysStatFlags::DEVICE_XREADY),
-            self.bq76920_alerts.system_status.0.contains(bq769x0_async_rs::registers::SysStatFlags::OVRD_ALERT),
-            self.bq76920_alerts.system_status.0.contains(bq769x0_async_rs::registers::SysStatFlags::UV),
-            self.bq76920_alerts.system_status.0.contains(bq769x0_async_rs::registers::SysStatFlags::OV),
-            self.bq76920_alerts.system_status.0.contains(bq769x0_async_rs::registers::SysStatFlags::SCD),
-            self.bq76920_alerts.system_status.0.contains(bq769x0_async_rs::registers::SysStatFlags::OCD)
+            self.bq76920_alerts
+                .system_status
+                .0
+                .contains(bq769x0_async_rs::registers::SysStatFlags::CC_READY),
+            self.bq76920_alerts
+                .system_status
+                .0
+                .contains(bq769x0_async_rs::registers::SysStatFlags::DEVICE_XREADY),
+            self.bq76920_alerts
+                .system_status
+                .0
+                .contains(bq769x0_async_rs::registers::SysStatFlags::OVRD_ALERT),
+            self.bq76920_alerts
+                .system_status
+                .0
+                .contains(bq769x0_async_rs::registers::SysStatFlags::UV),
+            self.bq76920_alerts
+                .system_status
+                .0
+                .contains(bq769x0_async_rs::registers::SysStatFlags::OV),
+            self.bq76920_alerts
+                .system_status
+                .0
+                .contains(bq769x0_async_rs::registers::SysStatFlags::SCD),
+            self.bq76920_alerts
+                .system_status
+                .0
+                .contains(bq769x0_async_rs::registers::SysStatFlags::OCD)
         );
     }
 }

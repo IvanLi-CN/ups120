@@ -21,7 +21,6 @@ pub async fn ina226_task(
 
     loop {
         // --- Reading INA226 Data ---
-        info!("--- Reading INA226 Data ---");
         let voltage_f64 = ina226.bus_voltage_millivolts().await.unwrap_or(0.0);
         let current_amps_f64 = ina226.current_amps().await.unwrap_or(None);
         let current_f64 = current_amps_f64.map_or(0.0, |c| c * 1000.0); // Convert to mA or default to 0.0
