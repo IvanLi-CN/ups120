@@ -21,14 +21,26 @@ pub async fn ina226_task(
 
     loop {
         // --- Reading INA226 Data ---
-        let voltage_f64 = ina226.bus_voltage_millivolts().await.unwrap_or(0.0);
-        let current_amps_f64 = ina226.current_amps().await.unwrap_or(None);
-        let current_f64 = current_amps_f64.map_or(0.0, |c| c * 1000.0); // Convert to mA or default to 0.0
+        let voltage_mv_f64 = ina226.bus_voltage_millivolts().await.unwrap_or(0.0);
+        let current_amps_f64_opt = ina226.current_amps().await.unwrap_or(None);
+        let current_ma_f64 = current_amps_f64_opt.map_or(0.0, |c| c * 1000.0); // Convert to mA
+
+        let power_mw_f64 = match ina226.power_watts().await { // Assuming async power_watts() exists
+            Ok(Some(watts)) => watts * 1000.0, // Convert Watts to milliWatts
+            Ok(None) => {
+                defmt::warn!("INA226: Power reading was None");
+                0.0
+            }
+            Err(e) => {
+                defmt::error!("INA226: Failed to read power: {:?}", e);
+                0.0
+            }
+        };
 
         let ina226_measurements = crate::data_types::Ina226Measurements {
-            voltage: voltage_f64 as f32,
-            current: current_f64 as f32,
-            power: (voltage_f64 * current_f64 / 1000.0) as f32, // Calculate power (V * I / 1000 for mW if V in mV, I in mA)
+            voltage: voltage_mv_f64 as f32,
+            current: current_ma_f64 as f32,
+            power: power_mw_f64 as f32,
         };
         ina226_measurements_publisher.publish_immediate(ina226_measurements);
         info!(
