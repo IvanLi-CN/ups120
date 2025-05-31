@@ -90,9 +90,11 @@ pub async fn usb_task(
         let mut latest_bq76920_measurements: Option<Bq76920Measurements<5>> = None;
         let mut latest_bq25730_alerts: Option<Bq25730Alerts> = None;
         let mut latest_bq76920_alerts: Option<Bq76920Alerts> = None;
+        let mut usb_command_to_process: Option<endpoints::UsbData> = None; // Variable to store command from select
 
         loop {
             usb_endpoints.wait_connected().await;
+            usb_command_to_process = None; // Clear previous command at the start of each loop iteration
 
             // Use select to prioritize handling USB commands and new data
             match select(
@@ -183,69 +185,10 @@ pub async fn usb_task(
                                                     match cmd_result {
                                                         Ok(cmd) => {
                                                             defmt::info!(
-                                                                "usb_task: USB command received by select: {:?}",
+                                                                "usb_task: USB command received by select, will process after aggregation: {:?}",
                                                                 cmd
                                                             );
-                                                            // ** CRITICAL FIX: Process the command **
-                                                            // Aggregate data *before* processing command, as process_command might need current_measurements
-                                                            let current_aggregated_data_for_command = AllMeasurements {
-                                                bq25730: latest_bq25730_measurements.unwrap_or_else(|| Bq25730Measurements { // .clone() removed as unwrap_or_else takes ownership or default
-                                                    adc_measurements: bq25730_async_rs::data_types::AdcMeasurements {
-                                                        psys: bq25730_async_rs::data_types::AdcPsys::from_u8(0),
-                                                        vbus: bq25730_async_rs::data_types::AdcVbus::from_u8(0),
-                                                        idchg: bq25730_async_rs::data_types::AdcIdchg::from_u8(0),
-                                                        ichg: bq25730_async_rs::data_types::AdcIchg::from_u8(0),
-                                                        cmpin: bq25730_async_rs::data_types::AdcCmpin::from_u8(0),
-                                                        iin: bq25730_async_rs::data_types::AdcIin::from_u8(0, true),
-                                                        vbat: bq25730_async_rs::data_types::AdcVbat::from_register_value(0, 0, 0),
-                                                        vsys: bq25730_async_rs::data_types::AdcVsys::from_register_value(0, 0, 0),
-                                                    },
-                                                }),
-                                                ina226: latest_ina226_measurements.unwrap_or(Ina226Measurements { // .clone() removed
-                                                    voltage: 0.0,
-                                                    current: 0.0,
-                                                    power: 0.0,
-                                                }),
-                                                bq76920: latest_bq76920_measurements.unwrap_or_else(|| Bq76920Measurements { // .clone() removed
-                                                    core_measurements: bq769x0_async_rs::data_types::Bq76920Measurements {
-                                                        cell_voltages: bq769x0_async_rs::data_types::CellVoltages::new(),
-                                                        temperatures: bq769x0_async_rs::data_types::TemperatureSensorReadings::new(),
-                                                        current: 0i32,
-                                                        system_status: bq769x0_async_rs::data_types::SystemStatus::new(0),
-                                                        mos_status: bq769x0_async_rs::data_types::MosStatus::new(0),
-                                                    },
-                                                }),
-                                                bq25730_alerts: latest_bq25730_alerts.unwrap_or_else(|| Bq25730Alerts { // .clone() removed
-                                                    charger_status: bq25730_async_rs::data_types::ChargerStatus {
-                                                        status_flags: bq25730_async_rs::registers::ChargerStatusFlags::empty(),
-                                                        fault_flags: bq25730_async_rs::registers::ChargerStatusFaultFlags::empty(),
-                                                    },
-                                                    prochot_status: bq25730_async_rs::data_types::ProchotStatus {
-                                                        msb_flags: bq25730_async_rs::registers::ProchotStatusMsbFlags::empty(),
-                                                        lsb_flags: bq25730_async_rs::registers::ProchotStatusFlags::empty(),
-                                                        prochot_width: 0,
-                                                    },
-                                                }),
-                                                bq76920_alerts: latest_bq76920_alerts.unwrap_or_else(|| Bq76920Alerts { // .clone() removed
-                                                    system_status: bq769x0_async_rs::data_types::SystemStatus::new(0),
-                                                }),
-                                            };
-                                            // Convert to AllMeasurementsUsbPayload
-                                            let command_payload = convert_to_payload(&current_aggregated_data_for_command);
-
-                                                            defmt::debug!(
-                                                                "usb_task: Calling process_command with command: {:?} and payload: {:?}",
-                                                                cmd,
-                                                                command_payload // Log the payload
-                                                            );
-                                                            if let Err(e) = usb_endpoints.process_command(cmd, &command_payload).await { // Pass reference to payload
-                                                defmt::error!("usb_task: Error processing USB command: {:?}", e);
-                                            }
-                                                            defmt::debug!(
-                                                                "usb_task: process_command finished. Current status_subscription_active: {}",
-                                                                usb_endpoints
-                                                                    .status_subscription_active
-                                                            );
+                                                            usb_command_to_process = Some(cmd); // Store command for later processing
                                                         }
                                                         Err(e) => {
                                                             defmt::error!(
@@ -265,8 +208,8 @@ pub async fn usb_task(
                 }
             }
 
-            // Aggregate all latest data (measurements and alerts) - This is done again to ensure the most up-to-date data for publishing and sending status updates
-            let all_measurements_and_alerts = AllMeasurements {
+            // Unified aggregation of all latest data (measurements and alerts)
+            let aggregated_data = AllMeasurements {
                 bq25730: latest_bq25730_measurements.unwrap_or_else(|| Bq25730Measurements {
                     adc_measurements: bq25730_async_rs::data_types::AdcMeasurements {
                         psys: bq25730_async_rs::data_types::AdcPsys::from_u8(0),
@@ -309,14 +252,26 @@ pub async fn usb_task(
                     system_status: bq769x0_async_rs::data_types::SystemStatus::new(0),
                 }),
             };
+// Process USB command if one was stored from select!
+            if let Some(cmd) = usb_command_to_process.take() {
+                defmt::info!("usb_task: Processing stored USB command: {:?}", cmd);
+                let command_payload = convert_to_payload(&aggregated_data);
+                if let Err(e) = usb_endpoints.process_command(cmd, &command_payload).await {
+                    defmt::error!("usb_task: Error processing USB command: {:?}", e);
+                }
+                defmt::debug!(
+                    "usb_task: process_command finished. Current status_subscription_active: {}",
+                    usb_endpoints.status_subscription_active
+                );
+            }
 
             defmt::trace!(
                 "usb_task: Aggregated data for publishing/sending: {:?}",
-                all_measurements_and_alerts
+                aggregated_data
             );
 
             // Publish the aggregated data
-            measurements_publisher.publish_immediate(all_measurements_and_alerts);
+            measurements_publisher.publish_immediate(aggregated_data);
             defmt::debug!("usb_task: Published aggregated data.");
 
             // Send the aggregated data over USB if subscription is active
@@ -329,7 +284,7 @@ pub async fn usb_task(
                     "usb_task: Subscription active, attempting to send status update via USB."
                 );
                 // Convert to AllMeasurementsUsbPayload before sending
-                let status_update_payload = convert_to_payload(&all_measurements_and_alerts);
+                let status_update_payload = convert_to_payload(&aggregated_data);
                 if let Err(e) = usb_endpoints
                     .send_status_update(status_update_payload) // Pass the converted payload
                     .await
