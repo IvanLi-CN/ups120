@@ -53,7 +53,7 @@ pub struct AllMeasurements<const N: usize> {
 }
 
 /// Payload structure for USB communication, containing flattened data from AllMeasurements.
-#[derive(Debug, Copy, Clone, PartialEq, binrw::BinRead, binrw::BinWrite, defmt::Format)] // Added defmt::Format
+#[derive(Debug, Copy, Clone, PartialEq, binrw::BinWrite, defmt::Format)] // Removed binrw::BinRead
 pub struct AllMeasurementsUsbPayload {
     // Fields from Bq25730Measurements -> AdcMeasurements
     pub bq25730_adc_vbat_raw: u16, // Raw u16 value after AdcVbat.to_u16()

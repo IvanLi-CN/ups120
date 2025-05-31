@@ -1,5 +1,6 @@
 use binrw::io::Cursor;
-use binrw::{BinRead, BinWrite}; // Remove BinReaderExt and BinWriterExt as they are not directly used here
+use binrw::{BinRead, BinWrite, BinResult, Endian};
+use binrw::io::{Read, Seek};
 use embassy_usb::Builder;
 use embassy_usb::driver::EndpointError;
 use embassy_usb::driver::{Driver, Endpoint, EndpointIn, EndpointOut};
@@ -7,7 +8,7 @@ use embassy_usb::driver::{Driver, Endpoint, EndpointIn, EndpointOut};
 use crate::data_types::AllMeasurementsUsbPayload; // Added AllMeasurementsUsbPayload
 
 #[repr(u8)]
-#[derive(BinRead, BinWrite, Debug, Clone, Copy, defmt::Format)]
+#[derive(BinWrite, Debug, Clone, Copy, defmt::Format)] // Removed BinRead from derive
 pub enum UsbData {
     // Commands
     #[brw(magic = 0x00u8)]
@@ -22,6 +23,36 @@ pub enum UsbData {
     // Push Data
     #[brw(magic = 0xC0u8)]
     StatusPush(AllMeasurementsUsbPayload),
+}
+
+
+impl BinRead for UsbData {
+    type Args<'a> = ();
+
+    fn read_options<R: Read + Seek>(
+        reader: &mut R,
+        endian: Endian,
+        _args: Self::Args<'_>,
+    ) -> BinResult<Self> {
+        let magic: u8 = <u8 as BinRead>::read_options(reader, endian, ())?;
+        match magic {
+            0x00 => Ok(UsbData::SubscribeStatus),
+            0x01 => Ok(UsbData::UnsubscribeStatus),
+            // We don't expect to READ StatusResponse or StatusPush from the host
+            0x80 | 0xC0 => {
+                defmt::error!("[UsbData] Received unexpected magic byte for StatusResponse/StatusPush: {:#02x}", magic);
+                Err(binrw::Error::NoVariantMatch {
+                    pos: reader.stream_position().unwrap_or(0).saturating_sub(1), // Position of the magic byte
+                })
+            }
+            _ => {
+                defmt::error!("[UsbData] Unknown magic byte: {:#02x}", magic);
+                Err(binrw::Error::NoVariantMatch {
+                    pos: reader.stream_position().unwrap_or(0).saturating_sub(1),
+                })
+            }
+        }
+    }
 }
 
 pub struct UsbEndpoints<'d, D: Driver<'d>> {
