@@ -1,3 +1,8 @@
+use bq25730_async_rs::data_types::ChargeCurrent;
+// use bq25730_async_rs::data_types::ChargeOption3; // Unused import
+use bq25730_async_rs::data_types::ChargeVoltage;
+use bq25730_async_rs::data_types::VsysMin;
+// use bq25730_async_rs::registers::ChargeOption3Flags; // Unused import
 use defmt::*;
 use embassy_time::{Duration, Timer};
 
@@ -6,17 +11,67 @@ use embassy_stm32::i2c::I2c;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 
 use bq25730_async_rs::Bq25730;
-// use bq25730_async_rs::RegisterAccess; // Import the RegisterAccess trait // Commented out as unused
-use bq25730_async_rs::registers::{
-    ChargeOption0Flags, ChargeOption3MsbFlags, // Register as Bq25730Register, // Commented out as unused
+use bq25730_async_rs::RegisterAccess; // Import the RegisterAccess trait
+use bq769x0_async_rs::registers::{
+    SysCtrl2Flags as Bq76920SysCtrl2Flags, SysStatFlags as Bq76920SysStatFlags,
 };
-// use bq25730_async_rs::data_types::{ChargeOption0, ChargeOption3}; // Import register data types // Commented out as unused
-use bq769x0_async_rs::registers::{SysCtrl2Flags as Bq76920SysCtrl2Flags, SysStatFlags as Bq76920SysStatFlags}; // Import BQ76920 flags with alias
+use bq25730_async_rs::registers::{
+    ChargeOption0Flags,
+    ChargeOption0MsbFlags,
+    // ChargeOption3MsbFlags, // Unused import
+    // Register,              // Unused import
+};
 
 use crate::shared::{
     Bq25730AlertsPublisher, Bq25730MeasurementsPublisher, Bq76920MeasurementsSubscriber,
 };
 
+// Default charging parameters
+const DEFAULT_CHARGE_CURRENT_MA: u16 = 256;
+const DEFAULT_CHARGE_VOLTAGE_MV: u16 = 18000;
+
+// use bq25730_async_rs::registers::ChargerStatusFaultFlags; // Unused import
+
+/// Embassy task for managing the BQ25730 charger IC.
+///
+/// This task is responsible for:
+/// 1. Initializing the BQ25730 chip:
+///    - Setting sense resistor configurations (`ChargeOption1`).
+///    - Initially setting charge current to 0 mA (inhibiting charging).
+///    - Setting a target charge voltage.
+///    - Configuring and enabling the ADC for continuous conversion of various parameters
+///      (VBUS, VSYS, VBAT, ICHG, IDCHG, IIN, CMPIN, PSYS).
+///    - Setting a minimum system voltage (`VsysMin`).
+/// 2. In a continuous loop:
+///    - Subscribing to and receiving the latest measurement data from the `bq76920_task`.
+///      This data includes BQ76920's MOS FET status and system fault status, which are
+///      critical for deciding BQ25730's charging behavior.
+///    - Reading BQ25730's internal status:
+///      - `ChargerStatus` (including fault flags).
+///      - `ProchotStatus`.
+///    - Attempting to re-trigger Input Current Optimizer (ICO) by re-writing `IIN_HOST`.
+///    - Publishing BQ25730's alert information (charger status, prochot status).
+///    - Reading BQ25730's ADC measurements.
+///    - **Core Charging Control Logic**:
+///      - Determining `final_charge_permission` based on:
+///        - BQ76920's Charge FET status (`CHG_ON` bit in `SYS_CTRL2`).
+///        - BQ76920's system fault status (e.g., Overvoltage `OV`).
+///      - Controlling the BQ25730's `CHRG_INHIBIT` bit (in `ChargeOption0` register) based
+///        on `final_charge_permission`. If permission is granted, `CHRG_INHIBIT` is cleared;
+///        otherwise, it's set to inhibit charging.
+///      - (Potentially conditionally) setting the BQ25730's charge voltage and charge current parameters.
+///        The current implementation appears to set these parameters in each loop iteration
+///        regardless of `final_charge_permission` or battery voltage, which might be intended
+///        as a re-assertion of parameters or might need further refinement based on charging strategy.
+///    - Publishing BQ25730's ADC measurement data.
+///
+/// # Arguments
+///
+/// * `i2c_bus`: A shared I2C bus device for communication with the BQ25730.
+/// * `address`: The I2C address of the BQ25730 chip.
+/// * `bq25730_alerts_publisher`: Publisher for sending BQ25730 alert data.
+/// * `bq25730_measurements_publisher`: Publisher for sending BQ25730 measurement data.
+/// * `bq76920_measurements_subscriber`: Subscriber for receiving measurement data from the BQ76920 task.
 #[embassy_executor::task]
 pub async fn bq25730_task(
     i2c_bus: I2cDevice<'static, CriticalSectionRawMutex, I2c<'static, embassy_stm32::mode::Async>>,
@@ -29,111 +84,101 @@ pub async fn bq25730_task(
 
     let mut bq25730 = Bq25730::new(i2c_bus, address, 4);
 
+    info!("Initializing BQ25730...");
+
+    let charge_option1 = bq25730_async_rs::data_types::ChargeOption1 {
+        msb_flags: bq25730_async_rs::registers::ChargeOption1MsbFlags::from_bits_truncate(0x37),
+        lsb_flags: bq25730_async_rs::registers::ChargeOption1Flags::from_bits_truncate(0x01),
+    };
+    if let Err(e) = bq25730.set_charge_option1(charge_option1).await {
+        error!(
+            "Failed to set BQ25730 ChargeOption1 (sense resistors): {:?}",
+            e
+        );
+    } else {
+        info!("BQ25730 ChargeOption1 set for sense resistors (VBUS=10mOhm, VBAT=5mOhm).");
+    }
+
+    let initial_charge_current = ChargeCurrent(0);
+    if let Err(e) = bq25730.set_charge_current(initial_charge_current).await {
+        error!(
+            "Failed to set initial BQ25730 charge current to 0mA: {:?}",
+            e
+        );
+    } else {
+        info!(
+            "Initial BQ25730 charge current set to {} mA.",
+            initial_charge_current.0
+        );
+    }
+
+    let target_charge_voltage = ChargeVoltage(18000);
+    if let Err(e) = bq25730.set_charge_voltage(target_charge_voltage).await {
+        error!("Failed to set BQ25730 target charge voltage: {:?}", e);
+    } else {
+        info!(
+            "BQ25730 target charge voltage set to {} mV.",
+            target_charge_voltage.0
+        );
+    }
+
+    info!("Configuring and enabling BQ25730 ADC for continuous conversion...");
+    let adc_option = bq25730_async_rs::data_types::AdcOption {
+        msb_flags: bq25730_async_rs::registers::AdcOptionMsbFlags::ADC_CONV
+            | bq25730_async_rs::registers::AdcOptionMsbFlags::ADC_START
+            | bq25730_async_rs::registers::AdcOptionMsbFlags::ADC_FULLSCALE,
+        lsb_flags: bq25730_async_rs::registers::AdcOptionFlags::EN_ADC_CMPIN
+            | bq25730_async_rs::registers::AdcOptionFlags::EN_ADC_VBUS
+            | bq25730_async_rs::registers::AdcOptionFlags::EN_ADC_PSYS
+            | bq25730_async_rs::registers::AdcOptionFlags::EN_ADC_IIN
+            | bq25730_async_rs::registers::AdcOptionFlags::EN_ADC_IDCHG
+            | bq25730_async_rs::registers::AdcOptionFlags::EN_ADC_ICHG
+            | bq25730_async_rs::registers::AdcOptionFlags::EN_ADC_VSYS
+            | bq25730_async_rs::registers::AdcOptionFlags::EN_ADC_VBAT,
+    };
+    if let Err(e) = bq25730.set_adc_option(adc_option).await {
+        error!("Failed to set BQ25730 ADC options: {:?}", e);
+    } else {
+        info!("BQ25730 ADC configured for continuous conversion of all channels.");
+    }
+
+    match bq25730.set_vsys_min(VsysMin(12000)).await {
+        Ok(()) => info!("BQ25730 VsysMin set to 12000 mV."),
+        Err(e) => error!("Failed to set BQ25730 VsysMin: {}", e),
+    }
+    info!("BQ25730 initialization complete.");
+
+    info!("BQ25730 entering main control loop...");
     loop {
-        // Receive latest BQ76920 measurements
         let bq76920_measurements = bq76920_measurements_subscriber.next_message_pure().await;
-        info!("Received BQ76920 measurements in BQ25730 task.");
 
-        // --- Reading BQ25730 Data ---
-        info!("--- Reading BQ25730 Data ---");
+        // Read ADC measurements first to have fresh VSYS data for fault handling
+        let bq25730_adc_measurements_option = match bq25730.read_adc_measurements().await {
+            Ok(measurements) => {
+                info!(
+                    "[BQ25730 ADC] VBUS:{}mV, VSYS:{}mV, VBAT:{}mV, ICHG:{}mA, IIN:{}mA, PSYS:{}raw, CMPIN:{}raw, IDCHG:{}raw",
+                    measurements.vbus.0,
+                    measurements.vsys.0,
+                    measurements.vbat.0,
+                    measurements.ichg.0,
+                    measurements.iin.milliamps,
+                    measurements.psys.0,
+                    measurements.cmpin.0,
+                    measurements.idchg.0
+                );
+                Some(measurements)
+            }
+            Err(e) => {
+                error!("[BQ25730] Failed to read ADC Measurements: {:?}", e);
+                None
+            }
+        };
 
-        // Read Charger Status
-        let bq25730_charger_status = match bq25730.read_charger_status().await {
+        let bq25730_charger_status_option = match bq25730.read_charger_status().await {
             Ok(status) => {
-                info!("BQ25730 Charger Status:");
                 info!(
-                    "  Input Present: {}",
-                    status
-                        .status_flags
-                        .contains(bq25730_async_rs::registers::ChargerStatusFlags::STAT_AC)
-                );
-                info!(
-                    "  ICO Complete: {}",
-                    status
-                        .status_flags
-                        .contains(bq25730_async_rs::registers::ChargerStatusFlags::ICO_DONE)
-                );
-                info!(
-                    "  In VAP Mode: {}",
-                    status
-                        .status_flags
-                        .contains(bq25730_async_rs::registers::ChargerStatusFlags::IN_VAP)
-                );
-                info!(
-                    "  In VINDPM: {}",
-                    status
-                        .status_flags
-                        .contains(bq25730_async_rs::registers::ChargerStatusFlags::IN_VINDPM)
-                );
-                info!(
-                    "  In IIN_DPM: {}",
-                    status
-                        .status_flags
-                        .contains(bq25730_async_rs::registers::ChargerStatusFlags::IN_IIN_DPM)
-                );
-                info!(
-                    "  In Fast Charge: {}",
-                    status
-                        .status_flags
-                        .contains(bq25730_async_rs::registers::ChargerStatusFlags::IN_FCHRG)
-                );
-                info!(
-                    "  In Pre-Charge: {}",
-                    status
-                        .status_flags
-                        .contains(bq25730_async_rs::registers::ChargerStatusFlags::IN_PCHRG)
-                );
-                info!(
-                    "  In OTG Mode: {}",
-                    status
-                        .status_flags
-                        .contains(bq25730_async_rs::registers::ChargerStatusFlags::IN_OTG)
-                );
-                info!(
-                    "  Fault ACOV: {}",
-                    status
-                        .fault_flags
-                        .contains(bq25730_async_rs::registers::ChargerStatusFaultFlags::FAULT_ACOV)
-                );
-                info!(
-                    "  Fault BATOC: {}",
-                    status.fault_flags.contains(
-                        bq25730_async_rs::registers::ChargerStatusFaultFlags::FAULT_BATOC
-                    )
-                );
-                info!(
-                    "  Fault ACOC: {}",
-                    status
-                        .fault_flags
-                        .contains(bq25730_async_rs::registers::ChargerStatusFaultFlags::FAULT_ACOC)
-                );
-                info!(
-                    "  Fault SYSOVP: {}",
-                    status.fault_flags.contains(
-                        bq25730_async_rs::registers::ChargerStatusFaultFlags::FAULT_SYSOVP
-                    )
-                );
-                info!(
-                    "  Fault VSYS_UVP: {}",
-                    status.fault_flags.contains(
-                        bq25730_async_rs::registers::ChargerStatusFaultFlags::FAULT_VSYS_UVP
-                    )
-                );
-                info!(
-                    "  Fault Force Converter Off: {}",
-                    status.fault_flags.contains(bq25730_async_rs::registers::ChargerStatusFaultFlags::FAULT_FORCE_CONVERTER_OFF)
-                );
-                info!(
-                    "  Fault OTG OVP: {}",
-                    status.fault_flags.contains(
-                        bq25730_async_rs::registers::ChargerStatusFaultFlags::FAULT_OTG_OVP
-                    )
-                );
-                info!(
-                    "  Fault OTG UVP: {}",
-                    status.fault_flags.contains(
-                        bq25730_async_rs::registers::ChargerStatusFaultFlags::FAULT_OTG_UVP
-                    )
+                    "BQ25730 ChargerStatus: Status={:?}, Fault={:?}",
+                    status.status_flags, status.fault_flags
                 );
                 Some(status)
             }
@@ -142,58 +187,59 @@ pub async fn bq25730_task(
                 None
             }
         };
+        let bq25730_charger_status = bq25730_charger_status_option;
 
-        // Read Prochot Status
+        // Attempt to clear FAULT_SYSOVP if it's set
+        if let Some(status) = &bq25730_charger_status { // Borrow charger_status
+            if status.fault_flags.contains(bq25730_async_rs::registers::ChargerStatusFaultFlags::FAULT_SYSOVP) {
+                info!("[BQ25730] FAULT_SYSOVP is active.");
+                
+                let mut attempt_clear_sys_ovp = false;
+                if let Some(adc_measurements) = &bq25730_adc_measurements_option { // Use the ADC measurements read at the start of the loop
+                    if adc_measurements.vsys.0 <= 19500 { // VSYS is in mV
+                        info!("[BQ25730] VSYS ({}mV) is not > 19.5V. Conditions met to attempt FAULT_SYSOVP clear.", adc_measurements.vsys.0);
+                        attempt_clear_sys_ovp = true;
+                    } else {
+                        info!("[BQ25730] VSYS ({}mV) is > 19.5V. Not attempting to clear FAULT_SYSOVP.", adc_measurements.vsys.0);
+                    }
+                } else {
+                    info!("[BQ25730] ADC measurements not available. Cannot verify VSYS voltage. Not clearing FAULT_SYSOVP.");
+                }
+
+                if attempt_clear_sys_ovp {
+                    match bq25730.read_register(bq25730_async_rs::registers::Register::ChargerStatus).await {
+                        Ok(mut fault_msb) => {
+                            let original_fault_msb = fault_msb;
+                            // Check if FAULT_SYSOVP is actually set in this fresh read before clearing
+                            if (original_fault_msb & bq25730_async_rs::registers::ChargerStatusFaultFlags::FAULT_SYSOVP.bits()) != 0 {
+                                fault_msb &= !bq25730_async_rs::registers::ChargerStatusFaultFlags::FAULT_SYSOVP.bits(); // Clear bit 4
+                                if let Err(e) = bq25730.write_register(bq25730_async_rs::registers::Register::ChargerStatus, fault_msb).await {
+                                    error!("[BQ25730] Failed to write ChargerStatusMsb to clear FAULT_SYSOVP: {:?}", e);
+                                } else {
+                                    info!("[BQ25730] Wrote to ChargerStatusMsb (0x{:02x}) to clear FAULT_SYSOVP. Original: 0x{:02x}", fault_msb, original_fault_msb);
+                                    // Re-read status to confirm immediately after clearing
+                                    if let Ok(new_status) = bq25730.read_charger_status().await {
+                                        info!("[BQ25730] New ChargerStatus after attempting clear: Status={:?}, Fault={:?}", new_status.status_flags, new_status.fault_flags);
+                                    }
+                                }
+                            } else {
+                                info!("[BQ25730] FAULT_SYSOVP was not set in the re-read of ChargerStatusMsb (before attempted clear). No clear needed or already cleared by previous read.");
+                            }
+                        }
+                        Err(e) => {
+                            error!("[BQ25730] Failed to read ChargerStatusMsb before attempting to clear FAULT_SYSOVP: {:?}", e);
+                        }
+                    }
+                }
+            }
+        }
+
         let bq25730_prochot_status = match bq25730.read_prochot_status().await {
             Ok(status) => {
-                info!("BQ25730 Prochot Status:");
                 info!(
-                    "  VINDPM Triggered: {}",
-                    status
-                        .lsb_flags
-                        .contains(bq25730_async_rs::registers::ProchotStatusFlags::STAT_VINDPM)
-                );
-                info!(
-                    "  Comparator Triggered: {}",
-                    status
-                        .lsb_flags
-                        .contains(bq25730_async_rs::registers::ProchotStatusFlags::STAT_COMP)
-                );
-                info!(
-                    "  ICRIT Triggered: {}",
-                    status
-                        .lsb_flags
-                        .contains(bq25730_async_rs::registers::ProchotStatusFlags::STAT_ICRIT)
-                );
-                info!(
-                    "  INOM Triggered: {}",
-                    status
-                        .lsb_flags
-                        .contains(bq25730_async_rs::registers::ProchotStatusFlags::STAT_INOM)
-                );
-                info!(
-                    "  IDCHG1 Triggered: {}",
-                    status
-                        .lsb_flags
-                        .contains(bq25730_async_rs::registers::ProchotStatusFlags::STAT_IDCHG1)
-                );
-                info!(
-                    "  VSYS Triggered: {}",
-                    status
-                        .lsb_flags
-                        .contains(bq25730_async_rs::registers::ProchotStatusFlags::STAT_VSYS)
-                );
-                info!(
-                    "  Battery Removal: {}",
-                    status.lsb_flags.contains(
-                        bq25730_async_rs::registers::ProchotStatusFlags::STAT_BAT_REMOVAL
-                    )
-                );
-                info!(
-                    "  Adapter Removal: {}",
-                    status.lsb_flags.contains(
-                        bq25730_async_rs::registers::ProchotStatusFlags::STAT_ADPT_REMOVAL
-                    )
+                    "BQ25730 ProchotStatus: LSB=0x{:02x}, MSB=0x{:02x}",
+                    status.lsb_flags.bits(),
+                    status.msb_flags.bits()
                 );
                 Some(status)
             }
@@ -203,193 +249,134 @@ pub async fn bq25730_task(
             }
         };
 
-        // 更新并发布 BQ25730 告警信息（包含 Prochot Status）
-        if let (Some(charger_status), Some(prochot_status)) =
-            (bq25730_charger_status, bq25730_prochot_status)
-        {
+        match bq25730.read_iin_host().await {
+            Ok(current_iin_host_val) => {
+                if let Err(e) = bq25730.set_iin_host(current_iin_host_val).await {
+                    error!("[BQ25730] Failed to re-write IIN_HOST for ICO: {:?}", e);
+                }
+            }
+            Err(e) => {
+                error!("[BQ25730] Failed to read IIN_HOST before re-write: {:?}", e);
+            }
+        }
+
+        if let (Some(cs), Some(ps)) = (bq25730_charger_status, bq25730_prochot_status) {
             let alerts = crate::data_types::Bq25730Alerts {
-                charger_status,
-                prochot_status,
+                charger_status: cs,
+                prochot_status: ps,
             };
             bq25730_alerts_publisher.publish_immediate(alerts);
         }
 
-        // Read ADC Measurements for BQ25730
-        let bq25730_adc_measurements = match bq25730.read_adc_measurements().await {
-            Ok(measurements) => {
-                info!("BQ25730 ADC Measurements:");
-                info!("  PSYS: {} mW", measurements.psys.0);
-                info!("  VBUS: {} mV", measurements.vbus.0);
-                info!("  IDCHG: {} mA", measurements.idchg.0);
-                info!("  ICHG: {} mA", measurements.ichg.0);
-                info!("  CMPIN: {} mV", measurements.cmpin.0);
-                info!("  IIN: {} mA", measurements.iin.milliamps);
-                info!("  VBAT: {} mV", measurements.vbat.0);
-                info!("  VSYS: {} mV", measurements.vsys.0);
-                Some(measurements)
-            }
-            Err(e) => {
-                error!("Failed to read BQ25730 ADC Measurements: {:?}", e);
-                None
-            }
-        };
+        // ADC measurements are now read at the beginning of the loop.
+        // The variable `bq25730_adc_measurements_option` holds the Option<AdcMeasurements>.
 
-        // Implement BQ25730 charge/discharge control based on BQ76920 MOS and System status
-        // Directly use mos_status and sys_status as they are not Options here
-        let mos_status = bq76920_measurements.core_measurements.mos_status;
-        let sys_status = bq76920_measurements.core_measurements.system_status;
+        let bq76920_mos_status = bq76920_measurements.core_measurements.mos_status;
+        let bq76920_sys_status = bq76920_measurements.core_measurements.system_status;
 
-        let bq76920_charge_allowed_by_mos = mos_status.0.contains(Bq76920SysCtrl2Flags::CHG_ON);
-        let bq76920_discharge_allowed_by_mos = mos_status.0.contains(Bq76920SysCtrl2Flags::DSG_ON);
+        let bq76920_charge_fet_enabled =
+            bq76920_mos_status.0.contains(Bq76920SysCtrl2Flags::CHG_ON);
+        let _bq76920_discharge_fet_enabled =
+            bq76920_mos_status.0.contains(Bq76920SysCtrl2Flags::DSG_ON);
 
-        // Check BQ76920 system status for faults that should prevent charging
-        let can_charge_from_sys_status = !sys_status.0.intersects(
-            Bq76920SysStatFlags::OV // Over-voltage
-            // Add other critical flags if needed, e.g., OVR_TEMP if it's a charging fault
+        let bq76920_safe_to_charge = !bq76920_sys_status.0.intersects(Bq76920SysStatFlags::OV);
+
+        let _bq76920_safe_to_discharge = !bq76920_sys_status.0.intersects(
+            Bq76920SysStatFlags::UV | Bq76920SysStatFlags::SCD | Bq76920SysStatFlags::OCD,
         );
 
-        // Check BQ76920 system status for faults that should prevent discharging
-        let can_discharge_from_sys_status = !sys_status.0.intersects(
-            Bq76920SysStatFlags::UV   | // Under-voltage
-            Bq76920SysStatFlags::SCD  | // Short-circuit discharge
-            Bq76920SysStatFlags::OCD    // Over-current discharge
-            // Add other critical flags if needed
-        );
+        let final_charge_permission = bq76920_charge_fet_enabled && bq76920_safe_to_charge;
 
-        // `final_charge_permission` and `final_discharge_permission` are now declared in the correct scope
-        let final_charge_permission = bq76920_charge_allowed_by_mos && can_charge_from_sys_status;
-        let final_discharge_permission = bq76920_discharge_allowed_by_mos && can_discharge_from_sys_status;
-
-        info!("BQ76920 MOS: CHG_ON={}, DSG_ON={}", bq76920_charge_allowed_by_mos, bq76920_discharge_allowed_by_mos);
-        info!("BQ76920 SYS: CanCharge={}, CanDischarge={}", can_charge_from_sys_status, can_discharge_from_sys_status);
-        info!("Final BQ25730 Control: AllowCharge={}, AllowDischarge={}", final_charge_permission, final_discharge_permission);
-
-        // Control BQ25730 charging (via ChargeOption0.CHRG_INHIBIT)
         match bq25730.read_charge_option0().await {
             Ok(mut charge_option_0) => {
+                let original_lsb_flags_val = charge_option_0.lsb_flags.bits(); // Get u8 value
+                let original_lsb_as_flags =
+                    ChargeOption0Flags::from_bits_truncate(original_lsb_flags_val);
+
+                charge_option_0
+                    .msb_flags
+                    .remove(ChargeOption0MsbFlags::EN_LWPWR);
+                charge_option_0
+                    .lsb_flags
+                    .insert(ChargeOption0Flags::IADPT_GAIN);
+
                 if final_charge_permission {
-                    let lsb = &mut charge_option_0.lsb_flags;
-                    lsb.remove(ChargeOption0Flags::CHRG_INHIBIT); // CHRG_INHIBIT = 0 to enable charging
-                    info!("Attempting to ENABLE BQ25730 charging (CHRG_INHIBIT=0).");
+                    let chrg_inhibit_was_set =
+                        original_lsb_as_flags.contains(ChargeOption0Flags::CHRG_INHIBIT);
+                    charge_option_0
+                        .lsb_flags
+                        .remove(ChargeOption0Flags::CHRG_INHIBIT);
+                    if chrg_inhibit_was_set {
+                        info!(
+                            "[BQ25730] Charging permitted by BQ76920. Clearing CHRG_INHIBIT (was set)."
+                        );
+                    } // else {
+                //    info!("[BQ25730] Charging permitted by BQ76920. CHRG_INHIBIT was already clear.");
+                // }
                 } else {
-                    let lsb = &mut charge_option_0.lsb_flags;
-                    lsb.insert(ChargeOption0Flags::CHRG_INHIBIT); // CHRG_INHIBIT = 1 to disable charging
-                    info!("Attempting to DISABLE BQ25730 charging (CHRG_INHIBIT=1).");
+                    let chrg_inhibit_was_set =
+                        original_lsb_as_flags.contains(ChargeOption0Flags::CHRG_INHIBIT);
+                    charge_option_0
+                        .lsb_flags
+                        .insert(ChargeOption0Flags::CHRG_INHIBIT);
+                    if chrg_inhibit_was_set {
+                        info!(
+                            "[BQ25730] Charging inhibited by BQ76920. CHRG_INHIBIT was already set."
+                        );
+                    } else {
+                        info!(
+                            "[BQ25730] Charging inhibited by BQ76920. Setting CHRG_INHIBIT (was clear)."
+                        );
+                    }
                 }
-                match bq25730.set_charge_option0(charge_option_0).await {
-                    Ok(_) => info!("BQ25730 ChargeOption0 (CHRG_INHIBIT) updated."),
-                    Err(e) => error!("Failed to update BQ25730 ChargeOption0 (CHRG_INHIBIT): {:?}", e),
-                }
-            },
-            Err(e) => error!("Failed to read BQ25730 ChargeOption0 for charging control: {:?}", e),
-        }
 
-        // Control BQ25730 discharging (OTG Mode via ChargeOption3.EN_OTG)
-        match bq25730.read_charge_option3().await {
-            Ok(mut charge_option_3) => {
-                if final_discharge_permission {
-                    let msb = &mut charge_option_3.msb_flags;
-                    msb.insert(ChargeOption3MsbFlags::EN_OTG); // EN_OTG = 1 to enable OTG
-                    info!("Attempting to ENABLE BQ25730 discharging (EN_OTG=1).");
-                } else {
-                    let msb = &mut charge_option_3.msb_flags;
-                    msb.remove(ChargeOption3MsbFlags::EN_OTG); // EN_OTG = 0 to disable OTG
-                    info!("Attempting to DISABLE BQ25730 discharging (EN_OTG=0).");
+                if let Err(e) = bq25730.set_charge_option0(charge_option_0).await {
+                    error!(
+                        "[BQ25730] Failed to write ChargeOption0 to control CHRG_INHIBIT: {:?}",
+                        e
+                    );
                 }
-                match bq25730.set_charge_option3(charge_option_3).await {
-                    Ok(_) => info!("BQ25730 ChargeOption3 (EN_OTG) updated."),
-                    Err(e) => error!("Failed to update BQ25730 ChargeOption3 (EN_OTG): {:?}", e),
-                }
-            },
-            Err(e) => error!("Failed to read BQ25730 ChargeOption3 for OTG control: {:?}", e),
-        }
-
-        // Implement battery charge logic based on BQ76920 total battery voltage and final_charge_permission
-        let total_voltage_mv: i32 = bq76920_measurements.core_measurements.cell_voltages.voltages.iter().sum();
-        info!("BQ76920 Total Voltage: {} mV for BQ25730 parameter decision.", total_voltage_mv);
-
-        // Define charging parameters
-        let charge_stop_threshold_mv = 3600 * 5; // Example: Stop charging if total voltage is above 18V (3.6V per cell for 5 cells)
-        let charge_current_ma = 1000;            // Example: Charge current 1000mA
-        let charge_voltage_mv = 18000;           // Example: Charge voltage 18000mV (18V)
-
-        // Set charging parameters only if charging is permitted AND battery voltage is below stop threshold.
-        // CHRG_INHIBIT bit itself is controlled by `final_charge_permission` logic block above.
-        if final_charge_permission {
-            if total_voltage_mv < charge_stop_threshold_mv {
-                info!("Setting/Re-asserting BQ25730 charge voltage ({} mV) and current ({} mA).", charge_voltage_mv, charge_current_ma);
-                match bq25730.set_charge_voltage(bq25730_async_rs::data_types::ChargeVoltage(charge_voltage_mv)).await {
-                    Ok(_) => info!("BQ25730 charge voltage set to {} mV.", charge_voltage_mv),
-                    Err(e) => error!("Failed to set BQ25730 charge voltage: {:?}", e),
-                }
-                match bq25730.set_charge_current(bq25730_async_rs::data_types::ChargeCurrent(charge_current_ma)).await {
-                    Ok(_) => info!("BQ25730 charge current set to {} mA.", charge_current_ma),
-                    Err(e) => error!("Failed to set BQ25730 charge current: {:?}", e),
-                }
-            } else { // total_voltage_mv >= charge_stop_threshold_mv
-                info!("Total voltage ({}) at or above stop threshold ({}). Charging should be inhibited by CHRG_INHIBIT logic or BQ25730 internal protection. Not setting parameters.",
-                      total_voltage_mv, charge_stop_threshold_mv);
             }
-        } else { // !final_charge_permission
-            info!("BQ25730 charging is not permitted by BQ76920 (final_charge_permission=false). Not setting charge parameters.");
+            Err(e) => error!(
+                "[BQ25730] Failed to read ChargeOption0 for control: {:?}",
+                e
+            ),
         }
 
-        // Construct BQ25730 measurements
-        let bq25730_measurements = crate::data_types::Bq25730Measurements {
-            adc_measurements: bq25730_adc_measurements.unwrap_or_else(|| {
+        // let charge_current_ma = 256; // Moved to const
+        // let charge_voltage_mv = 18000; // Moved to const
+
+        if final_charge_permission {
+            if let Err(e) = bq25730
+                .set_charge_voltage(ChargeVoltage(DEFAULT_CHARGE_VOLTAGE_MV))
+                .await
+            {
+                error!("[BQ25730] Failed to set charge voltage: {:?}", e);
+            }
+            if let Err(e) = bq25730
+                .set_charge_current(ChargeCurrent(DEFAULT_CHARGE_CURRENT_MA))
+                .await
+            {
+                error!("[BQ25730] Failed to set charge current: {:?}", e);
+            }
+        }
+
+        let bq25730_measurements_payload = crate::data_types::Bq25730Measurements {
+            adc_measurements: bq25730_adc_measurements_option.unwrap_or_else(|| { // Use the option variable here
                 bq25730_async_rs::data_types::AdcMeasurements {
-                    psys: bq25730_async_rs::data_types::AdcPsys::from_u8(
-                        bq25730_adc_measurements
-                            .as_ref()
-                            .map_or(0, |m| (m.psys.0 / 12) as u8), // Convert back to raw for default
-                    ),
-                    vbus: bq25730_async_rs::data_types::AdcVbus::from_u8(
-                        bq25730_adc_measurements
-                            .as_ref()
-                            .map_or(0, |m| (m.vbus.0 / 96) as u8), // Convert back to raw for default
-                    ),
-                    idchg: bq25730_async_rs::data_types::AdcIdchg::from_u8(
-                        bq25730_adc_measurements
-                            .as_ref()
-                            .map_or(0, |m| (m.idchg.0 / 512) as u8), // Convert back to raw for default
-                    ),
-                    ichg: bq25730_async_rs::data_types::AdcIchg::from_u8(
-                        bq25730_adc_measurements
-                            .as_ref()
-                            .map_or(0, |m| (m.ichg.0 / 128) as u8), // Convert back to raw for default
-                    ),
-                    cmpin: bq25730_async_rs::data_types::AdcCmpin::from_u8(
-                        bq25730_adc_measurements
-                            .as_ref()
-                            .map_or(0, |m| (m.cmpin.0 / 12) as u8), // Convert back to raw for default
-                    ),
-                    iin: bq25730_async_rs::data_types::AdcIin::from_u8(
-                        bq25730_adc_measurements
-                            .as_ref()
-                            .map_or(0, |m| (m.iin.milliamps / 100) as u8), // Convert back to raw for default
-                        true, // Assuming 5mOhm sense resistor for default
-                    ),
-                    vbat: bq25730_async_rs::data_types::AdcVbat::from_register_value(
-                        0, // _lsb: u8
-                        bq25730_adc_measurements
-                            .as_ref()
-                            .map_or(0, |m| (m.vbat.0 / 64) as u8), // msb: u8
-                        bq25730_async_rs::data_types::AdcVbat::OFFSET_MV, // offset_mv: u16
-                    ),
-                    vsys: bq25730_async_rs::data_types::AdcVsys::from_register_value(
-                        0, // _lsb: u8
-                        bq25730_adc_measurements
-                            .as_ref()
-                            .map_or(0, |m| (m.vsys.0 / 64) as u8), // msb: u8
-                        bq25730_async_rs::data_types::AdcVsys::OFFSET_MV, // offset_mv: u16
-                    ),
+                    vbat: bq25730_async_rs::data_types::AdcVbat(0),
+                    vsys: bq25730_async_rs::data_types::AdcVsys(0),
+                    ichg: bq25730_async_rs::data_types::AdcIchg(0),
+                    idchg: bq25730_async_rs::data_types::AdcIdchg(0),
+                    iin: bq25730_async_rs::data_types::AdcIin::from_u8(0, false), // Use public constructor
+                    psys: bq25730_async_rs::data_types::AdcPsys(0),
+                    vbus: bq25730_async_rs::data_types::AdcVbus(0),
+                    cmpin: bq25730_async_rs::data_types::AdcCmpin(0),
                 }
             }),
         };
-        // Publish BQ25730 measurements
-        bq25730_measurements_publisher.publish_immediate(bq25730_measurements);
-        // Add other BQ25730 measurement fields here when implemented
-        info!("BQ25730 task loop end."); // Add a log to mark the end of the loop iteration
-        Timer::after(Duration::from_secs(1)).await; // Adjust delay as needed
+        bq25730_measurements_publisher.publish_immediate(bq25730_measurements_payload);
+
+        Timer::after(Duration::from_secs(1)).await;
     }
 }

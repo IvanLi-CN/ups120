@@ -92,14 +92,6 @@ pub type MeasurementsPublisher<'a, const N: usize> = Publisher<
     MEASUREMENTS_PUBSUB_READERS,
     1,
 >;
-pub type MeasurementsSubscriber<'a, const N: usize> = Subscriber<
-    'a,
-    CriticalSectionRawMutex,
-    AllMeasurements<N>,
-    MEASUREMENTS_PUBSUB_DEPTH,
-    MEASUREMENTS_PUBSUB_READERS,
-    1,
->;
 
 pub type Bq25730AlertsPublisher<'a> = Publisher<
     'a,

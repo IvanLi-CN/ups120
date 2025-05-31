@@ -66,6 +66,7 @@ impl<'d, D: Driver<'d>> UsbEndpoints<'d, D> {
         Ok(cmd)
     }
 
+    #[allow(dead_code)]
     pub async fn send_response(&mut self, data: UsbData) -> Result<(), EndpointError> {
         let mut writer = Cursor::new(&mut self.write_buffer[..]);
         data.write_be(&mut writer)
@@ -85,6 +86,7 @@ impl<'d, D: Driver<'d>> UsbEndpoints<'d, D> {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub async fn process_command(&mut self, command: UsbData, current_measurements: &AllMeasurements<5>) -> Result<(), EndpointError> {
         match command {
             UsbData::SubscribeStatus => {
