@@ -14,6 +14,8 @@ use embassy_stm32::{
     time::Hertz,
     usb::Driver, // Remove InterruptHandler as it's not directly used here
 };
+// Import NtcParameters if it's to be configured here
+use bq769x0_async_rs::data_types::NtcParameters;
 
 bind_interrupts!(
     struct Irqs {
@@ -70,6 +72,7 @@ async fn main(spawner: Spawner) {
         bq76920_measurements_channel, // Channel for BQ76920 Measurements, used to create subscriber
         ina226_measurements_publisher,
         ina226_measurements_channel, // Channel for INA226 Measurements, used to create subscriber
+                                     // Removed runtime config pub/sub from destructuring
     ) = shared::init_pubsubs();
 
     let config = embassy_stm32::Config::default();
@@ -99,11 +102,11 @@ async fn main(spawner: Spawner) {
     > = static_cell::StaticCell::new();
     let i2c_instance = embassy_stm32::i2c::I2c::new(
         p.I2C1,
-        p.PA15,
+        p.PA15, // Assuming PA15 is SCL, PB7 is SDA. Please verify.
         p.PB7,
         Irqs,
-        p.DMA1_CH3,
-        p.DMA1_CH4,
+        p.DMA1_CH3, // DMA for TX
+        p.DMA1_CH4, // DMA for RX
         Hertz(100_000),
         i2c_config,
     );
@@ -131,6 +134,7 @@ async fn main(spawner: Spawner) {
             bq25730_alerts_publisher,
             bq25730_measurements_publisher, // This is Bq25730MeasurementsPublisher
             bq76920_measurements_channel.subscriber().unwrap(), // Create BQ76920 measurements subscriber for bq25730_task
+                                                                // Removed bq25730_runtime_config_publisher from arguments
         ))
         .unwrap();
 
@@ -144,10 +148,23 @@ async fn main(spawner: Spawner) {
 
     let bq76920_i2c_bus = I2cDevice::new(i2c_bus_mutex); // Create a new I2cDevice for the task using the static mutex
 
+    // Define BQ76920 specific configurations needed for its driver initialization
+    let bq76920_sense_resistor_m_ohm: u32 = 3; // Example: 3 mΩ
+    // TODO: Determine the actual source of NtcParameters if external thermistors are used.
+    let bq76920_ntc_params: Option<NtcParameters> = None;
+    // Example for fixed NTC:
+    // let bq76920_ntc_params = Some(NtcParameters {
+    // b_value: 3950.0,
+    // ref_temp_k: 298,
+    // ref_resistance_ohm: 10000,
+    // });
+
     spawner
         .spawn(bq76920_task::bq76920_task(
             bq76920_i2c_bus,
             bq76920_address,
+            bq76920_sense_resistor_m_ohm, // Pass sense resistor value
+            bq76920_ntc_params,           // Pass NTC parameters
             bq76920_alerts_publisher,
             bq76920_measurements_publisher, // Pass the BQ76920 measurements publisher
         ))

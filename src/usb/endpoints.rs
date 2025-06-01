@@ -1,6 +1,6 @@
 use binrw::io::Cursor;
-use binrw::{BinRead, BinWrite, BinResult, Endian};
 use binrw::io::{Read, Seek};
+use binrw::{BinRead, BinResult, BinWrite, Endian};
 use embassy_usb::Builder;
 use embassy_usb::driver::EndpointError;
 use embassy_usb::driver::{Driver, Endpoint, EndpointIn, EndpointOut};
@@ -25,7 +25,6 @@ pub enum UsbData {
     StatusPush(AllMeasurementsUsbPayload),
 }
 
-
 impl BinRead for UsbData {
     type Args<'a> = ();
 
@@ -40,7 +39,10 @@ impl BinRead for UsbData {
             0x01 => Ok(UsbData::UnsubscribeStatus),
             // We don't expect to READ StatusResponse or StatusPush from the host
             0x80 | 0xC0 => {
-                defmt::error!("[UsbData] Received unexpected magic byte for StatusResponse/StatusPush: {:#02x}", magic);
+                defmt::error!(
+                    "[UsbData] Received unexpected magic byte for StatusResponse/StatusPush: {:#02x}",
+                    magic
+                );
                 Err(binrw::Error::NoVariantMatch {
                     pos: reader.stream_position().unwrap_or(0).saturating_sub(1), // Position of the magic byte
                 })

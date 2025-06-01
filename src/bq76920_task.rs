@@ -6,10 +6,12 @@ use embassy_stm32::i2c::I2c;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 // Removed WaitResult import as it's no longer needed in this task
 
-use bq769x0_async_rs::registers::*;
+// use bq769x0_async_rs::registers::*; // Removed unused import
 // use bq769x0_async_rs::units::ElectricalResistance; // Removed as uom is no longer used by the lib
-use bq769x0_async_rs::{BatteryConfig, Bq769x0, errors::Error as BQ769x0Error}; // Import Error, removed RegisterAccess
-use bq769x0_async_rs::ProtectionConfig; // Added to resolve E0422
+use bq769x0_async_rs::ProtectionConfig;
+use bq769x0_async_rs::{
+    BatteryConfig, Bq769x0, data_types::NtcParameters, errors::Error as BQ769x0Error,
+}; // Import Error, removed RegisterAccess, Added NtcParameters // Added to resolve E0422
 
 // Import necessary data types
 use crate::shared::{
@@ -49,30 +51,24 @@ use crate::shared::{
 pub async fn bq76920_task(
     i2c_bus: I2cDevice<'static, CriticalSectionRawMutex, I2c<'static, embassy_stm32::mode::Async>>,
     address: u8,
+    sense_resistor_m_ohm: u32, // Added: Sense resistor value in mOhms
+    ntc_params: Option<NtcParameters>, // Added: NTC parameters
     bq76920_alerts_publisher: Bq76920AlertsPublisher<'static>,
     bq76920_measurements_publisher: Bq76920MeasurementsPublisher<'static, 5>,
 ) {
     info!("BQ76920 task started.");
 
     // Initialize the BQ769x0 driver instance with CRC enabled and for 5 cells.
+    // sense_resistor_m_ohm and ntc_params are now passed as arguments to this task.
     let mut bq: Bq769x0<
         I2cDevice<'static, CriticalSectionRawMutex, I2c<'static, embassy_stm32::mode::Async>>,
         bq769x0_async_rs::Enabled,
         5,
-    > = Bq769x0::new(i2c_bus, address);
+    > = Bq769x0::new(i2c_bus, address, sense_resistor_m_ohm, ntc_params);
 
-    // Sense resistor value in microOhms (e.g., 3.0 mΩ = 3000 µΩ).
-    // This value is used by the driver library to convert raw Coulomb Counter (CC) readings to current in mA.
-    // FIXME: This should ideally come from a central configuration or be part of BatteryConfig if the lib supports it.
-    let sense_resistor_uohms: u32 = 3000;
-
-    // Variables to store the latest readings. Initialized to None and updated in the loop.
-    // These are used to construct the Bq76920Measurements struct for publishing.
-    let mut _voltages: Option<bq769x0_async_rs::CellVoltages<5>> = None;
-    let mut _temps: Option<bq769x0_async_rs::TemperatureSensorReadings> = None;
-    let mut _current: Option<i32> = None; // Current in mA
-    let mut _system_status: Option<bq769x0_async_rs::SystemStatus> = None;
-    let mut _mos_status: Option<bq769x0_async_rs::MosStatus> = None;
+    // Variables to store the latest readings from the sub-module, which are now in physical units.
+    let mut latest_core_measurements: Option<bq769x0_async_rs::data_types::Bq76920Measurements<5>> =
+        None;
 
     // --- BQ76920 Initialization Sequence ---
 
@@ -88,11 +84,11 @@ pub async fn bq76920_task(
         overvoltage_trip: 3600u32,  // Set to 3.6V
         undervoltage_trip: 2500u32, // Set to 2.5V
         protection_config: ProtectionConfig {
-            ocd_limit: 10_000i32, // Set to 10A (10_000 mA)
-            ..BatteryConfig::default().protection_config // Inherit other protection_config fields
+            ocd_limit: 10_000i32,                         // Set to 10A (10_000 mA)
+            ..BatteryConfig::default().protection_config  // Inherit other protection_config fields
         },
-        rsense: sense_resistor_uohms / 1000, // Calculate rsense in mOhms
-        ..Default::default() // Inherit other BatteryConfig fields
+        rsense: sense_resistor_m_ohm, // Use mOhms directly as per BatteryConfig field
+        ..Default::default()          // Inherit other BatteryConfig fields
     };
 
     let mut fets_enabled_after_config = false;
@@ -156,6 +152,9 @@ pub async fn bq76920_task(
         );
     }
 
+    // Runtime config (Bq76920RuntimeConfig) is no longer published from here,
+    // as NTC parameters and sense resistor are now part of Bq769x0 driver initialization.
+
     // Main loop for continuous data acquisition and publishing.
     loop {
         // This task focuses on reading data from the BQ76920 itself.
@@ -165,132 +164,45 @@ pub async fn bq76920_task(
         // in `BatteryConfig::default()` and verified by `try_apply_config`.
         // Therefore, an explicit check and write for CC_EN in this loop is no longer necessary.
 
-        // Read Cell Voltages
-        match bq.read_cell_voltages().await {
-            Ok(v_converted) => {
-                _voltages = Some(v_converted); // Store the successfully read voltages.
-            }
-            Err(e) => {
-                error!("Failed to read BQ76920 cell voltages: {:?}", e);
-                _voltages = None; // Mark as None if read fails.
-            }
-        }
+        // Read all measurements from BQ76920. These are now in physical units.
+        match bq.read_all_measurements().await {
+            Ok(core_meas) => {
+                latest_core_measurements = Some(core_meas);
 
-        // Read Pack Voltage (total battery voltage)
-        match bq.read_pack_voltage().await {
-            Ok(voltage) => {
-                info!("BQ76920 Pack Voltage: {} mV", voltage);
-                // This value is not directly part of Bq76920Measurements struct but logged for info.
-            }
-            Err(e) => {
-                error!("Failed to read BQ76920 pack voltage: {:?}", e);
-            }
-        }
-
-        // Read Temperatures (raw ADC values from temperature sensors)
-        match bq.read_temperatures().await {
-            Ok(sensor_readings) => {
-                _temps = Some(sensor_readings); // Store raw temperature readings.
-                // Conversion to Celsius would typically happen when processing/displaying this data,
-                // potentially using thermistor characteristics if external sensors are used.
-            }
-            Err(e) => {
-                error!(
-                    "Failed to read BQ76920 temperature sensor readings: {:?}",
-                    e
-                );
-                _temps = None;
-            }
-        }
-
-        // Read Current (from Coulomb Counter)
-        match bq.read_current().await {
-            Ok(c) => {
-                // Convert the raw Coulomb Counter value to current in mA using the sense resistor value.
-                // FIXME: The method `convert_raw_cc_to_current_ma` is not defined in the bq769x0_async_rs driver.
-                // This will cause a compilation error. This method needs to be implemented in the driver or
-                // the current calculation logic needs to be integrated here or in the driver,
-                // likely requiring the `rsense_m_ohm` value to be available (e.g., from `BatteryConfig`).
-                // For now, assuming it exists for the purpose of this task structure.
-                let current_ma = bq.convert_raw_cc_to_current_ma(c.raw_cc, sense_resistor_uohms);
-                info!(
-                    "BQ76920 Raw CC: {}, Calculated Current: {} mA",
-                    c.raw_cc, current_ma
-                );
-                _current = Some(current_ma);
-            }
-            Err(e) => {
-                error!("Failed to read BQ76920 current: {:?}", e);
-                _current = None;
-            }
-        }
-
-        // Read System Status register (SYS_STAT)
-        // This register contains flags for various protection events (OV, UV, SCD, OCD) and other statuses.
-        match bq.read_status().await {
-            Ok(status_flags) => {
-                _system_status = Some(status_flags); // Store the read system status.
+                // Publish BQ76920 alert information (derived from system status).
+                let alerts = crate::data_types::Bq76920Alerts {
+                    system_status: core_meas.system_status,
+                };
+                bq76920_alerts_publisher.publish_immediate(alerts);
 
                 // It's important to clear any set status flags after reading them,
                 // so that new events can be detected. Writing '1' to a bit clears it.
-                let flags_to_clear = status_flags.0.bits(); // Get all currently set flags.
+                let flags_to_clear = core_meas.system_status.0.bits();
                 if flags_to_clear != 0 {
-                    if let Err(e) = bq.clear_status_flags(flags_to_clear).await {
-                        error!("Failed to clear BQ76920 status flags: {:?}", e);
+                    if let Err(e_clear) = bq.clear_status_flags(flags_to_clear).await {
+                        error!("Failed to clear BQ76920 status flags: {:?}", e_clear);
                     } else {
                         info!("Cleared BQ76920 status flags: {:#010b}", flags_to_clear);
                     }
                 }
             }
             Err(e) => {
-                error!("Failed to read BQ76920 system status: {:?}", e);
-                _system_status = None;
+                error!("Failed to read BQ76920 measurements: {:?}", e);
+                latest_core_measurements = None;
+                // Optionally publish default/error state for alerts if needed
+                let alerts = crate::data_types::Bq76920Alerts::default();
+                bq76920_alerts_publisher.publish_immediate(alerts);
             }
         }
 
-        // Read MOS FET status from SYS_CTRL2 register
-        // This indicates whether the CHG_ON and DSG_ON bits are set, reflecting the state of the FETs.
-        match bq.read_mos_status().await {
-            Ok(mos_state) => {
-                info!(
-                    "BQ76920 MOS Status: CHG_ON={}, DSG_ON={}",
-                    mos_state.0.contains(SysCtrl2Flags::CHG_ON),
-                    mos_state.0.contains(SysCtrl2Flags::DSG_ON)
-                );
-                _mos_status = Some(mos_state);
-            }
-            Err(e) => {
-                error!("Failed to read BQ76920 SYS_CTRL2 for MOS status: {:?}", e);
-                _mos_status = None;
-            }
-        }
-
-        // Publish BQ76920 alert information (derived from system status).
-        // This uses the `system_status` variable which was updated just above.
-        if let Some(ss) = _system_status {
-            let alerts = crate::data_types::Bq76920Alerts { system_status: ss };
-            bq76920_alerts_publisher.publish_immediate(alerts);
-        }
-
-        // Construct the comprehensive BQ76920 measurements structure.
-        // If any individual read failed, use a default/empty value for that part
-        // to ensure the overall structure can still be published.
-        let bq76920_measurements_payload = crate::data_types::Bq76920Measurements {
-            core_measurements: bq769x0_async_rs::data_types::Bq76920Measurements {
-                cell_voltages: _voltages
-                    .unwrap_or_default(),
-                temperatures: _temps
-                    .unwrap_or_default(),
-                current: _current.unwrap_or(0i32), // Default to 0 mA if current read failed.
-                system_status: _system_status
-                    .unwrap_or_else(|| bq769x0_async_rs::data_types::SystemStatus::new(0)),
-                mos_status: _mos_status
-                    .unwrap_or_else(|| bq769x0_async_rs::data_types::MosStatus::new(0)),
-            },
+        // Construct the BQ76920 measurements payload for the main `AllMeasurements` publisher.
+        // If read_all_measurements failed, use default values.
+        let bq76920_measurements_payload_for_main_pub = crate::data_types::Bq76920Measurements {
+            core_measurements: latest_core_measurements.unwrap_or_default(),
         };
 
-        // Publish the collected BQ76920 measurements.
-        bq76920_measurements_publisher.publish_immediate(bq76920_measurements_payload);
+        // Publish the collected BQ76920 measurements (which are now wrapped in the main project's type).
+        bq76920_measurements_publisher.publish_immediate(bq76920_measurements_payload_for_main_pub);
 
         // Wait for a defined interval before the next cycle of readings.
         Timer::after(Duration::from_secs(1)).await;

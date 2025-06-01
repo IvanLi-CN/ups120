@@ -11,14 +11,10 @@ use static_cell::StaticCell;
 use crate::data_types::{
     AllMeasurements, Bq25730Alerts, Bq25730Measurements, Bq76920Alerts, Bq76920Measurements,
     Ina226Measurements,
-}; // Import necessary data types
+};
 use crate::shared::{
-    Bq25730AlertsSubscriber,       // Import BQ25730 alerts subscriber
-    Bq25730MeasurementsSubscriber, // Import BQ25730 subscriber
-    Bq76920AlertsSubscriber,       // Import BQ76920 alerts subscriber
-    Bq76920MeasurementsSubscriber, // Import BQ76920 subscriber
-    Ina226MeasurementsSubscriber,  // Import INA226 subscriber
-    MeasurementsPublisher,         // Import MeasurementsPublisher
+    Bq25730AlertsSubscriber, Bq25730MeasurementsSubscriber, Bq76920AlertsSubscriber,
+    Bq76920MeasurementsSubscriber, Ina226MeasurementsSubscriber, MeasurementsPublisher,
 };
 
 pub mod endpoints;
@@ -216,10 +212,10 @@ pub async fn usb_task(
                 bq25730_alerts: latest_bq25730_alerts.unwrap_or_default(),
                 bq76920_alerts: latest_bq76920_alerts.unwrap_or_default(),
             };
-// Process USB command if one was stored from select!
+            // Process USB command if one was stored from select!
             if let Some(cmd) = usb_command_to_process.take() {
                 defmt::info!("usb_task: Processing stored USB command: {:?}", cmd);
-                let command_payload = convert_to_payload(&aggregated_data);
+                let command_payload = aggregated_data.to_usb_payload();
                 if let Err(e) = usb_endpoints.process_command(cmd, &command_payload).await {
                     defmt::error!("usb_task: Error processing USB command: {:?}", e);
                 }
@@ -248,7 +244,7 @@ pub async fn usb_task(
                     "usb_task: Subscription active, attempting to send status update via USB."
                 );
                 // Convert to AllMeasurementsUsbPayload before sending
-                let status_update_payload = convert_to_payload(&aggregated_data);
+                let status_update_payload = aggregated_data.to_usb_payload();
                 if let Err(e) = usb_endpoints
                     .send_status_update(status_update_payload) // Pass the converted payload
                     .await
@@ -276,48 +272,7 @@ pub async fn usb_task(
     embassy_futures::join::join(usb_fut, main_usb_processing_fut).await;
 }
 
-// Helper function to convert AllMeasurements<5> to AllMeasurementsUsbPayload
-fn convert_to_payload(data: &AllMeasurements<5>) -> crate::data_types::AllMeasurementsUsbPayload {
-    crate::data_types::AllMeasurementsUsbPayload {
-        // BQ25730 Measurements
-        bq25730_adc_vbat_raw: data.bq25730.adc_measurements.vbat.to_u16(), // Assuming these voltage/power types still have to_u16
-        bq25730_adc_vsys_raw: data.bq25730.adc_measurements.vsys.to_u16(),
-        bq25730_adc_ichg_raw: data.bq25730.adc_measurements.ichg.to_raw() as u16, // Send raw u8, cast to u16 for payload
-        bq25730_adc_idchg_raw: data.bq25730.adc_measurements.idchg.to_raw() as u16, // Send raw u8, cast to u16 for payload
-        bq25730_adc_iin_raw: data.bq25730.adc_measurements.iin.to_raw() as u16,   // Send raw u8, cast to u16 for payload
-        bq25730_adc_psys_raw: data.bq25730.adc_measurements.psys.to_u16(),
-        bq25730_adc_vbus_raw: data.bq25730.adc_measurements.vbus.to_u16(),
-        bq25730_adc_cmpin_raw: data.bq25730.adc_measurements.cmpin.to_u16(),
-
-        // BQ76920 Measurements
-        bq76920_cell1_mv: data.bq76920.core_measurements.cell_voltages.voltages[0],
-        bq76920_cell2_mv: data.bq76920.core_measurements.cell_voltages.voltages[1],
-        bq76920_cell3_mv: data.bq76920.core_measurements.cell_voltages.voltages[2],
-        bq76920_cell4_mv: data.bq76920.core_measurements.cell_voltages.voltages[3],
-        bq76920_cell5_mv: data.bq76920.core_measurements.cell_voltages.voltages[4],
-        bq76920_ts1_raw_adc: data.bq76920.core_measurements.temperatures.ts1,
-        bq76920_ts2_present: data.bq76920.core_measurements.temperatures.ts2.is_some() as u8,
-        bq76920_ts2_raw_adc: data.bq76920.core_measurements.temperatures.ts2.unwrap_or(0),
-        bq76920_ts3_present: data.bq76920.core_measurements.temperatures.ts3.is_some() as u8,
-        bq76920_ts3_raw_adc: data.bq76920.core_measurements.temperatures.ts3.unwrap_or(0),
-        bq76920_is_thermistor: data.bq76920.core_measurements.temperatures.is_thermistor as u8,
-        bq76920_current_ma: data.bq76920.core_measurements.current,
-        bq76920_system_status_bits: data.bq76920.core_measurements.system_status.0.bits(),
-        bq76920_mos_status_bits: data.bq76920.core_measurements.mos_status.0.bits(),
-
-        // Ina226 Measurements
-        ina226_voltage_f32: data.ina226.voltage,
-        ina226_current_f32: data.ina226.current,
-        ina226_power_f32: data.ina226.power,
-
-        // Bq25730 Alerts
-        bq25730_charger_status_raw_u16: data.bq25730_alerts.charger_status.to_u16(),
-        bq25730_prochot_status_raw_u16: data.bq25730_alerts.prochot_status.to_u16(),
-
-        // Bq76920 Alerts
-        bq76920_alerts_system_status_bits: data.bq76920_alerts.system_status.0.bits(),
-    }
-}
+// The convert_to_payload function has been moved to an impl block for AllMeasurements in data_types.rs
 struct Disconnected {}
 
 impl From<EndpointError> for Disconnected {

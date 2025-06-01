@@ -13,7 +13,9 @@ use bq769x0_async_rs::registers::{
     SysCtrl2Flags as Bq76920SysCtrl2Flags, SysStatFlags as Bq76920SysStatFlags,
 };
 use bq25730_async_rs::RegisterAccess;
-use bq25730_async_rs::registers::{ChargeOption0Flags, ChargeOption0MsbFlags, ChargeOption1MsbFlags, ChargeOption2Flags};
+use bq25730_async_rs::registers::{
+    ChargeOption0Flags, ChargeOption0MsbFlags, ChargeOption1MsbFlags,
+}; // Removed ChargeOption2Flags
 use bq25730_async_rs::{Bq25730, SenseResistorValue};
 
 use crate::shared::{
@@ -36,13 +38,28 @@ pub async fn bq25730_task(
     info!("BQ25730 task started.");
 
     // Initialize with a Config struct
-    let mut config = bq25730_async_rs::data_types::Config::new(4, SenseResistorValue::R5mOhm, SenseResistorValue::R10mOhm);
-    config.charge_option0.msb_flags.remove(ChargeOption0MsbFlags::EN_LWPWR);
+    let mut config = bq25730_async_rs::data_types::Config::new(
+        4,
+        SenseResistorValue::R5mOhm,
+        SenseResistorValue::R10mOhm,
+    );
+    config
+        .charge_option0
+        .msb_flags
+        .remove(ChargeOption0MsbFlags::EN_LWPWR);
     // Set WDTMR_ADJ to 01b (Enabled, 5 sec timeout, suspends charger by setting ChargeCurrent to 0mA on timeout)
     // This corresponds to the datasheet setting: 01b: Enabled, 5 sec
-    config.charge_option0.msb_flags.remove(ChargeOption0MsbFlags::WDTMR_ADJ); // Clear current WDTMR_ADJ setting (bits 6-5)
-    config.charge_option0.msb_flags.bits |= (0b01 << 5); // Set WDTMR_ADJ to 01b (bit 6=0, bit 5=1)
-    config.charge_option1.msb_flags.insert(ChargeOption1MsbFlags::EN_IBAT);
+
+    // Correct way to set WDTMR_ADJ to 01b (assuming bits 6:5)
+    let mut current_msb_bits = config.charge_option0.msb_flags.bits();
+    current_msb_bits &= !((0b11) << 5); // Clear bits 6 and 5
+    current_msb_bits |= 0b01 << 5; // Set bits 6:5 to 01
+    config.charge_option0.msb_flags = ChargeOption0MsbFlags::from_bits_truncate(current_msb_bits);
+
+    config
+        .charge_option1
+        .msb_flags
+        .insert(ChargeOption1MsbFlags::EN_IBAT);
     let mut bq25730 = Bq25730::new(i2c_bus, address, config);
 
     // init() will determine the correct rsns from the chip and update bq25730.rsns
@@ -236,20 +253,35 @@ pub async fn bq25730_task(
 
         let final_charge_permission = bq76920_charge_fet_enabled && bq76920_safe_to_charge;
 
-// Log key register values for ICHG debugging
+        // Log key register values for ICHG debugging
         match bq25730.read_charge_current().await {
-            Ok(cc) => info!("[BQ25730 DEBUG] ChargeCurrent: {} mA (Raw: {})", cc.milliamps, cc.to_raw()),
+            Ok(cc) => info!(
+                "[BQ25730 DEBUG] ChargeCurrent: {} mA (Raw: {})",
+                cc.milliamps,
+                cc.to_raw()
+            ),
             Err(e) => error!("[BQ25730 DEBUG] Failed to read ChargeCurrent: {:?}", e),
         }
         match bq25730.read_charge_option0().await {
-            Ok(co0) => info!("[BQ25730 DEBUG] ChargeOption0: LSB=0x{:02x}, MSB=0x{:02x}", co0.lsb_flags.bits(), co0.msb_flags.bits()),
+            Ok(co0) => info!(
+                "[BQ25730 DEBUG] ChargeOption0: LSB=0x{:02x}, MSB=0x{:02x}",
+                co0.lsb_flags.bits(),
+                co0.msb_flags.bits()
+            ),
             Err(e) => error!("[BQ25730 DEBUG] Failed to read ChargeOption0: {:?}", e),
         }
         match bq25730.read_iin_host().await {
-            Ok(iin_host) => info!("[BQ25730 DEBUG] IIN_HOST: {} mA (Raw: {})", iin_host.milliamps, iin_host.to_raw()),
+            Ok(iin_host) => info!(
+                "[BQ25730 DEBUG] IIN_HOST: {} mA (Raw: {})",
+                iin_host.milliamps,
+                iin_host.to_raw()
+            ),
             Err(e) => error!("[BQ25730 DEBUG] Failed to read IIN_HOST: {:?}", e),
         }
-        info!("[BQ25730 DEBUG] final_charge_permission: {}", final_charge_permission);
+        info!(
+            "[BQ25730 DEBUG] final_charge_permission: {}",
+            final_charge_permission
+        );
         match bq25730.read_charge_option0().await {
             Ok(mut charge_option_0) => {
                 let original_lsb_flags_val = charge_option_0.lsb_flags.bits();
