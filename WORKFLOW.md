@@ -4,10 +4,10 @@
 
 **主要设备：**
 
-- BQ76920：电池监控芯片
-- BQ25730：充电管理芯片
-- INA226：电流/电压传感器
-- USB 模块：负责数据推送
+- BQ76920：电池监控芯片 (例如，用于3至5串锂离子/磷酸铁锂电池的监控器)
+- BQ25730：充电管理芯片 (例如，NVDC 降压-升压电池充电控制器)
+- INA226：电流/电压传感器 (例如，具有I2C接口的电流分流和功率监视器，配置为16V，400uV/LSB)
+- USB 模块：负责数据推送 (例如，基于STM32内部USB外设或外部USB转串口芯片)
 
 **流程概述：**
 
@@ -18,14 +18,16 @@
 
 2.  **设备初始化（并行进行）：**
     - **BQ76920 初始化：**
-        - 应用电池配置（例如，通过 `BatteryConfig::default()`），包括设置各项保护参数（如5串磷酸铁锂电池的过压/欠压阈值、过流保护阈值和延迟等）。
-        - 配置 CC_CFG 寄存器（例如，设置为 0x19 以优化性能）。
-        - 清除初始状态标志（例如，通过写入 SYS_STAT 寄存器 0xFF）。
-        - **关键步骤：**调用驱动库提供的配置与验证方法（例如 `try_apply_config`），回读并验证关键安全配置寄存器（例如 OV_TRIP, UV_TRIP, PROTECT1, PROTECT2, CC_CFG 等）是否已按预期正确写入芯片。若验证失败，则报告严重错误，并可能中止后续的MOS管使能操作，以确保系统安全。
-        - 若配置验证成功，则主动使能充电MOS管 (CHG_ON) 和放电MOS管 (DSG_ON)，以默认允许充电和放电通路。
+        - 调用驱动库提供的配置与验证方法（例如 `try_apply_config(&battery_config)`）。此方法内部会：
+            - 首先尝试写入所有配置到 BQ76920 芯片，这些配置源于 `BatteryConfig` 结构体（例如，针对5串磷酸铁锂电池，可能包含过压保护阈值约 3.65V/节，欠压保护阈值约 2.5V/节，一级短路放电保护阈值如 60mV/200µs，二级短路放电保护阈值如 100mV/400µs，过流放电保护阈值如 40mV/8ms 等）。
+            - 配置 `CC_CFG` 寄存器（例如，设置为 `0x19` 以优化电流测量和库仑计功能）。
+            - 清除初始状态标志（例如，通过向 `SYS_STAT` 寄存器写入 `0xFF` 来清除所有状态位）。
+            - **关键步骤：**在写入配置后，回读并验证关键安全配置寄存器（例如 `PROTECT1` (SCD/OCD1 设置), `PROTECT2` (OCD2/OCC 设置), `PROTECT3` (过放/充电保护设置), `OV_TRIP` (过压阈值), `UV_TRIP` (欠压阈值), `CC_CFG` 等）是否已按预期正确写入芯片。
+        - 若所有关键配置验证成功，则主动通过写入 `SYS_CTRL2` 寄存器来使能充电MOS管 (`CHG_ON` 位置1) 和放电MOS管 (`DSG_ON` 位置1)，以默认允许充电和放电通路。
+        - 若配置验证失败（例如，某个寄存器的回读值与期望值不符），则报告包含不匹配详情的严重错误，并且**不**会尝试使能MOS管，以确保系统安全。
     - **BQ25730 初始化：**
-        - 设置 18V 充电截止电压。
-        - 配置 4 串电池。
+        - 设置充电截止电压为 18.0V (对应5串磷酸铁锂电池的典型充满电压，例如通过配置 `ChargeVoltageLimit` 寄存器实现，如写入 `0x4650` 代表18000mV)。
+        - 配置为5串电池 (例如通过配置 `ChargeOption0` 寄存器的 `CELL_BATPRESZ` 位域为 `0b100` 代表5串)。
         - 初始状态不主动进行充电或放电（等待 BQ76920 的状态）。
     - **INA226 初始化：**
         - 正常初始化（根据代码，似乎只需要创建实例）。
@@ -53,28 +55,76 @@
 **流程图 (Mermaid):**
 
 ```mermaid
-graph TD
-    A[系统初始化] --> B(设备初始化);
-    B --> C1(BQ76920 初始化与配置验证);
-    C1 --> C1_1(使能 CHG/DSG MOS);
-    B --> C2(BQ25730 初始化);
-    B --> C3(INA226 初始化);
+sequenceDiagram
+    participant SC as SystemController
+    participant BQ76920 as BQ76920_Task
+    participant BQ25730 as BQ25730_Task
+    participant INA226 as INA226_Task
+    participant USB as USB_Task
+    participant DH as DataHub (Pub/Sub)
+    participant PC as ExternalPC
 
-    C1_1 --> D1(BQ76920 数据采集与处理);
-    C2 --> D2(BQ25730 数据采集与处理);
-    C3 --> D3(INA226 数据采集);
+    SC->>BQ76920: 启动任务与初始化
+    activate BQ76920
+    BQ76920->>BQ76920: 应用配置 (try_apply_config)
+    alt 配置验证成功
+        BQ76920->>BQ76920: 使能CHG/DSG MOS管
+    else 配置验证失败
+        BQ76920->>BQ76920: 报告错误/安全停机
+    end
+    deactivate BQ76920
 
-    D1 --> E(发布 BQ76920 数据);
-    D2 --> F(发布 BQ25730 数据);
-    D3 --> G(发布 INA226 数据);
+    SC->>BQ25730: 启动任务与初始化
+    activate BQ25730
+    BQ25730->>BQ25730: 设置充电参数
+    deactivate BQ25730
 
-    E --> H(USB 数据推送);
-    F --> H;
-    G --> H;
+    SC->>INA226: 启动任务与初始化
+    activate INA226
+    INA226->>INA226: 设备初始化
+    deactivate INA226
 
-    D2 --> I2(根据BQ76920状态和电量控制BQ25730充放电);
+    SC->>USB: 启动任务与初始化
+    activate USB
+    USB->>USB: USB外设初始化
+    deactivate USB
 
-    H --> J(数据发送到外部);
+    loop 周期性数据采集与处理 (每秒)
+        par BQ76920数据采集
+            BQ76920->>BQ76920: 读传感器数据 (电压,电流,温度,状态)
+            activate BQ76920
+            BQ76920->>DH: 发布BQ76920告警/测量数据
+            deactivate BQ76920
+        and BQ25730数据采集
+            BQ25730->>DH: 订阅BQ76920数据
+            activate BQ25730
+            DH-->>BQ25730: BQ76920状态数据
+            BQ25730->>BQ25730: 读充电器状态/ADC数据
+            alt BQ76920状态允许充电
+                BQ25730->>BQ25730: 控制BQ25730允许充电
+            else BQ76920状态禁止充电或故障
+                BQ25730->>BQ25730: 控制BQ25730禁止充电
+            end
+            BQ25730->>DH: 发布BQ25730告警/测量数据
+            deactivate BQ25730
+        and INA226数据采集
+            INA226->>INA226: 读传感器数据 (电压,电流), 计算功率
+            activate INA226
+            INA226->>DH: 发布INA226测量数据
+            deactivate INA226
+        end
+    end
+
+    loop USB数据推送
+        USB->>USB: 等待USB连接 (如有必要)
+        activate USB
+        USB->>DH: 获取BQ76920数据
+        USB->>DH: 获取BQ25730数据
+        USB->>DH: 获取INA226数据
+        USB->>USB: 整合数据包
+        USB->>PC: 推送数据包
+        deactivate USB
+    end
 ```
 
 **详细步骤：**
@@ -89,27 +139,35 @@ graph TD
     - 生成并启动 `bq76920_task`、`bq25730_task`、`ina226_task` 和 `usb_task`。
 3.  **BQ76920 任务执行 (`bq76920_task.rs`)：**
     - 创建 BQ76920 实例。
-    - 调用驱动库提供的配置与验证方法（例如 `try_apply_config`）来应用电池配置（包括5串磷酸铁锂电池的各项保护参数、CC_CFG 等）并**验证这些关键安全配置是否已正确写入芯片**。
-    - **如果配置验证失败：**
-        - 报告严重错误（包含不匹配的寄存器、期望值和实际值）。
-        - **任务不应使能MOS管，并应进入安全停机或持续报错状态，以防止不安全操作。**
-    - **如果配置验证成功：**
-        - **主动使能充电MOS管 (CHG_ON) 和放电MOS管 (DSG_ON)**，以默认允许充电和放电通路。
-        - 记录配置成功并已尝试使能MOS管。
+    - 调用驱动库提供的 `bq.try_apply_config(&battery_config).await` 方法。此方法会：
+        - 应用 `battery_config` 中的电池配置（例如，针对5串磷酸铁锂电池，可能包含过压保护阈值约 3.65V/节对应 `OV_TRIP` 寄存器值，欠压保护阈值约 2.5V/节对应 `UV_TRIP` 寄存器值，一级短路放电保护阈值如 60mV/200µs 和二级短路放电保护阈值如 100mV/400µs 分别配置到 `PROTECT1` 寄存器的 `SCD_THRESH` 和 `SCD_DELAY` 位域，过流放电保护阈值如 40mV/8ms 配置到 `PROTECT2` 寄存器的 `OCD_THRESH` 和 `OCD_DELAY` 位域等）。
+        - 写入 `CC_CFG` 寄存器（例如，值 `0x19`）。
+        - 清除 `SYS_STAT` 寄存器的所有状态位（例如，写入 `0xFF`）。
+        - **然后严格验证这些关键安全配置（如 `OV_TRIP`, `UV_TRIP`, `PROTECT1`, `PROTECT2`, `CC_CFG` 等）是否已正确写入芯片。**
+    - **处理 `try_apply_config` 的结果：**
+        - **如果返回 `Ok(_)` (配置验证成功)：**
+            - 记录配置成功和已验证的日志。
+            - **主动调用 `bq.enable_charging().await` 和 `bq.enable_discharging().await`** (即设置 `SYS_CTRL2` 寄存器中的 `CHG_ON` 和 `DSG_ON` 位为1)，以默认允许充电和放电通路。
+            - 记录尝试使能MOS管的日志，并处理这两个调用可能产生的I2C错误（例如，记录错误并继续，或认为这是关键故障）。
+        - **如果返回 `Err(Error::ConfigVerificationFailed { register, expected, actual })` (配置验证失败)：**
+            - 记录包含不匹配寄存器（例如 `Register::OvTrip`）、期望值和实际值的**严重错误**日志。
+            - **任务不应继续使能MOS管，并应进入安全停机或持续报错状态，以防止不安全操作。**
+        - **如果返回其他错误 (例如 `Error::I2c(_)` أثناء `try_apply_config`)：**
+            - 记录I2C通信错误。
+            - **同样，任务不应继续使能MOS管，并应考虑采取安全措施。**
     - 进入主循环：
-        - （如果 `try_apply_config` 未处理 `CC_EN` 的持续确保，则保留此项，但通常初始化时已设置）确保 `CC_EN` 在 `SYS_CTRL2` 中启用。
         - 定期读取电池电压、总电压、温度、电流、系统状态（包括芯片自主保护触发的标志）和MOS管状态。
         - 将告警信息（基于系统状态）发布到 `bq76920_alerts_publisher`。
         - 将测量数据（电压、温度、电流、状态、MOS 状态）构建成 `Bq76920Measurements` 结构体，并发布到 `bq76920_measurements_publisher`。
         - 等待 1 秒。
 4.  **BQ25730 任务执行 (`bq25730_task.rs`)：**
-    - 创建 BQ25730 实例（使用 4 串电池配置）。
+    - 创建 BQ25730 实例（例如，使用配置：5串电池，充电电压上限18.0V，充电电流上限3A通过 `ChargeCurrentLimit` 寄存器设置，输入电流限制2A通过 `InputCurrentLimit` 寄存器设置等）。
     - 进入主循环：
         - 订阅并等待 `BQ76920` 的测量数据。
         - 读取充电器状态和 Prochot 状态。
         - 将充电器状态和 Prochot 状态构建成 `Bq25730Alerts` 结构体，并发布到 `bq25730_alerts_publisher`。
         - 读取 ADC 测量数据（PSYS, VBUS, IDCHG, ICHG, CMPIN, IIN, VBAT, VSYS）。
-        - 根据从 `BQ76920` 获取的状态信息（特别是 `MosStatus` 中的 `CHG_ON` 标志和 `SystemStatus` 中的故障标志如 `OV`），来决定是否允许 `BQ25730` 进行充电操作（即控制 `BQ25730` 的 `CHRG_INHIBIT` 位）。
+        - 根据从 `BQ76920` 获取的状态信息（特别是 `MosStatus` 中的 `CHG_ON` 标志和 `SystemStatus` 中的故障标志如 `OV` (过压)），来决定是否允许 `BQ25730` 进行充电操作（即控制 `BQ25730` 的 `ChargeOption0` 寄存器中的 `CHRG_INHIBIT` 位：`CHG_ON` 为true且无严重故障时，清除 `CHRG_INHIBIT` 位以允许充电；否则设置 `CHRG_INHIBIT` 位以禁止充电）。
         - 此处的充电逻辑主要是指根据 BQ76920 的状态（如MOS管是否允许充电，是否有严重故障）来决定是否通过 BQ25730 的 `CHRG_INHIBIT` 位来允许或禁止充电。BQ25730 本身不执行复杂的基于电量的充电阶段（如CC/CV）切换，这些高级策略应由更高层逻辑（如果需要）或 BQ76920 的自主保护机制间接影响。
         - 将 ADC 测量数据构建成 `Bq25730Measurements` 结构体，并发布到 `bq25730_measurements_publisher`。
         - 等待 1 秒。
@@ -150,58 +208,3 @@ BQ25730 在本系统中主要扮演一个**受控的充电器前端**角色，�
 因此，文档中提及的“充电逻辑”应主要理解为基于 BQ76920 安全状态的“充电允许控制”，而非复杂的、基于电池SOC的充电曲线管理。
 
 ---
-
-## 附录：BQ76920充电问题修复方案与实施计划
-
-**1. 问题概述**
-
-设备当前无法充电。根本原因在于 `BQ76920` 电池管理芯片的充电MOS管使能位 (`CHG_ON` 在 `SYS_CTRL2` 寄存器中) 在初始化后未被主动设置为 `true`。这导致 `bq25730_task` 在检查 `BQ76920` 状态时，认为充电不被允许，进而设置 `BQ25730` 充电芯片的 `CHRG_INHIBIT` 位，禁止了充电操作。
-
-**2. 核心修复思路**
-
-在 `BQ76920` 初始化过程中，首先应用所有安全相关的配置参数（如过压、欠压、过流保护阈值等）。然后，严格验证这些关键配置是否已成功写入芯片。只有在配置验证通过的前提下，才主动使能 `BQ76920` 的充电MOS管 (`CHG_ON`) 和放电MOS管 (`DSG_ON`)，从而默认允许充电和放电通路。后续的实际充放电控制将依赖 `BQ76920` 芯片自身的硬件保护机制以及 `bq25730_task` 根据 `BQ76920` 报告的状态进行的判断。
-
-**3. 详细实施步骤**
-
-**阶段一：修改 `bq769x0_async_rs` 驱动库 ([`bq76920/`](bq76920/))**
-
-1.  **更新 `bq76920/src/errors.rs`**:
-    *   在 `Error` 枚举中添加新的错误变体，用于表示配置验证失败：
-        ```rust
-        ConfigVerificationFailed {
-            register: registers::Register, // 确保 Register 类型可被包含
-            expected: u8,
-            actual: u8,
-        }
-        ```
-
-2.  **在 `bq76920/src/lib.rs` 中实现 `async fn try_apply_config()`**:
-    *   定义新的公共方法 `pub async fn try_apply_config(&mut self, config: &BatteryConfig) -> Result<(), Error<E>>`。
-    *   **内部实现**:
-        *   **调用现有 `set_config`**: 首先调用 `self.set_config(config).await?` 执行实际的寄存器写入。
-        *   **实现配置验证逻辑**:
-            *   读取ADC校准值 (`adc_gain_uv_per_lsb`, `adc_offset_mv`)。
-            *   回读关键安全配置寄存器：`OV_TRIP`, `UV_TRIP`, `PROTECT1`, `PROTECT2`, `PROTECT3`, `CC_CFG`, `SYS_CTRL1`, `SYS_CTRL2` (基础配置部分，此时 `CHG_ON`/`DSG_ON` 应为0)。
-            *   根据传入的 `config` 和ADC校准值，计算这些寄存器的期望原始值。
-            *   逐个比较回读值与期望值。若任何关键配置不匹配，则返回 `Err(Error::ConfigVerificationFailed { register, expected, actual })`。
-        *   如果所有验证都通过，则返回 `Ok(())`。
-
-**阶段二：修改应用层代码 (`src/bq76920_task.rs`)**
-
-1.  **在 `bq76920_task` 的初始化部分**:
-    *   替换原有的 `bq.set_config(...)` 调用为 `bq.try_apply_config(&battery_config).await`。
-    *   **错误处理**:
-        *   若 `try_apply_config` 返回 `Ok(_)`:
-            *   记录配置成功和已验证的日志。
-            *   继续调用 `bq.enable_charging().await` 和 `bq.enable_discharging().await` 来使能MOS管。
-            *   记录尝试使能MOS管的日志，并处理这两个调用可能产生的I2C错误。
-        *   若 `try_apply_config` 返回 `Err(Error::ConfigVerificationFailed {..})`):
-            *   记录包含详细不匹配信息的**严重错误**日志。
-            *   **任务不应继续使能MOS管**，并应考虑进入安全停机状态或持续报错，以防止在保护配置不正确的情况下运行。
-        *   若 `try_apply_config` 返回其他错误 (如 `Error::I2c(_)`):
-            *   记录错误，并同样考虑采取安全措施。
-    *   移除在 `bq76920_task.rs` 中对 `bq.write_register(Register::CcCfg, 0x19).await` 和 `bq.clear_status_flags(0xFF).await` 的直接调用，因为这些操作已包含在驱动库的 `set_config` (并因此在 `try_apply_config`) 内部。
-
-**4. 预期效果**
-
-完成上述修改后，`BQ76920` 将在初始化时进行严格的配置验证。只有在关键安全参数确认无误后，才会默认开启充电和放电通路。这将使得 `BQ76920` 的 `CHG_ON` 和 `DSG_ON` 标志被正确设置为 `true`（前提是配置验证通过且使能命令成功），从而允许 `BQ25730` 根据其自身的逻辑以及从 `BQ76920` 获取的状态信息来控制充电过程。`BQ76920` 芯片自身的硬件保护机制在此基础上依然有效，提供底层的安全保障。
