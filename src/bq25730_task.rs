@@ -1,6 +1,7 @@
 use bq25730_async_rs::data_types::{
     AdcCmpin, AdcIchg, AdcIdchg, AdcIin, AdcMeasurements, AdcPsys, AdcVbat, AdcVbus, AdcVsys,
-    ChargeCurrent, ChargeVoltage, VsysMin,
+    ChargeCurrentSetting, ChargeVoltageSetting, OtgCurrentSetting, OtgVoltageSetting,
+    VsysMinSetting,
 }; // Added AdcVsys
 use defmt::*;
 use embassy_time::{Duration, Timer};
@@ -14,14 +15,14 @@ use bq769x0_async_rs::registers::{
 };
 use bq25730_async_rs::RegisterAccess;
 use bq25730_async_rs::registers::{
-    ChargeOption0Flags, ChargeOption0MsbFlags, ChargeOption1MsbFlags,
+    ChargeOption0Flags, ChargeOption0MsbFlags, ChargeOption1Flags, ChargeOption1MsbFlags,
+    ChargeOption3Flags, ChargeOption3MsbFlags, WatchdogTimerAdjust,
 }; // Removed ChargeOption2Flags
 use bq25730_async_rs::{Bq25730, SenseResistorValue};
 
 use crate::shared::{
     Bq25730AlertsPublisher, Bq25730MeasurementsPublisher, Bq76920MeasurementsSubscriber,
 };
-
 // Default charging parameters
 const DEFAULT_CHARGE_CURRENT_MA: u16 = 512;
 const DEFAULT_CHARGE_VOLTAGE_MV: u16 = 18000;
@@ -47,19 +48,49 @@ pub async fn bq25730_task(
         .charge_option0
         .msb_flags
         .remove(ChargeOption0MsbFlags::EN_LWPWR);
+    config
+        .charge_option0
+        .msb_flags
+        .insert(ChargeOption0MsbFlags::EN_OOA);
     // Set WDTMR_ADJ to 01b (Enabled, 5 sec timeout, suspends charger by setting ChargeCurrent to 0mA on timeout)
-    // This corresponds to the datasheet setting: 01b: Enabled, 5 sec
 
-    // Correct way to set WDTMR_ADJ to 01b (assuming bits 6:5)
-    let mut current_msb_bits = config.charge_option0.msb_flags.bits();
-    current_msb_bits &= !((0b11) << 5); // Clear bits 6 and 5
-    current_msb_bits |= 0b01 << 5; // Set bits 6:5 to 01
-    config.charge_option0.msb_flags = ChargeOption0MsbFlags::from_bits_truncate(current_msb_bits);
+    config
+        .charge_option0
+        .msb_flags
+        .set_watchdog_timer(WatchdogTimerAdjust::Sec5);
+    config
+        .charge_option3
+        .msb_flags
+        .insert(ChargeOption3MsbFlags::EN_OTG | ChargeOption3MsbFlags::EN_ICO_MODE);
+    // config
+    //     .charge_option3
+    //     .lsb_flags
+    //     .insert(ChargeOption3Flags::OTG_VAP_MODE);
 
     config
         .charge_option1
         .msb_flags
         .insert(ChargeOption1MsbFlags::EN_IBAT);
+    config
+        .charge_option1
+        .lsb_flags
+        .insert(ChargeOption1Flags::CMP_REF);
+
+    // Set OtgVoltage to 12V (12000mV) in config
+    config.otg_voltage = OtgVoltageSetting::from_millivolts(12000);
+
+    // Set OtgCurrent to 5A (5000mA) in config
+    // The conversion requires the battery sense resistor value (rsns_bat)
+    let rsns_bat = config.rsns_bat; // Use rsns_bat from the config being built
+    config.otg_current = OtgCurrentSetting::from_milliamps(5000, rsns_bat);
+
+    config.vmin_active_protection.set_en_frs(true);
+    config.vmin_active_protection.set_vbus_vap_th_mv(9000);
+    config.vmin_active_protection.set_vsys_th2_mv(13000);
+
+    // Enable FRS (Fast Role Swap) in config
+    config.vmin_active_protection.lsb_flags.set_en_frs(true);
+
     let mut bq25730 = Bq25730::new(i2c_bus, address, config);
 
     // init() will determine the correct rsns from the chip and update bq25730.rsns
@@ -69,19 +100,25 @@ pub async fn bq25730_task(
         return;
     }
 
-    let initial_charge_current = ChargeCurrent {
+    let initial_charge_current = ChargeCurrentSetting {
         milliamps: 0,
         rsns_bat: bq25730.config().rsns_bat,
     };
-    if let Err(e) = bq25730.set_charge_current(initial_charge_current).await {
+    if let Err(e) = bq25730
+        .set_charge_current_setting(initial_charge_current)
+        .await
+    {
         error!(
             "Failed to set initial BQ25730 charge current to 0mA: {:?}",
             e
         );
     }
 
-    let target_charge_voltage = ChargeVoltage(DEFAULT_CHARGE_VOLTAGE_MV); // ChargeVoltage is still a tuple struct
-    if let Err(e) = bq25730.set_charge_voltage(target_charge_voltage).await {
+    let target_charge_voltage = ChargeVoltageSetting::from_millivolts(DEFAULT_CHARGE_VOLTAGE_MV);
+    if let Err(e) = bq25730
+        .set_charge_voltage_setting(target_charge_voltage)
+        .await
+    {
         error!("Failed to set BQ25730 target charge voltage: {:?}", e);
     }
 
@@ -103,8 +140,10 @@ pub async fn bq25730_task(
         error!("Failed to set BQ25730 ADC options: {:?}", e);
     }
 
-    match bq25730.set_vsys_min(VsysMin(12000)).await {
-        // VsysMin is still a tuple struct
+    match bq25730
+        .set_vsys_min_setting(VsysMinSetting::from_millivolts(12000))
+        .await
+    {
         Ok(()) => { /* Log removed */ }
         Err(e) => error!("Failed to set BQ25730 VsysMin: {}", e),
     }
@@ -115,14 +154,14 @@ pub async fn bq25730_task(
         let bq25730_adc_measurements_option = match bq25730.read_adc_measurements().await {
             Ok(measurements) => {
                 info!(
-                    "[BQ25730 ADC] VBUS:{}mV, VSYS:{}mV, VBAT:{}mV, ICHG:{}mA, IIN:{}mA, PSYS:{}raw, CMPIN:{}raw, IDCHG:{}mA",
+                    "[BQ25730 ADC] VBUS:{}mV, VSYS:{}mV, VBAT:{}mV, ICHG:{}mA, IIN:{}mA, PSYS:{}mV, CMPIN:{}mV, IDCHG:{}mA",
                     measurements.vbus.0,
                     measurements.vsys.0,
                     measurements.vbat.0,
                     measurements.ichg.milliamps, // Access .milliamps
                     measurements.iin.milliamps,  // Access .milliamps
-                    measurements.psys.0,
-                    measurements.cmpin.0,
+                    measurements.psys.0,         // Already in mV
+                    measurements.cmpin.0,        // Already in mV
                     measurements.idchg.milliamps // Access .milliamps
                 );
                 Some(measurements)
@@ -206,9 +245,8 @@ pub async fn bq25730_task(
         let bq25730_prochot_status = match bq25730.read_prochot_status().await {
             Ok(status) => {
                 info!(
-                    "BQ25730 ProchotStatus: LSB=0x{:02x}, MSB=0x{:02x}",
-                    status.lsb_flags.bits(),
-                    status.msb_flags.bits()
+                    "BQ25730 ProchotStatus: LSB={:?}, MSB={:?}",
+                    status.lsb_flags, status.msb_flags
                 );
                 Some(status)
             }
@@ -218,9 +256,9 @@ pub async fn bq25730_task(
             }
         };
 
-        match bq25730.read_iin_host().await {
+        match bq25730.read_iin_host_setting().await {
             Ok(current_iin_host_val) => {
-                if let Err(e) = bq25730.set_iin_host(current_iin_host_val).await {
+                if let Err(e) = bq25730.set_iin_host_setting(current_iin_host_val).await {
                     error!("[BQ25730] Failed to re-write IIN_HOST for ICO: {:?}", e);
                 }
             }
@@ -254,7 +292,7 @@ pub async fn bq25730_task(
         let final_charge_permission = bq76920_charge_fet_enabled && bq76920_safe_to_charge;
 
         // Log key register values for ICHG debugging
-        match bq25730.read_charge_current().await {
+        match bq25730.read_charge_current_setting().await {
             Ok(cc) => info!(
                 "[BQ25730 DEBUG] ChargeCurrent: {} mA (Raw: {})",
                 cc.milliamps,
@@ -270,11 +308,11 @@ pub async fn bq25730_task(
             ),
             Err(e) => error!("[BQ25730 DEBUG] Failed to read ChargeOption0: {:?}", e),
         }
-        match bq25730.read_iin_host().await {
+        match bq25730.read_iin_host_setting().await {
             Ok(iin_host) => info!(
                 "[BQ25730 DEBUG] IIN_HOST: {} mA (Raw: {})",
                 iin_host.milliamps,
-                iin_host.to_raw()
+                iin_host.to_raw(bq25730.config().rsns_ac) // Pass rsns_ac for to_raw
             ),
             Err(e) => error!("[BQ25730 DEBUG] Failed to read IIN_HOST: {:?}", e),
         }
@@ -338,13 +376,15 @@ pub async fn bq25730_task(
 
         if final_charge_permission {
             if let Err(e) = bq25730
-                .set_charge_voltage(ChargeVoltage(DEFAULT_CHARGE_VOLTAGE_MV))
+                .set_charge_voltage_setting(ChargeVoltageSetting::from_millivolts(
+                    DEFAULT_CHARGE_VOLTAGE_MV,
+                ))
                 .await
             {
                 error!("[BQ25730] Failed to set charge voltage: {:?}", e);
             }
             if let Err(e) = bq25730
-                .set_charge_current(ChargeCurrent {
+                .set_charge_current_setting(ChargeCurrentSetting {
                     milliamps: DEFAULT_CHARGE_CURRENT_MA,
                     rsns_bat: bq25730.config().rsns_bat,
                 })
@@ -352,6 +392,8 @@ pub async fn bq25730_task(
             {
                 error!("[BQ25730] Failed to set charge current: {:?}", e);
             }
+        } else {
+            warn!("[BQ25730] Skipping charge voltage and current settings.");
         }
 
         let bq25730_measurements_payload = crate::data_types::Bq25730Measurements {
