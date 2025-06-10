@@ -16,7 +16,7 @@ use bq769x0_async_rs::registers::{
 use bq25730_async_rs::RegisterAccess;
 use bq25730_async_rs::registers::{
     ChargeOption0Flags, ChargeOption0MsbFlags, ChargeOption1Flags, ChargeOption1MsbFlags,
-    ChargeOption3Flags, ChargeOption3MsbFlags, WatchdogTimerAdjust,
+    ChargeOption3MsbFlags, WatchdogTimerAdjust,
 }; // Removed ChargeOption2Flags
 use bq25730_async_rs::{Bq25730, SenseResistorValue};
 
@@ -77,7 +77,7 @@ pub async fn bq25730_task(
         .insert(ChargeOption1Flags::CMP_REF);
 
     // Set OtgVoltage to 12V (12000mV) in config
-    config.otg_voltage = OtgVoltageSetting::from_millivolts(12000);
+    config.otg_voltage = OtgVoltageSetting::from_millivolts(19000);
 
     // Set OtgCurrent to 5A (5000mA) in config
     // The conversion requires the battery sense resistor value (rsns_bat)
@@ -87,9 +87,6 @@ pub async fn bq25730_task(
     config.vmin_active_protection.set_en_frs(true);
     config.vmin_active_protection.set_vbus_vap_th_mv(9000);
     config.vmin_active_protection.set_vsys_th2_mv(13000);
-
-    // Enable FRS (Fast Role Swap) in config
-    config.vmin_active_protection.lsb_flags.set_en_frs(true);
 
     let mut bq25730 = Bq25730::new(i2c_bus, address, config);
 
@@ -158,11 +155,11 @@ pub async fn bq25730_task(
                     measurements.vbus.0,
                     measurements.vsys.0,
                     measurements.vbat.0,
-                    measurements.ichg.milliamps, // Access .milliamps
-                    measurements.iin.milliamps,  // Access .milliamps
-                    measurements.psys.0,         // Already in mV
-                    measurements.cmpin.0,        // Already in mV
-                    measurements.idchg.milliamps // Access .milliamps
+                    measurements.ichg.milliamps,  // Access .milliamps
+                    measurements.iin.milliamps,   // Access .milliamps
+                    measurements.psys.0,          // Already in mV
+                    measurements.cmpin.0,         // Already in mV
+                    measurements.idchg.milliamps  // Access .milliamps
                 );
                 Some(measurements)
             }

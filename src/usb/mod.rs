@@ -86,6 +86,7 @@ pub async fn usb_task(
         let mut latest_bq76920_measurements: Option<Bq76920Measurements<5>> = None;
         let mut latest_bq25730_alerts: Option<Bq25730Alerts> = None;
         let mut latest_bq76920_alerts: Option<Bq76920Alerts> = None;
+        #[allow(unused_assignments)]
         let mut usb_command_to_process: Option<endpoints::UsbData> = None; // Variable to store command from select
 
         loop {

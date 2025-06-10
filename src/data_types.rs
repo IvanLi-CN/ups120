@@ -206,6 +206,7 @@ impl<const N: usize> AllMeasurements<N> {
             bq76920_cell3_mv: self.bq76920.core_measurements.cell_voltages.voltages[2],
             bq76920_cell4_mv: self.bq76920.core_measurements.cell_voltages.voltages[3],
             bq76920_cell5_mv: self.bq76920.core_measurements.cell_voltages.voltages[4], // Assuming N=5
+            bq76920_total_voltage_mv: self.bq76920.core_measurements.total_voltage_mv, // Corrected access
             bq76920_ts1_temp_0_01c: ts1_temp_0_01c_val,
             bq76920_ts2_present: self.bq76920.core_measurements.temperatures.ts2.is_some() as u8,
             bq76920_ts2_temp_0_01c: ts2_temp_0_01c_val,
@@ -247,6 +248,7 @@ pub struct AllMeasurementsUsbPayload {
     pub bq76920_cell3_mv: i32,       // Unchanged
     pub bq76920_cell4_mv: i32,       // Unchanged
     pub bq76920_cell5_mv: i32,       // Unchanged (assuming N=5 for this example)
+    pub bq76920_total_voltage_mv: i32, // Added: Total voltage of the BQ76920 pack
     pub bq76920_ts1_temp_0_01c: i16, // Was bq76920_ts1_raw_adc, unit: 0.01 °C
     pub bq76920_ts2_present: u8,     // Unchanged
     pub bq76920_ts2_temp_0_01c: i16, // Was bq76920_ts2_raw_adc, unit: 0.01 °C (use i16::MIN if not present)

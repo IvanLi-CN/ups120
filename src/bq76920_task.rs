@@ -1,3 +1,4 @@
+use bq769x0_async_rs::registers::CellBal1Flags;
 use defmt::*;
 use embassy_time::{Duration, Timer};
 
@@ -18,6 +19,61 @@ use crate::shared::{
     Bq76920AlertsPublisher,
     Bq76920MeasurementsPublisher, // Added Bq76920MeasurementsPublisher
 };
+
+// New helper function for battery balancing logic
+async fn execute_battery_balancing<'a>(
+    bq: &'a mut Bq769x0<
+        I2cDevice<'static, CriticalSectionRawMutex, I2c<'static, embassy_stm32::mode::Async>>,
+        bq769x0_async_rs::Enabled,
+        5,
+    >,
+    latest_core_measurements: &'a Option<bq769x0_async_rs::data_types::Bq76920Measurements<5>>,
+) {
+    if let Some(measurements) = latest_core_measurements {
+        let mut balance_flags = CellBal1Flags::empty();
+        let mut total_voltage = 0;
+        let mut cell_count = 0;
+
+        for voltage in measurements.cell_voltages.voltages.iter() {
+            total_voltage += *voltage;
+            cell_count += 1;
+        }
+
+        if cell_count > 0 {
+            let average_voltage = total_voltage / cell_count;
+            let balance_threshold_mv = 50; // Example threshold: 50mV
+
+            for (i, voltage) in measurements.cell_voltages.voltages.iter().enumerate() {
+                if *voltage > average_voltage + balance_threshold_mv {
+                    // Set the corresponding balance flag for cell i+1
+                    match i {
+                        0 => balance_flags |= CellBal1Flags::BAL1,
+                        1 => balance_flags |= CellBal1Flags::BAL2,
+                        2 => balance_flags |= CellBal1Flags::BAL3,
+                        3 => balance_flags |= CellBal1Flags::BAL4,
+                        4 => balance_flags |= CellBal1Flags::BAL5,
+                        _ => {} // Should not happen for BQ76920 with 5 cells
+                    }
+                }
+            }
+
+            // Write the calculated balance flags to the CELLBAL1 register
+            if !balance_flags.is_empty() {
+                info!("Attempting to set BQ76920 cell balance flags: {:#010b}", balance_flags.bits());
+                if let Err(e) = bq.set_cell_balancing(balance_flags.bits() as u16).await {
+                    error!("Failed to set BQ76920 cell balance flags using set_cell_balancing: {:?}", e);
+                } else {
+                    info!("BQ76920 cell balance flags set.");
+                }
+            } else {
+                 // If no cells need balancing, ensure balance flags are cleared
+                 if let Err(e) = bq.set_cell_balancing(CellBal1Flags::empty().bits() as u16).await {
+                    error!("Failed to clear BQ76920 cell balance flags using set_cell_balancing: {:?}", e);
+                }
+            }
+        }
+    }
+}
 
 /// Embassy task for managing the BQ76920 battery monitor IC.
 ///
@@ -67,6 +123,7 @@ pub async fn bq76920_task(
     > = Bq769x0::new(i2c_bus, address, sense_resistor_m_ohm, ntc_params);
 
     // Variables to store the latest readings from the sub-module, which are now in physical units.
+    #[allow(unused_assignments)]
     let mut latest_core_measurements: Option<bq769x0_async_rs::data_types::Bq76920Measurements<5>> =
         None;
 
@@ -156,6 +213,8 @@ pub async fn bq76920_task(
     // as NTC parameters and sense resistor are now part of Bq769x0 driver initialization.
 
     // Main loop for continuous data acquisition and publishing.
+    let mut balance_timer_counter: u32 = 0; // Counter for battery balancing frequency
+
     loop {
         // This task focuses on reading data from the BQ76920 itself.
         // Communication with other chips (like BQ25730 charger) is handled in their respective tasks.
@@ -168,6 +227,14 @@ pub async fn bq76920_task(
         match bq.read_all_measurements().await {
             Ok(core_meas) => {
                 latest_core_measurements = Some(core_meas);
+
+                // Log all BQ76920 measurements in a single line
+                info!(
+                    "BQ76920: Cells={:?}mV, Total={}mV, Current={}mA",
+                    core_meas.cell_voltages.voltages,
+                    core_meas.total_voltage_mv,
+                    core_meas.current_ma
+                );
 
                 // Publish BQ76920 alert information (derived from system status).
                 let alerts = crate::data_types::Bq76920Alerts {
@@ -204,7 +271,16 @@ pub async fn bq76920_task(
         // Publish the collected BQ76920 measurements (which are now wrapped in the main project's type).
         bq76920_measurements_publisher.publish_immediate(bq76920_measurements_payload_for_main_pub);
 
+        // --- Battery Balancing Logic (executed approximately once per hour) ---
+        if balance_timer_counter == 0 || balance_timer_counter >= 3600 { // 3600 seconds = 1 hour
+            info!("Executing hourly battery balancing logic.");
+            execute_battery_balancing(&mut bq, &latest_core_measurements).await;
+            balance_timer_counter = 0; // Reset counter after execution
+        }
+        // --- End Battery Balancing Logic ---
+
         // Wait for a defined interval before the next cycle of readings.
         Timer::after(Duration::from_secs(1)).await;
+        balance_timer_counter += 1;
     }
 }

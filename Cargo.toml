@@ -63,11 +63,11 @@ embedded-alloc = "0.6.0"
 embedded-io-async = { version = "0.6.1" }
 binrw = { version = "0.15", default-features = false }
 
-bq769x0-async-rs = { version = "0.0.0", path = "./bq76920", features = [
+bq769x0-async-rs = { version = "*", path = "./bq76920", features = [
   "async",
   "defmt",
 ] }
-bq25730-async-rs = { version = "0.0.0", path = "./bq25730", features = [
+bq25730-async-rs = { version = "*", path = "./bq25730", features = [
   "async",
   "defmt",
 ] }
@@ -106,3 +106,4 @@ incremental = false
 lto = 'fat'
 opt-level = 3            # <-
 overflow-checks = false  # <-
+
