@@ -1,42 +1,11 @@
 // use defmt::Format; // Removed unused import
 
 use bq769x0_async_rs::data_types::{Bq76920Measurements as Bq76920CoreMeasurements, SystemStatus};
-use bq25730_async_rs::data_types::{AdcMeasurements, ChargerStatus, ProchotStatus};
+use sc8815::{AdcMeasurements as Sc8815AdcMeasurements, SC8815Status};
 
 // use crate::shared::Bq76920RuntimeConfig; // Removed as Bq76920RuntimeConfig is no longer needed by to_usb_payload
 
-/// BQ25730 测量数据
-#[derive(Debug, Copy, Clone, PartialEq, defmt::Format)]
-
-pub struct Bq25730Measurements {
-    pub adc_measurements: AdcMeasurements,
-    // 添加其他非告警相关的测量数据字段（如果需要）
-}
-
-impl Default for Bq25730Measurements {
-    fn default() -> Self {
-        Self {
-            adc_measurements: AdcMeasurements::default(),
-        }
-    }
-}
-
-/// BQ25730 安全告警信息
-#[derive(Debug, Copy, Clone, PartialEq)]
-
-pub struct Bq25730Alerts {
-    pub charger_status: ChargerStatus,
-    pub prochot_status: ProchotStatus,
-}
-
-impl Default for Bq25730Alerts {
-    fn default() -> Self {
-        Self {
-            charger_status: ChargerStatus::default(),
-            prochot_status: ProchotStatus::default(),
-        }
-    }
-}
+// Removed BQ25730 related structures as we're using SC8815 now
 
 /// BQ76920 测量数据
 #[derive(Debug, Copy, Clone, PartialEq)]
@@ -86,24 +55,50 @@ impl Default for Ina226Measurements {
     }
 }
 
+/// SC8815 测量数据
+#[derive(Debug, Copy, Clone, PartialEq, defmt::Format)]
+pub struct Sc8815Measurements {
+    pub adc_measurements: Sc8815AdcMeasurements,
+}
+
+impl Default for Sc8815Measurements {
+    fn default() -> Self {
+        Self {
+            adc_measurements: Sc8815AdcMeasurements::default(),
+        }
+    }
+}
+
+/// SC8815 安全告警信息
+#[derive(Debug, Copy, Clone, PartialEq)]
+pub struct Sc8815Alerts {
+    pub device_status: SC8815Status,
+}
+
+impl Default for Sc8815Alerts {
+    fn default() -> Self {
+        Self {
+            device_status: SC8815Status::default(),
+        }
+    }
+}
+
 /// 聚合所有设备的测量数据
 #[derive(Debug, Copy, Clone, PartialEq)]
 
 pub struct AllMeasurements<const N: usize> {
-    pub bq25730: Bq25730Measurements,
+    pub sc8815: Sc8815Measurements,
     pub bq76920: Bq76920Measurements<N>,
-    pub ina226: Ina226Measurements,
-    pub bq25730_alerts: Bq25730Alerts,
+    pub sc8815_alerts: Sc8815Alerts,
     pub bq76920_alerts: Bq76920Alerts,
 }
 
 impl<const N: usize> Default for AllMeasurements<N> {
     fn default() -> Self {
         Self {
-            bq25730: Bq25730Measurements::default(),
+            sc8815: Sc8815Measurements::default(),
             bq76920: Bq76920Measurements::default(),
-            ina226: Ina226Measurements::default(),
-            bq25730_alerts: Bq25730Alerts::default(),
+            sc8815_alerts: Sc8815Alerts::default(),
             bq76920_alerts: Bq76920Alerts::default(),
         }
     }
@@ -114,16 +109,12 @@ impl<const N: usize> AllMeasurements<N> {
     /// Converts the aggregated measurements into the flattened USB payload structure.
     /// Assumes that BQ76920 temperatures and current are already in physical units within `self.bq76920.core_measurements`.
     pub fn to_usb_payload(&self) -> AllMeasurementsUsbPayload {
-        // BQ25730 Voltages (already in mV in self.bq25730.adc_measurements)
-        let bq25730_adc_vbat_mv = self.bq25730.adc_measurements.vbat.0;
-        let bq25730_adc_vsys_mv = self.bq25730.adc_measurements.vsys.0;
-        // BQ25730 Currents (already in mA in self.bq25730.adc_measurements)
-        let bq25730_adc_ichg_ma = self.bq25730.adc_measurements.ichg.milliamps;
-        let bq25730_adc_idchg_ma = self.bq25730.adc_measurements.idchg.milliamps;
-        let bq25730_adc_iin_ma = self.bq25730.adc_measurements.iin.milliamps;
-        let bq25730_adc_psys_mv = self.bq25730.adc_measurements.psys.0;
-        let bq25730_adc_vbus_mv = self.bq25730.adc_measurements.vbus.0;
-        let bq25730_adc_cmpin_mv = self.bq25730.adc_measurements.cmpin.0;
+        // SC8815 ADC measurements (already in mV/mA in self.sc8815.adc_measurements)
+        let sc8815_adc_vbus_mv = self.sc8815.adc_measurements.vbus_mv;
+        let sc8815_adc_vbat_mv = self.sc8815.adc_measurements.vbat_mv;
+        let sc8815_adc_ibus_ma = self.sc8815.adc_measurements.ibus_ma;
+        let sc8815_adc_ibat_ma = self.sc8815.adc_measurements.ibat_ma;
+        let sc8815_adc_adin_mv = self.sc8815.adc_measurements.adin_mv;
 
         // BQ76920 Temperatures (already in 0.01°C in self.bq76920.core_measurements.temperatures)
         let bq76920_temps = self.bq76920.core_measurements.temperatures;
@@ -192,14 +183,11 @@ impl<const N: usize> AllMeasurements<N> {
         let bq76920_is_thermistor_flag = self.bq76920.core_measurements.is_thermistor_mode;
 
         AllMeasurementsUsbPayload {
-            bq25730_adc_vbat_mv,
-            bq25730_adc_vsys_mv,
-            bq25730_adc_ichg_ma,
-            bq25730_adc_idchg_ma,
-            bq25730_adc_iin_ma,
-            bq25730_adc_psys_mv,
-            bq25730_adc_vbus_mv,
-            bq25730_adc_cmpin_mv,
+            sc8815_adc_vbus_mv,
+            sc8815_adc_vbat_mv,
+            sc8815_adc_ibus_ma,
+            sc8815_adc_ibat_ma,
+            sc8815_adc_adin_mv,
 
             bq76920_cell1_mv: self.bq76920.core_measurements.cell_voltages.voltages[0],
             bq76920_cell2_mv: self.bq76920.core_measurements.cell_voltages.voltages[1],
@@ -217,12 +205,16 @@ impl<const N: usize> AllMeasurements<N> {
             bq76920_system_status_mask: self.bq76920.core_measurements.system_status.0.bits(),
             bq76920_mos_status_mask: self.bq76920.core_measurements.mos_status.0.bits(),
 
-            ina226_voltage_f32: self.ina226.voltage,
-            ina226_current_f32: self.ina226.current,
-            ina226_power_f32: self.ina226.power,
-
-            bq25730_charger_status_flags: self.bq25730_alerts.charger_status.to_u16(),
-            bq25730_prochot_status_flags: self.bq25730_alerts.prochot_status.to_u16(),
+            sc8815_device_status_flags: {
+                let status = &self.sc8815_alerts.device_status;
+                let mut flags = 0u8;
+                if status.eoc { flags |= 0x01; }
+                if status.otp_fault { flags |= 0x02; }
+                if status.vbus_short_fault { flags |= 0x04; }
+                if status.usb_load_detected { flags |= 0x08; }
+                if status.ac_adapter_connected { flags |= 0x10; }
+                flags
+            },
 
             bq76920_alerts_system_status_mask: self.bq76920_alerts.system_status.0.bits(),
         }
@@ -232,15 +224,12 @@ impl<const N: usize> AllMeasurements<N> {
 /// Payload structure for USB communication, containing flattened data from AllMeasurements.
 #[derive(Debug, Copy, Clone, PartialEq, binrw::BinWrite, defmt::Format)] // Removed binrw::BinRead
 pub struct AllMeasurementsUsbPayload {
-    // Fields from Bq25730Measurements -> AdcMeasurements
-    pub bq25730_adc_vbat_mv: u16,  // Was bq25730_adc_vbat_raw, unit: mV
-    pub bq25730_adc_vsys_mv: u16,  // Was bq25730_adc_vsys_raw, unit: mV
-    pub bq25730_adc_ichg_ma: u16,  // Was bq25730_adc_ichg_raw, unit: mA
-    pub bq25730_adc_idchg_ma: u16, // Was bq25730_adc_idchg_raw, unit: mA
-    pub bq25730_adc_iin_ma: u16,   // Was bq25730_adc_iin_raw, unit: mA
-    pub bq25730_adc_psys_mv: u16, // Was bq25730_adc_psys_raw, unit: mV (represents power related voltage)
-    pub bq25730_adc_vbus_mv: u16, // Was bq25730_adc_vbus_raw, unit: mV
-    pub bq25730_adc_cmpin_mv: u16, // Was bq25730_adc_cmpin_raw, unit: mV
+    // Fields from SC8815 ADC measurements
+    pub sc8815_adc_vbus_mv: u16,  // VBUS voltage in mV
+    pub sc8815_adc_vbat_mv: u16,  // VBAT voltage in mV
+    pub sc8815_adc_ibus_ma: u16,  // IBUS current in mA
+    pub sc8815_adc_ibat_ma: u16,  // IBAT current in mA
+    pub sc8815_adc_adin_mv: u16,  // ADIN voltage in mV
 
     // Fields from Bq76920Measurements -> Bq76920CoreMeasurements<N>
     pub bq76920_cell1_mv: i32,       // Unchanged
@@ -260,14 +249,8 @@ pub struct AllMeasurementsUsbPayload {
     pub bq76920_system_status_mask: u8, // Was bq76920_system_status_bits
     pub bq76920_mos_status_mask: u8,    // Was bq76920_mos_status_bits
 
-    // Fields from Ina226Measurements
-    pub ina226_voltage_f32: f32, // Unchanged
-    pub ina226_current_f32: f32, // Unchanged
-    pub ina226_power_f32: f32,   // Unchanged
-
-    // Fields from Bq25730Alerts
-    pub bq25730_charger_status_flags: u16, // Was bq25730_charger_status_raw_u16
-    pub bq25730_prochot_status_flags: u16, // Was bq25730_prochot_status_raw_u16
+    // Fields from SC8815 device status
+    pub sc8815_device_status_flags: u8, // SC8815 device status flags
 
     // Fields from Bq76920Alerts
     pub bq76920_alerts_system_status_mask: u8, // Was bq76920_alerts_system_status_bits

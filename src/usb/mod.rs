@@ -9,12 +9,11 @@ use embassy_usb::{
 use static_cell::StaticCell;
 
 use crate::data_types::{
-    AllMeasurements, Bq25730Alerts, Bq25730Measurements, Bq76920Alerts, Bq76920Measurements,
-    Ina226Measurements,
+    AllMeasurements, Bq76920Alerts, Bq76920Measurements, Sc8815Alerts, Sc8815Measurements,
 };
 use crate::shared::{
-    Bq25730AlertsSubscriber, Bq25730MeasurementsSubscriber, Bq76920AlertsSubscriber,
-    Bq76920MeasurementsSubscriber, Ina226MeasurementsSubscriber, MeasurementsPublisher,
+    Bq76920AlertsSubscriber, Bq76920MeasurementsSubscriber, MeasurementsPublisher,
+    Sc8815AlertsSubscriber, Sc8815MeasurementsSubscriber,
 };
 
 pub mod endpoints;
@@ -35,10 +34,9 @@ static WEBUSB_CONFIG_CELL: StaticCell<web_usb::Config> = StaticCell::new();
 pub async fn usb_task(
     driver: usb::Driver<'static, peripherals::USB>,
     measurements_publisher: MeasurementsPublisher<'static, 5>, // usb_task now publishes AllMeasurements
-    mut bq25730_measurements_subscriber: Bq25730MeasurementsSubscriber<'static>, // BQ25730 subscriber
-    mut ina226_measurements_subscriber: Ina226MeasurementsSubscriber<'static>, // INA226 subscriber
+    mut sc8815_measurements_subscriber: Sc8815MeasurementsSubscriber<'static>, // SC8815 subscriber
     mut bq76920_measurements_subscriber: Bq76920MeasurementsSubscriber<'static, 5>, // BQ76920 subscriber - Added generic parameter
-    mut bq25730_alerts_subscriber: Bq25730AlertsSubscriber<'static>, // BQ25730 alerts subscriber
+    mut sc8815_alerts_subscriber: Sc8815AlertsSubscriber<'static>, // SC8815 alerts subscriber
     mut bq76920_alerts_subscriber: Bq76920AlertsSubscriber<'static>, // BQ76920 alerts subscriber
 ) {
     let vid: u16 =
@@ -81,10 +79,9 @@ pub async fn usb_task(
 
     let main_usb_processing_fut = async {
         // Variables to hold the latest measurements from each task
-        let mut latest_bq25730_measurements: Option<Bq25730Measurements> = None;
-        let mut latest_ina226_measurements: Option<Ina226Measurements> = None;
+        let mut latest_sc8815_measurements: Option<Sc8815Measurements> = None;
         let mut latest_bq76920_measurements: Option<Bq76920Measurements<5>> = None;
-        let mut latest_bq25730_alerts: Option<Bq25730Alerts> = None;
+        let mut latest_sc8815_alerts: Option<Sc8815Alerts> = None;
         let mut latest_bq76920_alerts: Option<Bq76920Alerts> = None;
         #[allow(unused_assignments)]
         let mut usb_command_to_process: Option<endpoints::UsbData> = None; // Variable to store command from select
@@ -95,105 +92,91 @@ pub async fn usb_task(
 
             // Use select to prioritize handling USB commands and new data
             match select(
-                bq25730_measurements_subscriber.next_message(),
+                sc8815_measurements_subscriber.next_message(),
                 select(
-                    ina226_measurements_subscriber.next_message(),
+                    bq76920_measurements_subscriber.next_message(),
                     select(
-                        bq76920_measurements_subscriber.next_message(),
+                        sc8815_alerts_subscriber.next_message(),
                         select(
-                            bq25730_alerts_subscriber.next_message(),
-                            select(
-                                bq76920_alerts_subscriber.next_message(),
-                                usb_endpoints.parse_command(),
-                            ),
+                            bq76920_alerts_subscriber.next_message(),
+                            usb_endpoints.parse_command(),
                         ),
                     ),
                 ),
             )
             .await
             {
-                Either::First(bq25730_meas_res) => {
-                    // BQ25730 Measurements
-                    match bq25730_meas_res {
+                Either::First(sc8815_meas_res) => {
+                    // SC8815 Measurements
+                    match sc8815_meas_res {
                         embassy_sync::pubsub::WaitResult::Message(msg) => {
-                            latest_bq25730_measurements = Some(msg)
+                            latest_sc8815_measurements = Some(msg)
                         }
                         embassy_sync::pubsub::WaitResult::Lagged(c) => {
-                            defmt::warn!("USB BQ25730 Meas sub: lagged {} messages", c)
+                            defmt::warn!("USB SC8815 Meas sub: lagged {} messages", c)
                         }
                     }
                 }
-                Either::Second(either_b_c_d_e_f) => {
-                    match either_b_c_d_e_f {
-                        Either::First(ina226_meas_res) => {
-                            // INA226 Measurements
-                            match ina226_meas_res {
+                Either::Second(either_b_c_d_e) => {
+                    match either_b_c_d_e {
+                        Either::First(bq76920_meas_res) => {
+                            // BQ76920 Measurements
+                            match bq76920_meas_res {
                                 embassy_sync::pubsub::WaitResult::Message(msg) => {
-                                    latest_ina226_measurements = Some(msg)
+                                    latest_bq76920_measurements = Some(msg)
                                 }
                                 embassy_sync::pubsub::WaitResult::Lagged(c) => {
-                                    defmt::warn!("USB INA226 Meas sub: lagged {} messages", c)
+                                    defmt::warn!("USB BQ76920 Meas sub: lagged {} messages", c)
                                 }
                             }
                         }
-                        Either::Second(either_c_d_e_f) => {
-                            match either_c_d_e_f {
-                                Either::First(bq76920_meas_res) => {
-                                    // BQ76920 Measurements
-                                    match bq76920_meas_res {
+                        Either::Second(either_c_d_e) => {
+                            match either_c_d_e {
+                                Either::First(sc8815_alert_res) => {
+                                    // SC8815 Alerts
+                                    match sc8815_alert_res {
                                         embassy_sync::pubsub::WaitResult::Message(msg) => {
-                                            latest_bq76920_measurements = Some(msg)
+                                            latest_sc8815_alerts = Some(msg)
                                         }
                                         embassy_sync::pubsub::WaitResult::Lagged(c) => {
                                             defmt::warn!(
-                                                "USB BQ76920 Meas sub: lagged {} messages",
+                                                "USB SC8815 Alerts sub: lagged {} messages",
                                                 c
                                             )
                                         }
                                     }
                                 }
-                                Either::Second(either_d_e_f) => {
-                                    match either_d_e_f {
-                                        Either::First(bq25730_alert_res) => {
-                                            // BQ25730 Alerts
-                                            match bq25730_alert_res {
+                                Either::Second(either_d_e) => {
+                                    match either_d_e {
+                                        Either::First(bq76920_alert_res) => {
+                                            // BQ76920 Alerts
+                                            match bq76920_alert_res {
                                                 embassy_sync::pubsub::WaitResult::Message(msg) => {
-                                                    latest_bq25730_alerts = Some(msg)
+                                                    latest_bq76920_alerts = Some(msg)
                                                 }
                                                 embassy_sync::pubsub::WaitResult::Lagged(c) => {
                                                     defmt::warn!(
-                                                        "USB BQ25730 Alerts sub: lagged {} messages",
+                                                        "USB BQ76920 Alerts sub: lagged {} messages",
                                                         c
                                                     )
                                                 }
                                             }
                                         }
-                                        Either::Second(either_e_f) => {
-                                            match either_e_f {
-                                                Either::First(bq76920_alert_res) => {
-                                                    // BQ76920 Alerts
-                                                    match bq76920_alert_res {
-                                        embassy_sync::pubsub::WaitResult::Message(msg) => latest_bq76920_alerts = Some(msg),
-                                        embassy_sync::pubsub::WaitResult::Lagged(c) => defmt::warn!("USB BQ76920 Alerts sub: lagged {} messages", c),
-                                    }
+                                        Either::Second(cmd_result) => {
+                                            // USB Command
+                                            match cmd_result {
+                                                Ok(cmd) => {
+                                                    defmt::info!(
+                                                        "usb_task: USB command received by select, will process after aggregation: {:?}",
+                                                        cmd
+                                                    );
+                                                    usb_command_to_process = Some(cmd); // Store command for later processing
                                                 }
-                                                Either::Second(cmd_result) => {
-                                                    // USB Command
-                                                    match cmd_result {
-                                                        Ok(cmd) => {
-                                                            defmt::info!(
-                                                                "usb_task: USB command received by select, will process after aggregation: {:?}",
-                                                                cmd
-                                                            );
-                                                            usb_command_to_process = Some(cmd); // Store command for later processing
-                                                        }
-                                                        Err(e) => {
-                                                            defmt::error!(
-                                                                "usb_task: USB command endpoint error: {:?}",
-                                                                e
-                                                            );
-                                                        }
-                                                    }
+                                                Err(e) => {
+                                                    defmt::error!(
+                                                        "usb_task: USB command endpoint error: {:?}",
+                                                        e
+                                                    );
                                                 }
                                             }
                                         }
@@ -207,10 +190,9 @@ pub async fn usb_task(
 
             // Unified aggregation of all latest data (measurements and alerts)
             let aggregated_data = AllMeasurements {
-                bq25730: latest_bq25730_measurements.unwrap_or_default(),
-                ina226: latest_ina226_measurements.unwrap_or_default(),
+                sc8815: latest_sc8815_measurements.unwrap_or_default(),
                 bq76920: latest_bq76920_measurements.unwrap_or_default(),
-                bq25730_alerts: latest_bq25730_alerts.unwrap_or_default(),
+                sc8815_alerts: latest_sc8815_alerts.unwrap_or_default(),
                 bq76920_alerts: latest_bq76920_alerts.unwrap_or_default(),
             };
             // Process USB command if one was stored from select!

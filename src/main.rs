@@ -9,6 +9,7 @@ use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
 use embassy_executor::Spawner;
 use embassy_stm32::{
     bind_interrupts,
+    gpio::{Level, Output, OutputOpenDrain, Speed},
     i2c::{self, I2c},
     peripherals, // Keep peripherals here
     time::Hertz,
@@ -28,10 +29,12 @@ use embassy_time::{Duration, Timer};
 use {defmt_rtt as _, panic_probe as _};
 
 // 声明共享模块
-mod bq25730_task;
+// mod bq25730_task; // Commented out - replaced with SC8815
 mod bq76920_task;
 mod data_types;
-mod ina226_task;
+// mod ina226_task; // Commented out - not using INA226 for now
+mod led_status_task; // Added LED status indication task
+mod sc8815_task; // Added SC8815 task
 mod shared;
 mod usb; // Keep this for our local usb module
 
@@ -62,17 +65,14 @@ async fn main(spawner: Spawner) {
     let (
         measurements_publisher, // Publisher for AllMeasurements
         _measurements_channel,  // Channel for AllMeasurements, if needed to create more subs
-        bq25730_alerts_publisher,
-        bq25730_alerts_channel,   // Channel for BQ25730 Alerts
+        sc8815_alerts_publisher, // Publisher for SC8815 Alerts
+        sc8815_alerts_channel,   // Channel for SC8815 Alerts
         bq76920_alerts_publisher, // Publisher for BQ76920 Alerts
         bq76920_alerts_channel,   // Channel for BQ76920 Alerts, used to create subscriber
-        bq25730_measurements_publisher,
-        bq25730_measurements_channel, // Channel for BQ25730 Measurements, used to create subscriber
+        sc8815_measurements_publisher, // Publisher for SC8815 Measurements
+        sc8815_measurements_channel, // Channel for SC8815 Measurements, used to create subscriber
         bq76920_measurements_publisher,
         bq76920_measurements_channel, // Channel for BQ76920 Measurements, used to create subscriber
-        ina226_measurements_publisher,
-        ina226_measurements_channel, // Channel for INA226 Measurements, used to create subscriber
-                                     // Removed runtime config pub/sub from destructuring
     ) = shared::init_pubsubs();
 
     let config = embassy_stm32::Config::default();
@@ -83,10 +83,9 @@ async fn main(spawner: Spawner) {
         .spawn(usb::usb_task(
             usb_driver,
             measurements_publisher, // This is MeasurementsPublisher<'static, 5>
-            bq25730_measurements_channel.subscriber().unwrap(), // Create BQ25730 measurements subscriber
-            ina226_measurements_channel.subscriber().unwrap(), // Create INA226 measurements subscriber
+            sc8815_measurements_channel.subscriber().unwrap(), // Create SC8815 measurements subscriber
             bq76920_measurements_channel.subscriber().unwrap(), // Create BQ76920 measurements subscriber
-            bq25730_alerts_channel.subscriber().unwrap(),       // Create BQ25730 alerts subscriber
+            sc8815_alerts_channel.subscriber().unwrap(),       // Create SC8815 alerts subscriber
             bq76920_alerts_channel.subscriber().unwrap(),       // Create BQ76920 alerts subscriber
         ))
         .unwrap();
@@ -121,30 +120,46 @@ async fn main(spawner: Spawner) {
 
     // BQ76920 I2C address (7-bit)
     let bq76920_address = 0x08;
-    // BQ25730 I2C address (7-bit)
-    let bq25730_address = 0x6B; // Confirmed from bq25730.pdf
-    // INA226 I2C address (7-bit)
-    let ina226_address = 0x40;
+    // SC8815 I2C address (7-bit)
+    let sc8815_address = 0x74; // Default SC8815 address
+
+    // Configure PSTOP GPIO pin for SC8815 (PA0)
+    // PSTOP high = charging disabled, PSTOP low = charging enabled
+    let pstop_pin = Output::new(p.PA0, Level::High, Speed::Low); // Start with charging disabled
+
+    // Configure LED status pin (PA5) - Open drain, active low
+    let led_pin = OutputOpenDrain::new(p.PA5, Level::High, Speed::Low); // Start with LED off (high level)
 
     // Spawn device tasks
     spawner
-        .spawn(bq25730_task::bq25730_task(
+        .spawn(sc8815_task::sc8815_task(
             I2cDevice::new(i2c_bus_mutex), // Create a new I2cDevice for the task using the static mutex
-            bq25730_address,
-            bq25730_alerts_publisher,
-            bq25730_measurements_publisher, // This is Bq25730MeasurementsPublisher
-            bq76920_measurements_channel.subscriber().unwrap(), // Create BQ76920 measurements subscriber for bq25730_task
-                                                                // Removed bq25730_runtime_config_publisher from arguments
+            sc8815_address,
+            pstop_pin, // PSTOP control pin
+            sc8815_alerts_publisher,
+            sc8815_measurements_publisher, // This is Sc8815MeasurementsPublisher
+            bq76920_measurements_channel.subscriber().unwrap(), // Create BQ76920 measurements subscriber for sc8815_task
         ))
         .unwrap();
 
-    spawner
-        .spawn(ina226_task::ina226_task(
-            I2cDevice::new(i2c_bus_mutex), // Create a new I2cDevice for the task using the static mutex
-            ina226_address,
-            ina226_measurements_publisher,
-        ))
-        .unwrap();
+    // Commented out BQ25730 and INA226 tasks - replaced with SC8815
+    // spawner
+    //     .spawn(bq25730_task::bq25730_task(
+    //         I2cDevice::new(i2c_bus_mutex),
+    //         bq25730_address,
+    //         bq25730_alerts_publisher,
+    //         bq25730_measurements_publisher,
+    //         bq76920_measurements_channel.subscriber().unwrap(),
+    //     ))
+    //     .unwrap();
+
+    // spawner
+    //     .spawn(ina226_task::ina226_task(
+    //         I2cDevice::new(i2c_bus_mutex),
+    //         ina226_address,
+    //         ina226_measurements_publisher,
+    //     ))
+    //     .unwrap();
 
     let bq76920_i2c_bus = I2cDevice::new(i2c_bus_mutex); // Create a new I2cDevice for the task using the static mutex
 
@@ -167,6 +182,16 @@ async fn main(spawner: Spawner) {
             bq76920_ntc_params,           // Pass NTC parameters
             bq76920_alerts_publisher,
             bq76920_measurements_publisher, // Pass the BQ76920 measurements publisher
+        ))
+        .unwrap();
+
+    // Spawn LED status indication task
+    spawner
+        .spawn(led_status_task::led_status_task(
+            led_pin,
+            sc8815_alerts_channel.subscriber().unwrap(), // Create SC8815 alerts subscriber for LED task
+            sc8815_measurements_channel.subscriber().unwrap(), // Create SC8815 measurements subscriber for LED task
+            bq76920_alerts_channel.subscriber().unwrap(), // Create BQ76920 alerts subscriber for LED task
         ))
         .unwrap();
 
