@@ -8,3 +8,8 @@ pre-commit:
     clippy:
       glob: "*.{rs}"
       run: cargo clippy
+
+commit-msg:
+  commands:
+    commitlint:
+      run: npx commitlint --edit {1}
