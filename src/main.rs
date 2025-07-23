@@ -9,7 +9,7 @@ use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
 use embassy_executor::Spawner;
 use embassy_stm32::{
     bind_interrupts,
-    gpio::{Level, Output, OutputOpenDrain, Speed},
+    gpio::{Input, Level, Output, OutputOpenDrain, Pull, Speed},
     i2c::{self, I2c},
     peripherals, // Keep peripherals here
     time::Hertz,
@@ -63,14 +63,14 @@ async fn main(spawner: Spawner) {
 
     // 初始化消息队列并获取生产者和消费者
     let (
-        measurements_publisher, // Publisher for AllMeasurements
-        _measurements_channel,  // Channel for AllMeasurements, if needed to create more subs
-        sc8815_alerts_publisher, // Publisher for SC8815 Alerts
-        sc8815_alerts_channel,   // Channel for SC8815 Alerts
-        bq76920_alerts_publisher, // Publisher for BQ76920 Alerts
-        bq76920_alerts_channel,   // Channel for BQ76920 Alerts, used to create subscriber
+        measurements_publisher,        // Publisher for AllMeasurements
+        _measurements_channel,         // Channel for AllMeasurements, if needed to create more subs
+        sc8815_alerts_publisher,       // Publisher for SC8815 Alerts
+        sc8815_alerts_channel,         // Channel for SC8815 Alerts
+        bq76920_alerts_publisher,      // Publisher for BQ76920 Alerts
+        bq76920_alerts_channel,        // Channel for BQ76920 Alerts, used to create subscriber
         sc8815_measurements_publisher, // Publisher for SC8815 Measurements
-        sc8815_measurements_channel, // Channel for SC8815 Measurements, used to create subscriber
+        sc8815_measurements_channel,   // Channel for SC8815 Measurements, used to create subscriber
         bq76920_measurements_publisher,
         bq76920_measurements_channel, // Channel for BQ76920 Measurements, used to create subscriber
     ) = shared::init_pubsubs();
@@ -85,7 +85,7 @@ async fn main(spawner: Spawner) {
             measurements_publisher, // This is MeasurementsPublisher<'static, 5>
             sc8815_measurements_channel.subscriber().unwrap(), // Create SC8815 measurements subscriber
             bq76920_measurements_channel.subscriber().unwrap(), // Create BQ76920 measurements subscriber
-            sc8815_alerts_channel.subscriber().unwrap(),       // Create SC8815 alerts subscriber
+            sc8815_alerts_channel.subscriber().unwrap(),        // Create SC8815 alerts subscriber
             bq76920_alerts_channel.subscriber().unwrap(),       // Create BQ76920 alerts subscriber
         ))
         .unwrap();
@@ -130,12 +130,25 @@ async fn main(spawner: Spawner) {
     // Configure LED status pin (PA5) - Open drain, active low
     let led_pin = OutputOpenDrain::new(p.PA5, Level::High, Speed::Low); // Start with LED off (high level)
 
+    // Configure PB9 as input with pull-up for BQ76920 discharge control
+    // When PB9 is connected to GND, discharge is enabled; otherwise disabled
+    let pb9_discharge_control = Input::new(p.PB9, Pull::Up);
+
+    // Configure PC13 as input with pull-up for SC8815 PSTOP control
+    // When PC13 is connected to GND, charging is enabled; otherwise disabled
+    let pc13_pstop_control = Input::new(p.PC13, Pull::Up);
+
+    // Configure PA1 as input with pull-up for charging control
+    // When PA1 is connected to GND (low level), charging is allowed; otherwise disabled
+    let pa1_charge_control = Input::new(p.PA1, Pull::Up);
+
     // Spawn device tasks
     spawner
         .spawn(sc8815_task::sc8815_task(
             I2cDevice::new(i2c_bus_mutex), // Create a new I2cDevice for the task using the static mutex
             sc8815_address,
-            pstop_pin, // PSTOP control pin
+            pstop_pin,          // PSTOP control pin
+            pc13_pstop_control, // PC13 PSTOP control input pin
             sc8815_alerts_publisher,
             sc8815_measurements_publisher, // This is Sc8815MeasurementsPublisher
             bq76920_measurements_channel.subscriber().unwrap(), // Create BQ76920 measurements subscriber for sc8815_task
@@ -180,6 +193,8 @@ async fn main(spawner: Spawner) {
             bq76920_address,
             bq76920_sense_resistor_m_ohm, // Pass sense resistor value
             bq76920_ntc_params,           // Pass NTC parameters
+            pb9_discharge_control,        // Pass PB9 discharge control pin
+            pa1_charge_control,           // Pass PA1 charge control pin
             bq76920_alerts_publisher,
             bq76920_measurements_publisher, // Pass the BQ76920 measurements publisher
         ))

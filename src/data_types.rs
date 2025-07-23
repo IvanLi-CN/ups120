@@ -208,11 +208,21 @@ impl<const N: usize> AllMeasurements<N> {
             sc8815_device_status_flags: {
                 let status = &self.sc8815_alerts.device_status;
                 let mut flags = 0u8;
-                if status.eoc { flags |= 0x01; }
-                if status.otp_fault { flags |= 0x02; }
-                if status.vbus_short_fault { flags |= 0x04; }
-                if status.usb_load_detected { flags |= 0x08; }
-                if status.ac_adapter_connected { flags |= 0x10; }
+                if status.eoc {
+                    flags |= 0x01;
+                }
+                if status.otp_fault {
+                    flags |= 0x02;
+                }
+                if status.vbus_short_fault {
+                    flags |= 0x04;
+                }
+                if status.usb_load_detected {
+                    flags |= 0x08;
+                }
+                if status.ac_adapter_connected {
+                    flags |= 0x10;
+                }
                 flags
             },
 
@@ -225,21 +235,21 @@ impl<const N: usize> AllMeasurements<N> {
 #[derive(Debug, Copy, Clone, PartialEq, binrw::BinWrite, defmt::Format)] // Removed binrw::BinRead
 pub struct AllMeasurementsUsbPayload {
     // Fields from SC8815 ADC measurements
-    pub sc8815_adc_vbus_mv: u16,  // VBUS voltage in mV
-    pub sc8815_adc_vbat_mv: u16,  // VBAT voltage in mV
-    pub sc8815_adc_ibus_ma: u16,  // IBUS current in mA
-    pub sc8815_adc_ibat_ma: u16,  // IBAT current in mA
-    pub sc8815_adc_adin_mv: u16,  // ADIN voltage in mV
+    pub sc8815_adc_vbus_mv: u16, // VBUS voltage in mV
+    pub sc8815_adc_vbat_mv: u16, // VBAT voltage in mV
+    pub sc8815_adc_ibus_ma: u16, // IBUS current in mA
+    pub sc8815_adc_ibat_ma: u16, // IBAT current in mA
+    pub sc8815_adc_adin_mv: u16, // ADIN voltage in mV
 
     // Fields from Bq76920Measurements -> Bq76920CoreMeasurements<N>
-    pub bq76920_cell1_mv: i32,       // Unchanged
-    pub bq76920_cell2_mv: i32,       // Unchanged
-    pub bq76920_cell3_mv: i32,       // Unchanged
-    pub bq76920_cell4_mv: i32,       // Unchanged
-    pub bq76920_cell5_mv: i32,       // Unchanged (assuming N=5 for this example)
+    pub bq76920_cell1_mv: i32,         // Unchanged
+    pub bq76920_cell2_mv: i32,         // Unchanged
+    pub bq76920_cell3_mv: i32,         // Unchanged
+    pub bq76920_cell4_mv: i32,         // Unchanged
+    pub bq76920_cell5_mv: i32,         // Unchanged (assuming N=5 for this example)
     pub bq76920_total_voltage_mv: i32, // Added: Total voltage of the BQ76920 pack
-    pub bq76920_ts1_temp_0_01c: i16, // Was bq76920_ts1_raw_adc, unit: 0.01 °C
-    pub bq76920_ts2_present: u8,     // Unchanged
+    pub bq76920_ts1_temp_0_01c: i16,   // Was bq76920_ts1_raw_adc, unit: 0.01 °C
+    pub bq76920_ts2_present: u8,       // Unchanged
     pub bq76920_ts2_temp_0_01c: i16, // Was bq76920_ts2_raw_adc, unit: 0.01 °C (use i16::MIN if not present)
     pub bq76920_ts3_present: u8,     // Unchanged
     pub bq76920_ts3_temp_0_01c: i16, // Was bq76920_ts3_raw_adc, unit: 0.01 °C (use i16::MIN if not present)

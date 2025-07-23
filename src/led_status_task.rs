@@ -1,11 +1,11 @@
 //! LED状态指示任务
-//! 
+//!
 //! 管理PA5引脚上的LED，根据系统状态显示不同的闪烁模式：
 //! - 存在任何故障时，LED 以 4Hz频率闪烁
 //! - 充电时，0.5 Hz 频率闪烁
 //! - 放电时，10100000 节奏闪烁（1亮0不亮，每位 0.25 秒）
 //! - 充满时，111011110 节奏闪烁
-//! 
+//!
 //! 按优先级从高到低执行，同一时间只显示一个匹配的情况。
 
 use defmt::*;
@@ -43,11 +43,11 @@ pub async fn led_status_task(
     mut bq76920_alerts_subscriber: Bq76920AlertsSubscriber<'static>,
 ) {
     info!("LED status task started");
-    
+
     // 配置LED为开漏输出，低使能
     let mut led = led_pin;
     led.set_high(); // 初始状态LED关闭（高电平）
-    
+
     let mut current_status = LedStatus::Normal;
     let mut pattern_index = 0;
     let mut last_update = embassy_time::Instant::now();
@@ -73,7 +73,8 @@ pub async fn led_status_task(
         }
 
         // 检查SC8815测量数据（非阻塞）
-        if let Some(sc8815_measurements_result) = sc8815_measurements_subscriber.try_next_message() {
+        if let Some(sc8815_measurements_result) = sc8815_measurements_subscriber.try_next_message()
+        {
             match sc8815_measurements_result {
                 embassy_sync::pubsub::WaitResult::Message(measurements) => {
                     latest_sc8815_measurements = Some(measurements);
@@ -85,7 +86,9 @@ pub async fn led_status_task(
         }
 
         // 如果有SC8815数据，评估状态
-        if let (Some(alerts), Some(measurements)) = (&latest_sc8815_alerts, &latest_sc8815_measurements) {
+        if let (Some(alerts), Some(measurements)) =
+            (&latest_sc8815_alerts, &latest_sc8815_measurements)
+        {
             new_status = evaluate_sc8815_status(alerts, measurements);
         }
 
@@ -104,7 +107,7 @@ pub async fn led_status_task(
                 }
             }
         }
-        
+
         // 如果状态改变，重置模式索引
         if new_status != current_status {
             current_status = new_status;
@@ -112,7 +115,7 @@ pub async fn led_status_task(
             last_update = embassy_time::Instant::now();
             info!("LED status changed to: {:?}", current_status);
         }
-        
+
         // 根据当前状态执行LED控制
         let now = embassy_time::Instant::now();
         match current_status {
@@ -132,22 +135,30 @@ pub async fn led_status_task(
             }
             LedStatus::Discharging => {
                 // 10100000节奏闪烁，每位250ms
-                execute_pattern(&mut led, &mut pattern_index, &mut last_update, 
-                               &[true, false, true, false, false, false, false, false], 
-                               Duration::from_millis(250));
+                execute_pattern(
+                    &mut led,
+                    &mut pattern_index,
+                    &mut last_update,
+                    &[true, false, true, false, false, false, false, false],
+                    Duration::from_millis(250),
+                );
             }
             LedStatus::ChargingComplete => {
                 // 111011110节奏闪烁，每位250ms
-                execute_pattern(&mut led, &mut pattern_index, &mut last_update,
-                               &[true, true, true, false, true, true, true, true, false],
-                               Duration::from_millis(250));
+                execute_pattern(
+                    &mut led,
+                    &mut pattern_index,
+                    &mut last_update,
+                    &[true, true, true, false, true, true, true, true, false],
+                    Duration::from_millis(250),
+                );
             }
             LedStatus::Normal => {
                 // LED关闭
                 led.set_high();
             }
         }
-        
+
         // 短暂延时避免CPU占用过高
         Timer::after(Duration::from_millis(10)).await;
     }
@@ -162,7 +173,7 @@ fn execute_pattern(
     bit_duration: Duration,
 ) {
     let now = embassy_time::Instant::now();
-    
+
     if now.duration_since(*last_update) >= bit_duration {
         if *pattern_index < pattern.len() {
             if pattern[*pattern_index] {
@@ -211,14 +222,16 @@ fn evaluate_sc8815_status(alerts: &Sc8815Alerts, measurements: &Sc8815Measuremen
 /// 评估BQ76920状态
 fn evaluate_bq76920_status(alerts: &Bq76920Alerts) -> LedStatus {
     let sys_stat = alerts.system_status.0;
-    
+
     // 检查各种故障状态（最高优先级）
     if sys_stat.contains(SysStatFlags::OV) ||      // 过压
        sys_stat.contains(SysStatFlags::UV) ||      // 欠压
        sys_stat.contains(SysStatFlags::SCD) ||     // 短路放电
-       sys_stat.contains(SysStatFlags::OCD) {      // 过流放电
+       sys_stat.contains(SysStatFlags::OCD)
+    {
+        // 过流放电
         return LedStatus::Fault;
     }
-    
+
     LedStatus::Normal
 }

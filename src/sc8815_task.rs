@@ -2,20 +2,24 @@ use defmt::*;
 use embassy_time::{Duration, Timer};
 
 use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
-use embassy_stm32::{i2c::I2c, gpio::Output};
+use embassy_stm32::{
+    gpio::{Input, Output},
+    i2c::I2c,
+};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 
 use sc8815::{
-    CellCount, DeviceConfiguration, OperatingMode,
-    SwitchingFrequency, VoltagePerCell, DeadTime,
-    SC8815,
+    CellCount, DeadTime, DeviceConfiguration, OperatingMode, SC8815, SwitchingFrequency,
+    VoltagePerCell,
 };
 
 use bq769x0_async_rs::registers::{
     SysCtrl2Flags as Bq76920SysCtrl2Flags, SysStatFlags as Bq76920SysStatFlags,
 };
 
-use crate::shared::{Bq76920MeasurementsSubscriber, Sc8815AlertsPublisher, Sc8815MeasurementsPublisher};
+use crate::shared::{
+    Bq76920MeasurementsSubscriber, Sc8815AlertsPublisher, Sc8815MeasurementsPublisher,
+};
 
 // SC8815 charging configuration following reference example
 
@@ -25,12 +29,11 @@ pub async fn sc8815_task(
     i2c_bus: I2cDevice<'static, CriticalSectionRawMutex, I2c<'static, embassy_stm32::mode::Async>>,
     address: u8,
     mut pstop_pin: Output<'static>,
+    pc13_pstop_control: Input<'static>, // Added: PC13 PSTOP control input pin
     sc8815_alerts_publisher: Sc8815AlertsPublisher<'static>,
     sc8815_measurements_publisher: Sc8815MeasurementsPublisher<'static>,
     mut bq76920_measurements_subscriber: Bq76920MeasurementsSubscriber<'static, 5>,
 ) {
-    info!("SC8815 task started.");
-
     // Create SC8815 driver instance
     let mut sc8815 = SC8815::new(i2c_bus, address);
 
@@ -51,8 +54,8 @@ pub async fn sc8815_task(
     // Configure current limits with 5mΩ sense resistors (as per reference)
     config.current_limits.rs1_mohm = 5;
     config.current_limits.rs2_mohm = 5;
-    config.current_limits.ibus_limit_ma = 300;  // Minimum allowed value (300mA)
-    config.current_limits.ibat_limit_ma = 300;  // Minimum allowed value (300mA)
+    config.current_limits.ibus_limit_ma = 300; // Minimum allowed value (300mA)
+    config.current_limits.ibat_limit_ma = 300; // Minimum allowed value (300mA)
 
     // Configure power settings (as per reference)
     config.power.operating_mode = OperatingMode::Charging;
@@ -93,21 +96,30 @@ pub async fn sc8815_task(
         info!("[SC8815] ADC conversion enabled successfully");
     }
 
+    // SC8815 state tracking
+    let mut sc8815_initialized = true; // Set to true after successful initialization
+    let mut sc8815_comm_failed = false; // Track if communication has ever failed
+
     loop {
         // Get BQ76920 measurements for safety checks
-        let bq76920_measurements = bq76920_measurements_subscriber.next_message_pure().await;
+        let _bq76920_measurements = bq76920_measurements_subscriber.next_message_pure().await;
 
         // Read SC8815 ADC measurements
         let sc8815_adc_measurements_option = match sc8815.get_adc_measurements().await {
             Ok(measurements) => {
                 // Print SC8815 voltage and current information
-                info!("[SC8815] VBUS:{}mV, VBAT:{}mV, IBUS:{}mA, IBAT:{}mA",
-                      measurements.vbus_mv, measurements.vbat_mv,
-                      measurements.ibus_ma, measurements.ibat_ma);
+                info!(
+                    "[SC8815] VBUS:{}mV, VBAT:{}mV, IBUS:{}mA, IBAT:{}mA",
+                    measurements.vbus_mv,
+                    measurements.vbat_mv,
+                    measurements.ibus_ma,
+                    measurements.ibat_ma
+                );
                 Some(measurements)
-            },
+            }
             Err(e) => {
                 error!("[SC8815] Failed to read ADC measurements: {:?}", e);
+                sc8815_comm_failed = true; // Mark communication failure
                 None
             }
         };
@@ -126,44 +138,48 @@ pub async fn sc8815_task(
             }
             Err(e) => {
                 error!("Failed to read SC8815 device status: {:?}", e);
+                sc8815_comm_failed = true; // Mark communication failure
                 None
             }
         };
 
         // Safety checks based on BQ76920 status
-        let bq76920_mos_status = bq76920_measurements.core_measurements.mos_status;
-        let bq76920_sys_status = bq76920_measurements.core_measurements.system_status;
 
-        let bq76920_charge_fet_enabled =
-            bq76920_mos_status.0.contains(Bq76920SysCtrl2Flags::CHG_ON);
-        let bq76920_safe_to_charge = !bq76920_sys_status.0.intersects(Bq76920SysStatFlags::OV);
+        let pc13_enable = pc13_pstop_control.is_low();
 
-        let final_charge_permission = bq76920_charge_fet_enabled && bq76920_safe_to_charge;
+        // PSTOP control logic: PC13 low AND SC8815 initialized and never failed
+        let pstop_should_be_low = pc13_enable && sc8815_initialized && !sc8815_comm_failed;
 
-        // Control charging based on safety conditions using PSTOP pin
-        if final_charge_permission {
-            // Enable charging by pulling PSTOP low
+        info!(
+            "[SC8815] PC13: {}, Init: {}, CommOK: {}, PSTOP: {}",
+            pc13_enable,
+            sc8815_initialized,
+            !sc8815_comm_failed,
+            if pstop_should_be_low { "LOW" } else { "HIGH" }
+        );
+
+        if pstop_should_be_low {
             pstop_pin.set_low();
 
             // Set charging current using correct sense resistor value (5mΩ) - 300mA (minimum allowed)
             if let Err(e) = sc8815.set_ibat_limit(300, 0, 5).await {
                 error!("[SC8815] Failed to set charge current: {:?}", e);
+                sc8815_comm_failed = true; // Mark communication failure
             }
 
             // Ensure we're in charging mode
             if let Err(e) = sc8815.set_otg_mode(false).await {
                 error!("[SC8815] Failed to set charging mode: {:?}", e);
+                sc8815_comm_failed = true; // Mark communication failure
             }
         } else {
-            // Disable charging by pulling PSTOP high
             pstop_pin.set_high();
         }
 
         // Publish measurements and alerts
         if let Some(adc_measurements) = sc8815_adc_measurements_option {
-            let sc8815_measurements_payload = crate::data_types::Sc8815Measurements {
-                adc_measurements,
-            };
+            let sc8815_measurements_payload =
+                crate::data_types::Sc8815Measurements { adc_measurements };
             sc8815_measurements_publisher.publish_immediate(sc8815_measurements_payload);
         }
 
