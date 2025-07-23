@@ -1,27 +1,25 @@
-use bq769x0_async_rs::registers::CellBal1Flags;
+use bq769x0_async_rs::registers::{Register, SysCtrl1Flags, SysCtrl2Flags, SysStatFlags};
+use bq769x0_async_rs::RegisterAccess;
 use defmt::*;
 use embassy_time::{Duration, Timer};
 
 use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
 use embassy_stm32::i2c::I2c;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-// Removed WaitResult import as it's no longer needed in this task
 
-// use bq769x0_async_rs::registers::*; // Removed unused import
-// use bq769x0_async_rs::units::ElectricalResistance; // Removed as uom is no longer used by the lib
 use bq769x0_async_rs::ProtectionConfig;
 use bq769x0_async_rs::{
     BatteryConfig, Bq769x0, data_types::NtcParameters, errors::Error as BQ769x0Error,
-}; // Import Error, removed RegisterAccess, Added NtcParameters // Added to resolve E0422
+};
 
 // Import necessary data types
 use crate::shared::{
     Bq76920AlertsPublisher,
-    Bq76920MeasurementsPublisher, // Added Bq76920MeasurementsPublisher
+    Bq76920MeasurementsPublisher,
 };
 
-// New helper function for battery balancing logic
-async fn execute_battery_balancing<'a>(
+// Smart cell balancing logic based on charging status and voltage thresholds
+async fn execute_smart_battery_balancing<'a>(
     bq: &'a mut Bq769x0<
         I2cDevice<'static, CriticalSectionRawMutex, I2c<'static, embassy_stm32::mode::Async>>,
         bq769x0_async_rs::Enabled,
@@ -29,47 +27,159 @@ async fn execute_battery_balancing<'a>(
     >,
     latest_core_measurements: &'a Option<bq769x0_async_rs::data_types::Bq76920Measurements<5>>,
 ) {
+    const NUM_CELLS: usize = 5;
+    const MIN_VOLTAGE_THRESHOLD_MV: i32 = 3300; // Minimum voltage threshold for balancing
+    const PACK_VOLTAGE_DIFF_THRESHOLD_MV: i32 = 10; // Pack voltage difference threshold
+    const MIN_BALANCE_DIFF_MV: i32 = 2; // Minimum voltage difference to trigger balancing
+
     if let Some(measurements) = latest_core_measurements {
-        let mut balance_flags = CellBal1Flags::empty();
-        let mut total_voltage = 0;
-        let mut cell_count = 0;
+        // Determine if charging: CHG_ON is enabled AND current is positive (flowing into battery)
+        let chg_on = measurements.mos_status.0.contains(SysCtrl2Flags::CHG_ON);
+        let is_charging = chg_on && measurements.current_ma > 10; // 10mA threshold to avoid noise
 
-        for voltage in measurements.cell_voltages.voltages.iter() {
-            total_voltage += *voltage;
-            cell_count += 1;
-        }
+        info!("Battery Status:");
+        info!("  Charging: {}", is_charging);
+        info!("  Min voltage threshold: {} mV", MIN_VOLTAGE_THRESHOLD_MV);
+        info!("  Pack voltage diff threshold: {} mV", PACK_VOLTAGE_DIFF_THRESHOLD_MV);
 
-        if cell_count > 0 {
-            let average_voltage = total_voltage / cell_count;
-            let balance_threshold_mv = 50; // Example threshold: 50mV
+        // Display all cell voltages and find min/max
+        let mut valid_cells = 0;
+        let mut min_voltage = i32::MAX;
+        let mut max_voltage = 0i32;
 
-            for (i, voltage) in measurements.cell_voltages.voltages.iter().enumerate() {
-                if *voltage > average_voltage + balance_threshold_mv {
-                    // Set the corresponding balance flag for cell i+1
-                    match i {
-                        0 => balance_flags |= CellBal1Flags::BAL1,
-                        1 => balance_flags |= CellBal1Flags::BAL2,
-                        2 => balance_flags |= CellBal1Flags::BAL3,
-                        3 => balance_flags |= CellBal1Flags::BAL4,
-                        4 => balance_flags |= CellBal1Flags::BAL5,
-                        _ => {} // Should not happen for BQ76920 with 5 cells
-                    }
+        for i in 0..NUM_CELLS {
+            let voltage = measurements.cell_voltages.voltages[i];
+            if voltage > 0 { // Only include valid readings
+                info!("  Cell {}: {} mV", i + 1, voltage);
+                valid_cells += 1;
+                if voltage < min_voltage {
+                    min_voltage = voltage;
+                }
+                if voltage > max_voltage {
+                    max_voltage = voltage;
                 }
             }
+        }
 
-            // Write the calculated balance flags to the CELLBAL1 register
-            if !balance_flags.is_empty() {
-                info!("Attempting to set BQ76920 cell balance flags: {:#010b}", balance_flags.bits());
-                if let Err(e) = bq.set_cell_balancing(balance_flags.bits() as u16).await {
-                    error!("Failed to set BQ76920 cell balance flags using set_cell_balancing: {:?}", e);
+        if valid_cells >= 2 {
+            let pack_voltage_diff = max_voltage - min_voltage;
+            info!("  Pack voltage difference: {} mV (max: {} mV, min: {} mV)",
+                 pack_voltage_diff, max_voltage, min_voltage);
+
+            // Check if balancing is allowed
+            let balancing_allowed = pack_voltage_diff > PACK_VOLTAGE_DIFF_THRESHOLD_MV &&
+                                  (is_charging || min_voltage > MIN_VOLTAGE_THRESHOLD_MV);
+
+            info!("  Balancing allowed: {} (pack_diff > {}mV: {}, charging_or_min_ok: {})",
+                 balancing_allowed,
+                 PACK_VOLTAGE_DIFF_THRESHOLD_MV,
+                 pack_voltage_diff > PACK_VOLTAGE_DIFF_THRESHOLD_MV,
+                 is_charging || min_voltage > MIN_VOLTAGE_THRESHOLD_MV);
+
+            if balancing_allowed {
+                // Find the highest voltage cells for balancing
+                let mut cells_need_balancing: [bool; NUM_CELLS] = [false; NUM_CELLS];
+                let mut balance_candidate_count = 0;
+
+                // Create a list of valid cells with their voltages and indices
+                let mut valid_cells_list: [(usize, i32); NUM_CELLS] = [(0, 0); NUM_CELLS];
+                let mut valid_count = 0;
+
+                for i in 0..NUM_CELLS {
+                    let voltage = measurements.cell_voltages.voltages[i];
+                    if voltage > 0 { // Only include valid readings
+                        valid_cells_list[valid_count] = (i, voltage);
+                        valid_count += 1;
+                    }
+                }
+
+                if valid_count >= 2 {
+                    // Sort cells by voltage (highest first) - simple bubble sort for small arrays
+                    for i in 0..valid_count {
+                        for j in 0..valid_count - 1 - i {
+                            if valid_cells_list[j].1 < valid_cells_list[j + 1].1 {
+                                let temp = valid_cells_list[j];
+                                valid_cells_list[j] = valid_cells_list[j + 1];
+                                valid_cells_list[j + 1] = temp;
+                            }
+                        }
+                    }
+
+                    info!("  Cells sorted by voltage (highest first):");
+                    for idx in 0..valid_count {
+                        let (cell_idx, voltage) = valid_cells_list[idx];
+                        info!("    {}. Cell {}: {} mV", idx + 1, cell_idx + 1, voltage);
+                    }
+
+                    // Check if the highest voltage cells need balancing
+                    // Balance cells that are significantly higher than the minimum
+                    let min_cell_voltage = valid_cells_list[valid_count - 1].1; // Lowest voltage (last after sorting)
+
+                    for idx in 0..valid_count {
+                        let (cell_idx, voltage) = valid_cells_list[idx];
+                        let voltage_diff = voltage - min_cell_voltage;
+
+                        if voltage_diff >= MIN_BALANCE_DIFF_MV && balance_candidate_count < 2 {
+                            cells_need_balancing[cell_idx] = true;
+                            balance_candidate_count += 1;
+                            info!("  Cell {} ({} mV) needs balancing (diff: {} mV > {} mV)",
+                                 cell_idx + 1, voltage, voltage_diff, MIN_BALANCE_DIFF_MV);
+                        } else if voltage_diff < MIN_BALANCE_DIFF_MV {
+                            info!("  Cell {} ({} mV) skipped balancing (diff: {} mV < {} mV)",
+                                 cell_idx + 1, voltage, voltage_diff, MIN_BALANCE_DIFF_MV);
+                        }
+
+                        if balance_candidate_count >= 2 {
+                            info!("  Reached maximum 2 cells for balancing");
+                            break;
+                        }
+                    }
+                }
+
+                info!("  Cells needing balancing: {}", balance_candidate_count);
+
+                if balance_candidate_count > 0 {
+                    let mut balancing_mask: u16 = 0;
+
+                    for i in 0..NUM_CELLS {
+                        if cells_need_balancing[i] {
+                            balancing_mask |= 1 << i;
+                            info!("  Balancing Cell {}: {} mV", i + 1, measurements.cell_voltages.voltages[i]);
+                        }
+                    }
+
+                    info!("Enabling cell balancing: mask = 0b{:05b} ({} cells)", balancing_mask, balance_candidate_count);
+                    if let Err(e) = bq.set_cell_balancing(balancing_mask).await {
+                        error!("Failed to enable cell balancing: {:?}", e);
+                    } else {
+                        info!("Cell balancing enabled successfully.");
+                    }
                 } else {
-                    info!("BQ76920 cell balance flags set.");
+                    info!("No cells need balancing - disabling balancing");
+                    // Disable cell balancing
+                    if let Err(e) = bq.set_cell_balancing(0).await {
+                        error!("Failed to disable cell balancing: {:?}", e);
+                    } else {
+                        info!("Cell balancing disabled - no imbalance.");
+                    }
                 }
             } else {
-                 // If no cells need balancing, ensure balance flags are cleared
-                 if let Err(e) = bq.set_cell_balancing(CellBal1Flags::empty().bits() as u16).await {
-                    error!("Failed to clear BQ76920 cell balance flags using set_cell_balancing: {:?}", e);
+                info!("Balancing not allowed - disabling balancing");
+                info!("  Pack voltage diff {} mV <= {} mV OR (not charging AND min voltage {} mV <= {} mV)",
+                     pack_voltage_diff, PACK_VOLTAGE_DIFF_THRESHOLD_MV, min_voltage, MIN_VOLTAGE_THRESHOLD_MV);
+
+                // Disable cell balancing
+                if let Err(e) = bq.set_cell_balancing(0).await {
+                    error!("Failed to disable cell balancing: {:?}", e);
+                } else {
+                    info!("Cell balancing disabled - conditions not met.");
                 }
+            }
+        } else {
+            error!("Insufficient valid cell voltage readings for balancing (need at least 2 cells)");
+            // Disable balancing if insufficient data
+            if let Err(e) = bq.set_cell_balancing(0).await {
+                error!("Failed to disable cell balancing: {:?}", e);
             }
         }
     }
@@ -223,18 +333,158 @@ pub async fn bq76920_task(
         // in `BatteryConfig::default()` and verified by `try_apply_config`.
         // Therefore, an explicit check and write for CC_EN in this loop is no longer necessary.
 
+        info!("--- Reading BQ76920 Data ---");
+
+        // Check system control register status (for debugging)
+        info!("Checking system control register status...");
+        let sys_ctrl1_val = bq.read_register(Register::SysCtrl1).await.unwrap_or(0);
+        let sys_ctrl1_flags = SysCtrl1Flags::from_bits_truncate(sys_ctrl1_val);
+        let sys_ctrl2_val = bq.read_register(Register::SysCtrl2).await.unwrap_or(0);
+        let sys_ctrl2_flags = SysCtrl2Flags::from_bits_truncate(sys_ctrl2_val);
+
+        info!(
+            "SYS_CTRL1 = 0x{:02X}, ADC_EN = {}",
+            sys_ctrl1_val,
+            sys_ctrl1_flags.contains(SysCtrl1Flags::ADC_EN)
+        );
+        info!(
+            "SYS_CTRL2 = 0x{:02X}, CC_EN = {}",
+            sys_ctrl2_val,
+            sys_ctrl2_flags.contains(SysCtrl2Flags::CC_EN)
+        );
+
+        // Read ADC calibration values
+        let (adc_gain_uv_per_lsb, adc_offset_mv) = match bq.read_adc_calibration().await {
+            Ok(cal) => cal,
+            Err(e) => {
+                error!("Failed to read ADC calibration: {:?}", e);
+                // Use default calibration values if reading fails
+                (365, 0) // Default values from datasheet
+            }
+        };
+        info!(
+            "ADC Calibration: Gain={} uV/LSB, Offset={} mV",
+            adc_gain_uv_per_lsb, adc_offset_mv
+        );
+
+        // Debug UV_TRIP register and calculation
+        let uv_trip_register = bq.read_register(Register::UvTrip).await.unwrap_or(0);
+        info!("UV_TRIP register value: 0x{:02X}", uv_trip_register);
+
+        // Calculate what voltage this UV_TRIP register represents
+        // UV threshold format: 01-XXXXXXXX-0000 (14-bit)
+        let uv_trip_14bit = (0b01 << 12) | ((uv_trip_register as u16) << 4) | 0b0000;
+        let uv_trip_voltage_mv =
+            (uv_trip_14bit as i32 * adc_gain_uv_per_lsb as i32) / 1000 + adc_offset_mv as i32;
+        info!(
+            "Calculated UV trip voltage: {} mV (from 14-bit value: 0x{:04X})",
+            uv_trip_voltage_mv, uv_trip_14bit
+        );
+
+        // Also check OV_TRIP for comparison
+        let ov_trip_register = bq.read_register(Register::OvTrip).await.unwrap_or(0);
+        info!("OV_TRIP register value: 0x{:02X}", ov_trip_register);
+        let ov_trip_14bit = (0b10 << 12) | ((ov_trip_register as u16) << 4) | 0b1000;
+        let ov_trip_voltage_mv =
+            (ov_trip_14bit as i32 * adc_gain_uv_per_lsb as i32) / 1000 + adc_offset_mv as i32;
+        info!(
+            "Calculated OV trip voltage: {} mV (from 14-bit value: 0x{:04X})",
+            ov_trip_voltage_mv, ov_trip_14bit
+        );
+
         // Read all measurements from BQ76920. These are now in physical units.
         match bq.read_all_measurements().await {
             Ok(core_meas) => {
                 latest_core_measurements = Some(core_meas);
 
-                // Log all BQ76920 measurements in a single line
+                // Log detailed BQ76920 measurements
+                info!("Cell Voltages:");
+                for i in 0..5 {
+                    let voltage_mv = core_meas.cell_voltages.voltages[i];
+                    info!("  Cell {}: {} mV", i + 1, voltage_mv);
+                }
+
+                info!("Pack Voltage: {} mV", core_meas.total_voltage_mv);
+                info!("Current: {} mA", core_meas.current_ma);
+
+                // Log temperatures
+                info!("Temperatures (0.01°C):");
+                info!("  TS1: {} ({}°C)", core_meas.temperatures.ts1, core_meas.temperatures.ts1 as f32 / 100.0);
+                if let Some(ts2) = core_meas.temperatures.ts2 {
+                    info!("  TS2: {} ({}°C)", ts2, ts2 as f32 / 100.0);
+                }
+                if let Some(ts3) = core_meas.temperatures.ts3 {
+                    info!("  TS3: {} ({}°C)", ts3, ts3 as f32 / 100.0);
+                }
+
+                // Log detailed system status
                 info!(
-                    "BQ76920: Cells={:?}mV, Total={}mV, Current={}mA",
-                    core_meas.cell_voltages.voltages,
-                    core_meas.total_voltage_mv,
-                    core_meas.current_ma
+                    "System Status (SYS_STAT register: 0x{:02X}):",
+                    core_meas.system_status.0.bits()
                 );
+                info!("  CC Ready: {}", core_meas.system_status.0.contains(SysStatFlags::CC_READY));
+                info!(
+                    "  Overtemperature: {}",
+                    core_meas.system_status.0.contains(SysStatFlags::OVRD_ALERT)
+                );
+
+                let uv_fault = core_meas.system_status.0.contains(SysStatFlags::UV);
+                info!(
+                    "  Undervoltage (UV): {} - Expected threshold: {} mV",
+                    uv_fault, uv_trip_voltage_mv
+                );
+                info!(
+                    "  Overvoltage (OV): {} - Expected threshold: {} mV",
+                    core_meas.system_status.0.contains(SysStatFlags::OV),
+                    ov_trip_voltage_mv
+                );
+                info!(
+                    "  Short Circuit Discharge (SCD): {}",
+                    core_meas.system_status.0.contains(SysStatFlags::SCD)
+                );
+                info!(
+                    "  Overcurrent Discharge (OCD): {}",
+                    core_meas.system_status.0.contains(SysStatFlags::OCD)
+                );
+
+                // Log MOS status
+                let chg_on = core_meas.mos_status.0.contains(SysCtrl2Flags::CHG_ON);
+                info!("MOS Status:");
+                info!("  Charge MOSFET (CHG_ON): {}", chg_on);
+                info!(
+                    "  Discharge MOSFET (DSG_ON): {}",
+                    core_meas.mos_status.0.contains(SysCtrl2Flags::DSG_ON)
+                );
+                info!(
+                    "  Coulomb Counter (CC_EN): {}",
+                    core_meas.mos_status.0.contains(SysCtrl2Flags::CC_EN)
+                );
+                info!(
+                    "  CC One-Shot (CC_ONESHOT): {}",
+                    core_meas.mos_status.0.contains(SysCtrl2Flags::CC_ONESHOT)
+                );
+                info!(
+                    "  Delay Disable (DELAY_DIS): {}",
+                    core_meas.mos_status.0.contains(SysCtrl2Flags::DELAY_DIS)
+                );
+
+                // UV fault management: Enable discharge MOS when UV fault is false (cleared)
+                if !uv_fault {
+                    // UV fault is not present, ensure discharge MOS is enabled
+                    if !core_meas.mos_status.0.contains(SysCtrl2Flags::DSG_ON) {
+                        info!("UV fault cleared, enabling discharge MOSFET...");
+                        if let Err(e) = bq.enable_discharging().await {
+                            error!("Failed to enable discharging after UV clear: {:?}", e);
+                        } else {
+                            info!("Discharge MOSFET enabled after UV fault cleared.");
+                        }
+                    }
+                } else {
+                    // UV fault is present, discharge MOS should be disabled by hardware
+                    info!(
+                        "UV fault detected - discharge MOSFET should be disabled by hardware protection"
+                    );
+                }
 
                 // Publish BQ76920 alert information (derived from system status).
                 let alerts = crate::data_types::Bq76920Alerts {
@@ -274,10 +524,12 @@ pub async fn bq76920_task(
         // --- Battery Balancing Logic (executed approximately once per hour) ---
         if balance_timer_counter == 0 || balance_timer_counter >= 3600 { // 3600 seconds = 1 hour
             info!("Executing hourly battery balancing logic.");
-            execute_battery_balancing(&mut bq, &latest_core_measurements).await;
+            execute_smart_battery_balancing(&mut bq, &latest_core_measurements).await;
             balance_timer_counter = 0; // Reset counter after execution
         }
         // --- End Battery Balancing Logic ---
+
+        info!("----------------------------");
 
         // Wait for a defined interval before the next cycle of readings.
         Timer::after(Duration::from_secs(1)).await;
