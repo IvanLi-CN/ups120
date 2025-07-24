@@ -341,8 +341,8 @@ pub async fn bq76920_task(
 
         info!("--- Reading BQ76920 Data ---");
 
-        // Read ADC calibration values
-        let (adc_gain_uv_per_lsb, adc_offset_mv) = match bq.read_adc_calibration().await {
+        // Read ADC calibration values (not used in current logging but kept for potential future use)
+        let (_adc_gain_uv_per_lsb, _adc_offset_mv) = match bq.read_adc_calibration().await {
             Ok(cal) => cal,
             Err(e) => {
                 error!("Failed to read ADC calibration: {:?}", e);
@@ -351,30 +351,32 @@ pub async fn bq76920_task(
             }
         };
 
-        // Debug UV_TRIP register and calculation
-        let uv_trip_register = bq.read_register(Register::UvTrip).await.unwrap_or(0);
-        info!("UV_TRIP register value: 0x{:02X}", uv_trip_register);
-
-        // Calculate what voltage this UV_TRIP register represents
-        // UV threshold format: 01-XXXXXXXX-0000 (14-bit)
-        let uv_trip_14bit = (0b01 << 12) | ((uv_trip_register as u16) << 4) | 0b0000;
-        let uv_trip_voltage_mv =
-            (uv_trip_14bit as i32 * adc_gain_uv_per_lsb as i32) / 1000 + adc_offset_mv as i32;
+        // Read and display cell balancing status
+        let cellbal1_register = bq.read_register(Register::CELLBAL1).await.unwrap_or(0);
+        info!("Cell Balancing Status:");
         info!(
-            "Calculated UV trip voltage: {} mV (from 14-bit value: 0x{:04X})",
-            uv_trip_voltage_mv, uv_trip_14bit
+            "  CELLBAL1 register: 0b{:08b} (0x{:02X})",
+            cellbal1_register, cellbal1_register
         );
 
-        // Also check OV_TRIP for comparison
-        let ov_trip_register = bq.read_register(Register::OvTrip).await.unwrap_or(0);
-        info!("OV_TRIP register value: 0x{:02X}", ov_trip_register);
-        let ov_trip_14bit = (0b10 << 12) | ((ov_trip_register as u16) << 4) | 0b1000;
-        let ov_trip_voltage_mv =
-            (ov_trip_14bit as i32 * adc_gain_uv_per_lsb as i32) / 1000 + adc_offset_mv as i32;
-        info!(
-            "Calculated OV trip voltage: {} mV (from 14-bit value: 0x{:04X})",
-            ov_trip_voltage_mv, ov_trip_14bit
-        );
+        // Display which cells are enabled for balancing
+        let mut balancing_cells = [0u8; 5];
+        let mut balancing_count = 0;
+        for i in 0..5 {
+            if (cellbal1_register & (1 << i)) != 0 {
+                balancing_cells[balancing_count] = (i + 1) as u8;
+                balancing_count += 1;
+            }
+        }
+
+        if balancing_count == 0 {
+            info!("  No cells are currently balancing");
+        } else {
+            info!(
+                "  Cells currently balancing: {:?}",
+                &balancing_cells[..balancing_count]
+            );
+        }
 
         // Read all measurements from BQ76920. These are now in physical units.
         match bq.read_all_measurements().await {
@@ -420,14 +422,10 @@ pub async fn bq76920_task(
                 );
 
                 let uv_fault = core_meas.system_status.0.contains(SysStatFlags::UV);
+                info!("  Undervoltage (UV): {}", uv_fault);
                 info!(
-                    "  Undervoltage (UV): {} - Expected threshold: {} mV",
-                    uv_fault, uv_trip_voltage_mv
-                );
-                info!(
-                    "  Overvoltage (OV): {} - Expected threshold: {} mV",
-                    core_meas.system_status.0.contains(SysStatFlags::OV),
-                    ov_trip_voltage_mv
+                    "  Overvoltage (OV): {}",
+                    core_meas.system_status.0.contains(SysStatFlags::OV)
                 );
                 info!(
                     "  Short Circuit Discharge (SCD): {}",
