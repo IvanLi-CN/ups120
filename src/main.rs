@@ -134,10 +134,6 @@ async fn main(spawner: Spawner) {
     // When PB9 is connected to GND, discharge is enabled; otherwise disabled
     let pb9_discharge_control = Input::new(p.PB9, Pull::Up);
 
-    // Configure PC13 as input with pull-up for SC8815 PSTOP control
-    // When PC13 is connected to GND, charging is enabled; otherwise disabled
-    let pc13_pstop_control = Input::new(p.PC13, Pull::Up);
-
     // Configure PA1 as input with pull-up for charging control
     // When PA1 is connected to GND (low level), charging is allowed; otherwise disabled
     let pa1_charge_control = Input::new(p.PA1, Pull::Up);
@@ -147,8 +143,7 @@ async fn main(spawner: Spawner) {
         .spawn(sc8815_task::sc8815_task(
             I2cDevice::new(i2c_bus_mutex), // Create a new I2cDevice for the task using the static mutex
             sc8815_address,
-            pstop_pin,          // PSTOP control pin
-            pc13_pstop_control, // PC13 PSTOP control input pin
+            pstop_pin, // PSTOP control pin
             sc8815_alerts_publisher,
             sc8815_measurements_publisher, // This is Sc8815MeasurementsPublisher
             bq76920_measurements_channel.subscriber().unwrap(), // Create BQ76920 measurements subscriber for sc8815_task

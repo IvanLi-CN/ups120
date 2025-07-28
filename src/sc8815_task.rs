@@ -2,26 +2,14 @@ use defmt::*;
 use embassy_time::{Duration, Timer};
 
 use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
-use embassy_stm32::{
-    gpio::{Input, Output},
-    i2c::I2c,
-};
+use embassy_stm32::{gpio::Output, i2c::I2c};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 
-use sc8815::{
-    CellCount, DeadTime, DeviceConfiguration, OperatingMode, SC8815, SwitchingFrequency,
-    VoltagePerCell,
-};
-
-use bq769x0_async_rs::registers::{
-    SysCtrl2Flags as Bq76920SysCtrl2Flags, SysStatFlags as Bq76920SysStatFlags,
-};
+use sc8815::{DeadTime, DeviceConfiguration, OperatingMode, SC8815, SwitchingFrequency};
 
 use crate::shared::{
     Bq76920MeasurementsSubscriber, Sc8815AlertsPublisher, Sc8815MeasurementsPublisher,
 };
-
-// SC8815 charging configuration following reference example
 
 /// Embassy task for managing the SC8815 charger IC.
 #[embassy_executor::task]
@@ -29,7 +17,6 @@ pub async fn sc8815_task(
     i2c_bus: I2cDevice<'static, CriticalSectionRawMutex, I2c<'static, embassy_stm32::mode::Async>>,
     address: u8,
     mut pstop_pin: Output<'static>,
-    pc13_pstop_control: Input<'static>, // Added: PC13 PSTOP control input pin
     sc8815_alerts_publisher: Sc8815AlertsPublisher<'static>,
     sc8815_measurements_publisher: Sc8815MeasurementsPublisher<'static>,
     mut bq76920_measurements_subscriber: Bq76920MeasurementsSubscriber<'static, 5>,
@@ -43,19 +30,16 @@ pub async fn sc8815_task(
         return;
     }
 
-    // Configure SC8815 for charging mode - using original working configuration
+    // Configure SC8815 for charging mode - using external resistor configuration
     let mut config = DeviceConfiguration::default();
 
-    // Configure for 4S battery using internal voltage setting
-    config.battery.cell_count = CellCount::Cells4S;
-    config.battery.voltage_per_cell = VoltagePerCell::Mv4450;
-    config.battery.use_internal_setting = true;
+    config.battery.use_internal_setting = false;
 
     // Configure current limits with 5mΩ sense resistors (as per reference)
     config.current_limits.rs1_mohm = 5;
     config.current_limits.rs2_mohm = 5;
-    config.current_limits.ibus_limit_ma = 300; // Minimum allowed value (300mA)
-    config.current_limits.ibat_limit_ma = 300; // Minimum allowed value (300mA)
+    config.current_limits.ibus_limit_ma = 1000; // 1A input current
+    config.current_limits.ibat_limit_ma = 1000; // 1A charging current
 
     // Configure power settings (as per reference)
     config.power.operating_mode = OperatingMode::Charging;
@@ -74,13 +58,14 @@ pub async fn sc8815_task(
         return;
     }
 
-    info!("SC8815 configured successfully for charging mode");
+    // In external mode, manually set VBAT monitor ratio for typical battery voltages
+    // Use 12.5x ratio for batteries >10.24V (most Li-ion applications)
+    if let Err(e) = sc8815.set_vbat_monitor_ratio(0).await {
+        error!("Failed to set VBAT monitor ratio: {:?}", e);
+        return;
+    }
 
-    // Print configuration details
-    info!("[SC8815 Config] Battery: 4S, 4.45V/cell (17.8V total)");
-    info!("[SC8815 Config] Current limits: IBUS=300mA, IBAT=300mA (minimum allowed)");
-    info!("[SC8815 Config] Sense resistors: RS1=5mΩ, RS2=5mΩ");
-    info!("[SC8815 Config] VINREG=11.5V, Switching freq=450kHz");
+    info!("SC8815 OK");
 
     // Enable charging mode (disable OTG mode)
     if let Err(e) = sc8815.set_otg_mode(false).await {
@@ -89,15 +74,13 @@ pub async fn sc8815_task(
     }
     info!("Charging mode enabled successfully");
 
-    // Enable ADC conversion - THIS IS CRITICAL!
+    // Enable ADC conversion
     if let Err(e) = sc8815.set_adc_conversion(true).await {
         error!("Failed to start SC8815 ADC conversion: {:?}", e);
-    } else {
-        info!("[SC8815] ADC conversion enabled successfully");
     }
 
     // SC8815 state tracking
-    let mut sc8815_initialized = true; // Set to true after successful initialization
+    let sc8815_initialized = true; // Set to true after successful initialization
     let mut sc8815_comm_failed = false; // Track if communication has ever failed
 
     loop {
@@ -143,37 +126,51 @@ pub async fn sc8815_task(
             }
         };
 
-        // Safety checks based on BQ76920 status
+        // Charging control with safety checks
+        let _bq76920_measurements = _bq76920_measurements;
 
-        let pc13_enable = pc13_pstop_control.is_low();
+        let can_charge = sc8815_initialized && !sc8815_comm_failed;
 
-        // PSTOP control logic: PC13 low AND SC8815 initialized and never failed
-        let pstop_should_be_low = pc13_enable && sc8815_initialized && !sc8815_comm_failed;
-
-        info!(
-            "[SC8815] PC13: {}, Init: {}, CommOK: {}, PSTOP: {}",
-            pc13_enable,
-            sc8815_initialized,
-            !sc8815_comm_failed,
-            if pstop_should_be_low { "LOW" } else { "HIGH" }
-        );
-
-        if pstop_should_be_low {
-            pstop_pin.set_low();
-
-            // Set charging current using correct sense resistor value (5mΩ) - 300mA (minimum allowed)
-            if let Err(e) = sc8815.set_ibat_limit(300, 0, 5).await {
-                error!("[SC8815] Failed to set charge current: {:?}", e);
-                sc8815_comm_failed = true; // Mark communication failure
-            }
-
-            // Ensure we're in charging mode
-            if let Err(e) = sc8815.set_otg_mode(false).await {
-                error!("[SC8815] Failed to set charging mode: {:?}", e);
-                sc8815_comm_failed = true; // Mark communication failure
+        if can_charge {
+            if let Some(measurements) = sc8815_adc_measurements_option.as_ref() {
+                if measurements.vbat_mv < 18000 {
+                    pstop_pin.set_low();
+                    info!("[DEBUG] PSTOP set to LOW - charging should be enabled");
+                    if let Err(_) = sc8815.set_ibat_limit(1000, 0, 5).await {
+                        sc8815_comm_failed = true;
+                    }
+                    if let Err(_) = sc8815.set_otg_mode(false).await {
+                        sc8815_comm_failed = true;
+                    }
+                    // Log charging status every 10 seconds
+                    static mut LAST_LOG_TIME: u32 = 0;
+                    let current_time = embassy_time::Instant::now().as_millis() as u32;
+                    unsafe {
+                        if current_time - LAST_LOG_TIME > 10000 {
+                            info!(
+                                "[CHARGING] VBAT:{}mV, IBAT:{}mA, Status: Active",
+                                measurements.vbat_mv, measurements.ibat_ma
+                            );
+                            LAST_LOG_TIME = current_time;
+                        }
+                    }
+                } else {
+                    pstop_pin.set_high();
+                    warn!(
+                        "[CHARGING] Voltage too high: {}mV >= 18000mV",
+                        measurements.vbat_mv
+                    );
+                }
+            } else {
+                pstop_pin.set_high();
+                warn!("[CHARGING] No measurements available");
             }
         } else {
             pstop_pin.set_high();
+            warn!(
+                "[CHARGING] Cannot charge - init:{} comm_ok:{}",
+                sc8815_initialized, !sc8815_comm_failed
+            );
         }
 
         // Publish measurements and alerts
