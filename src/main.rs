@@ -33,8 +33,8 @@ use {defmt_rtt as _, panic_probe as _};
 mod bq76920_task;
 mod data_types;
 // mod ina226_task; // Commented out - not using INA226 for now
+mod charger_task; // Added charger task (SC8815)
 mod led_status_task; // Added LED status indication task
-mod sc8815_task; // Added SC8815 task
 mod shared;
 mod usb; // Keep this for our local usb module
 
@@ -140,13 +140,13 @@ async fn main(spawner: Spawner) {
 
     // Spawn device tasks
     spawner
-        .spawn(sc8815_task::sc8815_task(
+        .spawn(charger_task::charger_task(
             I2cDevice::new(i2c_bus_mutex), // Create a new I2cDevice for the task using the static mutex
             sc8815_address,
             pstop_pin, // PSTOP control pin
             sc8815_alerts_publisher,
             sc8815_measurements_publisher, // This is Sc8815MeasurementsPublisher
-            bq76920_measurements_channel.subscriber().unwrap(), // Create BQ76920 measurements subscriber for sc8815_task
+            bq76920_measurements_channel.subscriber().unwrap(), // Create BQ76920 measurements subscriber for charger_task
         ))
         .unwrap();
 
