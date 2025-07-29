@@ -67,7 +67,7 @@ bq769x0-async-rs = { version = "*", path = "./bq76920", features = [
   "async",
   "defmt",
 ] }
-bq25730-async-rs = { version = "*", path = "./bq25730", features = [
+sc8815 = { version = "*", path = "./sc8815", features = [
   "async",
   "defmt",
 ] }
