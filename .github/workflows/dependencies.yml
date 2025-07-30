@@ -80,7 +80,7 @@ jobs:
           cargo clippy --target thumbv6m-none-eabi -- -D warnings
 
       - name: Create Pull Request
-        uses: peter-evans/create-pull-request@v6
+        uses: peter-evans/create-pull-request@v7
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           commit-message: 'chore: update Cargo.lock files'
