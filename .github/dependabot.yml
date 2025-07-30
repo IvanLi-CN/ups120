@@ -1,0 +1,105 @@
+version: 2
+updates:
+  # Rust dependencies for main project
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "sunday"
+      time: "00:00"
+      timezone: "UTC"
+    open-pull-requests-limit: 5
+    reviewers:
+      - "ivanli2048"
+    assignees:
+      - "ivanli2048"
+    commit-message:
+      prefix: "chore"
+      include: "scope"
+    labels:
+      - "dependencies"
+      - "rust"
+
+  # Rust dependencies for BQ76920 submodule
+  - package-ecosystem: "cargo"
+    directory: "/bq76920"
+    schedule:
+      interval: "weekly"
+      day: "sunday"
+      time: "01:00"
+      timezone: "UTC"
+    open-pull-requests-limit: 3
+    reviewers:
+      - "ivanli2048"
+    assignees:
+      - "ivanli2048"
+    commit-message:
+      prefix: "chore"
+      include: "scope"
+    labels:
+      - "dependencies"
+      - "rust"
+      - "bq76920"
+
+  # Rust dependencies for SC8815 submodule
+  - package-ecosystem: "cargo"
+    directory: "/sc8815"
+    schedule:
+      interval: "weekly"
+      day: "sunday"
+      time: "02:00"
+      timezone: "UTC"
+    open-pull-requests-limit: 3
+    reviewers:
+      - "ivanli2048"
+    assignees:
+      - "ivanli2048"
+    commit-message:
+      prefix: "chore"
+      include: "scope"
+    labels:
+      - "dependencies"
+      - "rust"
+      - "sc8815"
+
+  # Node.js dependencies for development tools
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "sunday"
+      time: "03:00"
+      timezone: "UTC"
+    open-pull-requests-limit: 3
+    reviewers:
+      - "ivanli2048"
+    assignees:
+      - "ivanli2048"
+    commit-message:
+      prefix: "chore"
+      include: "scope"
+    labels:
+      - "dependencies"
+      - "nodejs"
+      - "dev-tools"
+
+  # GitHub Actions
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "sunday"
+      time: "04:00"
+      timezone: "UTC"
+    open-pull-requests-limit: 3
+    reviewers:
+      - "ivanli2048"
+    assignees:
+      - "ivanli2048"
+    commit-message:
+      prefix: "chore"
+      include: "scope"
+    labels:
+      - "dependencies"
+      - "github-actions"
+      - "ci"
