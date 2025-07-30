@@ -21,6 +21,7 @@ use bq769x0_async_rs::registers::SysStatFlags;
 
 /// LED状态枚举
 #[derive(Debug, Clone, Copy, PartialEq, defmt::Format)]
+#[allow(dead_code)]
 pub enum LedStatus {
     /// 系统初始化中 - 2Hz中速闪烁 (温和的初始化指示)
     Initializing,

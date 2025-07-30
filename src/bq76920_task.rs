@@ -18,7 +18,11 @@ use crate::shared::{Bq76920AlertsPublisher, Bq76920MeasurementsPublisher};
 // Smart cell balancing logic based on charging status and voltage thresholds
 async fn execute_smart_battery_balancing<'a>(
     bq: &'a mut Bq769x0<
-        I2cDevice<'static, CriticalSectionRawMutex, I2c<'static, peripherals::I2C0, embassy_rp::i2c::Async>>,
+        I2cDevice<
+            'static,
+            CriticalSectionRawMutex,
+            I2c<'static, peripherals::I2C0, embassy_rp::i2c::Async>,
+        >,
         bq769x0_async_rs::Enabled,
         5,
     >,
@@ -104,16 +108,15 @@ async fn execute_smart_battery_balancing<'a>(
                     for i in 0..valid_count {
                         for j in 0..valid_count - 1 - i {
                             if valid_cells_list[j].1 < valid_cells_list[j + 1].1 {
-                                let temp = valid_cells_list[j];
-                                valid_cells_list[j] = valid_cells_list[j + 1];
-                                valid_cells_list[j + 1] = temp;
+                                valid_cells_list.swap(j, j + 1);
                             }
                         }
                     }
 
                     info!("  Cells sorted by voltage (highest first):");
-                    for idx in 0..valid_count {
-                        let (cell_idx, voltage) = valid_cells_list[idx];
+                    for (idx, &(cell_idx, voltage)) in
+                        valid_cells_list.iter().enumerate().take(valid_count)
+                    {
                         info!("    {}. Cell {}: {} mV", idx + 1, cell_idx + 1, voltage);
                     }
 
@@ -121,8 +124,7 @@ async fn execute_smart_battery_balancing<'a>(
                     // Balance cells that are significantly higher than the minimum
                     let min_cell_voltage = valid_cells_list[valid_count - 1].1; // Lowest voltage (last after sorting)
 
-                    for idx in 0..valid_count {
-                        let (cell_idx, voltage) = valid_cells_list[idx];
+                    for &(cell_idx, voltage) in valid_cells_list.iter().take(valid_count) {
                         let voltage_diff = voltage - min_cell_voltage;
 
                         if voltage_diff >= MIN_BALANCE_DIFF_MV && balance_candidate_count < 2 {
@@ -157,8 +159,10 @@ async fn execute_smart_battery_balancing<'a>(
                 if balance_candidate_count > 0 {
                     let mut balancing_mask: u16 = 0;
 
-                    for i in 0..NUM_CELLS {
-                        if cells_need_balancing[i] {
+                    for (i, &needs_balancing) in
+                        cells_need_balancing.iter().enumerate().take(NUM_CELLS)
+                    {
+                        if needs_balancing {
                             balancing_mask |= 1 << i;
                             info!(
                                 "  Balancing Cell {}: {} mV",
@@ -230,8 +234,13 @@ async fn execute_smart_battery_balancing<'a>(
 /// * `bq76920_alerts_publisher`: Publisher for sending BQ76920 alert data.
 /// * `bq76920_measurements_publisher`: Publisher for sending BQ76920 measurement data.
 #[embassy_executor::task]
+#[allow(clippy::too_many_arguments)]
 pub async fn bq76920_task(
-    i2c_bus: I2cDevice<'static, CriticalSectionRawMutex, I2c<'static, peripherals::I2C0, embassy_rp::i2c::Async>>,
+    i2c_bus: I2cDevice<
+        'static,
+        CriticalSectionRawMutex,
+        I2c<'static, peripherals::I2C0, embassy_rp::i2c::Async>,
+    >,
     address: u8,
     sense_resistor_m_ohm: u32,
     ntc_params: Option<NtcParameters>,
@@ -244,7 +253,11 @@ pub async fn bq76920_task(
 
     // Initialize the BQ769x0 driver instance with CRC enabled and for 5 cells.
     let mut bq: Bq769x0<
-        I2cDevice<'static, CriticalSectionRawMutex, I2c<'static, peripherals::I2C0, embassy_rp::i2c::Async>>,
+        I2cDevice<
+            'static,
+            CriticalSectionRawMutex,
+            I2c<'static, peripherals::I2C0, embassy_rp::i2c::Async>,
+        >,
         bq769x0_async_rs::Enabled,
         5,
     > = Bq769x0::new(i2c_bus, address, sense_resistor_m_ohm, ntc_params);

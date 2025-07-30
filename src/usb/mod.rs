@@ -1,5 +1,5 @@
 //! USB通信模块
-//! 
+//!
 //! 提供WebUSB功能，用于与外部设备进行数据通信和状态监控
 
 pub mod endpoints;
@@ -9,16 +9,16 @@ use embassy_rp::{peripherals, usb};
 use embassy_usb::{
     Builder,
     class::web_usb::{self, Url, WebUsb},
-    driver::EndpointError,
 };
 use static_cell::StaticCell;
 
 use crate::data_types::{
-    AllMeasurements, Bq76920Alerts, Bq76920Measurements, Ina226Measurements, Sc8815Alerts, Sc8815Measurements,
+    AllMeasurements, Bq76920Alerts, Bq76920Measurements, Ina226Measurements, Sc8815Alerts,
+    Sc8815Measurements,
 };
 use crate::shared::{
-    Bq76920AlertsSubscriber, Bq76920MeasurementsSubscriber, Ina226MeasurementsSubscriber, MeasurementsPublisher,
-    Sc8815AlertsSubscriber, Sc8815MeasurementsSubscriber,
+    Bq76920AlertsSubscriber, Bq76920MeasurementsSubscriber, Ina226MeasurementsSubscriber,
+    MeasurementsPublisher, Sc8815AlertsSubscriber, Sc8815MeasurementsSubscriber,
 };
 
 use self::endpoints::UsbEndpoints;
@@ -86,6 +86,7 @@ pub async fn usb_task(
         let mut latest_bq76920_measurements: Option<Bq76920Measurements<5>> = None;
         let mut latest_sc8815_alerts: Option<Sc8815Alerts> = None;
         let mut latest_bq76920_alerts: Option<Bq76920Alerts> = None;
+        #[allow(unused_assignments)]
         let mut usb_command_to_process: Option<endpoints::UsbData> = None;
 
         loop {
@@ -144,7 +145,9 @@ pub async fn usb_task(
                         }
                     }
                 }
-                Either::Second(Either::Second(Either::Second(Either::First(sc8815_alerts_res)))) => {
+                Either::Second(Either::Second(Either::Second(Either::First(
+                    sc8815_alerts_res,
+                )))) => {
                     // SC8815告警数据
                     match sc8815_alerts_res {
                         embassy_sync::pubsub::WaitResult::Message(msg) => {
@@ -155,7 +158,9 @@ pub async fn usb_task(
                         }
                     }
                 }
-                Either::Second(Either::Second(Either::Second(Either::Second(Either::First(bq76920_alerts_res))))) => {
+                Either::Second(Either::Second(Either::Second(Either::Second(Either::First(
+                    bq76920_alerts_res,
+                ))))) => {
                     // BQ76920告警数据
                     match bq76920_alerts_res {
                         embassy_sync::pubsub::WaitResult::Message(msg) => {
@@ -166,7 +171,9 @@ pub async fn usb_task(
                         }
                     }
                 }
-                Either::Second(Either::Second(Either::Second(Either::Second(Either::Second(usb_cmd_res))))) => {
+                Either::Second(Either::Second(Either::Second(Either::Second(Either::Second(
+                    usb_cmd_res,
+                ))))) => {
                     // USB命令
                     match usb_cmd_res {
                         Ok(cmd) => {

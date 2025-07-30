@@ -1,5 +1,5 @@
 //! 数据类型定义模块
-//! 
+//!
 //! 包含UPS系统中各个设备的测量数据和告警信息的数据结构定义
 
 use bq769x0_async_rs::data_types::{Bq76920Measurements as Bq76920CoreMeasurements, SystemStatus};
@@ -20,26 +20,18 @@ impl<const N: usize> Default for Bq76920Measurements<N> {
 }
 
 /// BQ76920 安全告警信息
-#[derive(Debug, Copy, Clone, PartialEq)]
+#[derive(Debug, Copy, Clone, PartialEq, Default)]
 pub struct Bq76920Alerts {
     pub system_status: SystemStatus,
-}
-
-impl Default for Bq76920Alerts {
-    fn default() -> Self {
-        Self {
-            system_status: SystemStatus::default(),
-        }
-    }
 }
 
 /// INA226 测量数据 - 监控输入电源功率
 /// 用于监测输入电源的总功率消耗，包括充电模块和后级用电器的功耗
 #[derive(Debug, Copy, Clone, PartialEq, defmt::Format)]
 pub struct Ina226Measurements {
-    pub voltage: f32,  // 输入电压 (V)
-    pub current: f32,  // 输入电流 (A)
-    pub power: f32,    // 输入功率 (W)
+    pub voltage: f32, // 输入电压 (V)
+    pub current: f32, // 输入电流 (A)
+    pub power: f32,   // 输入功率 (W)
 }
 
 impl Default for Ina226Measurements {
@@ -53,37 +45,19 @@ impl Default for Ina226Measurements {
 }
 
 /// SC8815 测量数据
-#[derive(Debug, Copy, Clone, PartialEq, defmt::Format)]
+#[derive(Debug, Copy, Clone, PartialEq, defmt::Format, Default)]
 pub struct Sc8815Measurements {
     pub adc_measurements: Sc8815AdcMeasurements,
 }
 
-impl Default for Sc8815Measurements {
-    fn default() -> Self {
-        Self {
-            adc_measurements: Sc8815AdcMeasurements::default(),
-        }
-    }
-}
-
 /// SC8815 安全告警信息
-#[derive(Debug, Copy, Clone, PartialEq)]
+#[derive(Debug, Copy, Clone, PartialEq, Default)]
 pub struct Sc8815Alerts {
     pub device_status: SC8815Status,
 }
 
-impl Default for Sc8815Alerts {
-    fn default() -> Self {
-        Self {
-            device_status: SC8815Status::default(),
-        }
-    }
-}
-
-
-
 /// 聚合所有设备的测量数据
-#[derive(Debug, Copy, Clone, PartialEq)]
+#[derive(Debug, Copy, Clone, PartialEq, Default)]
 pub struct AllMeasurements<const N: usize> {
     pub ina226: Ina226Measurements,
     pub sc8815: Sc8815Measurements,
@@ -92,23 +66,11 @@ pub struct AllMeasurements<const N: usize> {
     pub bq76920_alerts: Bq76920Alerts,
 }
 
-impl<const N: usize> Default for AllMeasurements<N> {
-    fn default() -> Self {
-        Self {
-            ina226: Ina226Measurements::default(),
-            sc8815: Sc8815Measurements::default(),
-            bq76920: Bq76920Measurements::default(),
-            sc8815_alerts: Sc8815Alerts::default(),
-            bq76920_alerts: Bq76920Alerts::default(),
-        }
-    }
-}
-
 // Implementation block for AllMeasurements
 impl<const N: usize> AllMeasurements<N> {
     /// Converts the aggregated measurements into the flattened USB payload structure.
     /// Assumes that BQ76920 temperatures and current are already in physical units within `self.bq76920.core_measurements`.
-    pub fn to_usb_payload(&self) -> AllMeasurementsUsbPayload {
+    pub fn to_usb_payload(self) -> AllMeasurementsUsbPayload {
         // SC8815 ADC measurements (already in mV/mA in self.sc8815.adc_measurements)
         let sc8815_adc_vbus_mv = self.sc8815.adc_measurements.vbus_mv;
         let sc8815_adc_vbat_mv = self.sc8815.adc_measurements.vbat_mv;
@@ -182,9 +144,9 @@ impl<const N: usize> AllMeasurements<N> {
 #[derive(Debug, Copy, Clone, PartialEq, binrw::BinWrite, binrw::BinRead, defmt::Format)]
 pub struct AllMeasurementsUsbPayload {
     // Fields from INA226 measurements (输入电源监控)
-    pub ina226_voltage_mv: u32,  // 输入电压 (mV)
-    pub ina226_current_ma: i32,  // 输入电流 (mA)
-    pub ina226_power_mw: u32,    // 输入功率 (mW)
+    pub ina226_voltage_mv: u32, // 输入电压 (mV)
+    pub ina226_current_ma: i32, // 输入电流 (mA)
+    pub ina226_power_mw: u32,   // 输入功率 (mW)
 
     // Fields from SC8815 ADC measurements
     pub sc8815_adc_vbus_mv: u16, // VBUS voltage in mV

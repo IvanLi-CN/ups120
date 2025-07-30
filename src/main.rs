@@ -3,12 +3,12 @@
 
 extern crate alloc; // Required for global allocator
 
-mod data_types;
-mod shared;
-mod led_status_task;
 mod bq76920_task;
 mod charger_task;
+mod data_types;
 mod ina226_task;
+mod led_status_task;
+mod shared;
 mod usb;
 
 use defmt::*;
@@ -73,11 +73,9 @@ async fn main(spawner: Spawner) {
     // Create I2C instance
     // Note: If communication is unstable, add external 4.7kΩ pull-up resistors
     let i2c_instance = I2c::new_async(
-        p.I2C0,
-        p.PIN_1,  // SCL (GP1)
-        p.PIN_0,  // SDA (GP0)
-        Irqs,
-        i2c_config,
+        p.I2C0, p.PIN_1, // SCL (GP1)
+        p.PIN_0, // SDA (GP0)
+        Irqs, i2c_config,
     );
 
     // Initialize the static Mutex with the I2C instance
@@ -141,12 +139,14 @@ async fn main(spawner: Spawner) {
     let bq76920_alerts_subscriber = bq76920_alerts_channel.subscriber().unwrap();
 
     // Spawn LED status task
-    spawner.spawn(led_status_task::led_status_task(
-        led_pin,
-        sc8815_alerts_subscriber,
-        sc8815_measurements_subscriber,
-        bq76920_alerts_subscriber,
-    )).unwrap();
+    spawner
+        .spawn(led_status_task::led_status_task(
+            led_pin,
+            sc8815_alerts_subscriber,
+            sc8815_measurements_subscriber,
+            bq76920_alerts_subscriber,
+        ))
+        .unwrap();
 
     info!("LED status task spawned");
 
@@ -159,16 +159,18 @@ async fn main(spawner: Spawner) {
     let ntc_params: Option<NtcParameters> = None; // No NTC parameters for now
 
     // Spawn BQ76920 task
-    spawner.spawn(bq76920_task::bq76920_task(
-        bq76920_i2c_device,
-        bq76920_address,
-        sense_resistor_m_ohm,
-        ntc_params,
-        _discharge_control,
-        _charge_control,
-        bq76920_alerts_publisher,
-        bq76920_measurements_publisher,
-    )).unwrap();
+    spawner
+        .spawn(bq76920_task::bq76920_task(
+            bq76920_i2c_device,
+            bq76920_address,
+            sense_resistor_m_ohm,
+            ntc_params,
+            _discharge_control,
+            _charge_control,
+            bq76920_alerts_publisher,
+            bq76920_measurements_publisher,
+        ))
+        .unwrap();
 
     info!("BQ76920 task spawned");
 
@@ -179,17 +181,20 @@ async fn main(spawner: Spawner) {
     let sc8815_address = 0x74; // 7-bit I2C address
 
     // Create BQ76920 measurements subscriber for charger task
-    let bq76920_measurements_subscriber_for_charger = bq76920_measurements_channel.subscriber().unwrap();
+    let bq76920_measurements_subscriber_for_charger =
+        bq76920_measurements_channel.subscriber().unwrap();
 
     // Spawn SC8815 charger task
-    spawner.spawn(charger_task::charger_task(
-        sc8815_i2c_device,
-        sc8815_address,
-        pstop_pin,
-        sc8815_alerts_publisher,
-        sc8815_measurements_publisher,
-        bq76920_measurements_subscriber_for_charger,
-    )).unwrap();
+    spawner
+        .spawn(charger_task::charger_task(
+            sc8815_i2c_device,
+            sc8815_address,
+            pstop_pin,
+            sc8815_alerts_publisher,
+            sc8815_measurements_publisher,
+            bq76920_measurements_subscriber_for_charger,
+        ))
+        .unwrap();
 
     info!("SC8815 charger task spawned");
 
@@ -200,11 +205,13 @@ async fn main(spawner: Spawner) {
     let ina226_address = 0x40; // 7-bit I2C address (default for INA226)
 
     // Spawn INA226 task
-    spawner.spawn(ina226_task::ina226_task(
-        ina226_i2c_device,
-        ina226_address,
-        ina226_measurements_publisher,
-    )).unwrap();
+    spawner
+        .spawn(ina226_task::ina226_task(
+            ina226_i2c_device,
+            ina226_address,
+            ina226_measurements_publisher,
+        ))
+        .unwrap();
 
     info!("INA226 task spawned");
 
@@ -214,20 +221,23 @@ async fn main(spawner: Spawner) {
     // Create subscribers for USB task
     let ina226_measurements_subscriber_for_usb = ina226_measurements_channel.subscriber().unwrap();
     let sc8815_measurements_subscriber_for_usb = sc8815_measurements_channel.subscriber().unwrap();
-    let bq76920_measurements_subscriber_for_usb = bq76920_measurements_channel.subscriber().unwrap();
+    let bq76920_measurements_subscriber_for_usb =
+        bq76920_measurements_channel.subscriber().unwrap();
     let sc8815_alerts_subscriber_for_usb = sc8815_alerts_channel.subscriber().unwrap();
     let bq76920_alerts_subscriber_for_usb = bq76920_alerts_channel.subscriber().unwrap();
 
     // Spawn USB task
-    spawner.spawn(usb::usb_task(
-        usb_driver,
-        measurements_publisher,
-        ina226_measurements_subscriber_for_usb,
-        sc8815_measurements_subscriber_for_usb,
-        bq76920_measurements_subscriber_for_usb,
-        sc8815_alerts_subscriber_for_usb,
-        bq76920_alerts_subscriber_for_usb,
-    )).unwrap();
+    spawner
+        .spawn(usb::usb_task(
+            usb_driver,
+            measurements_publisher,
+            ina226_measurements_subscriber_for_usb,
+            sc8815_measurements_subscriber_for_usb,
+            bq76920_measurements_subscriber_for_usb,
+            sc8815_alerts_subscriber_for_usb,
+            bq76920_alerts_subscriber_for_usb,
+        ))
+        .unwrap();
 
     info!("USB task spawned");
 

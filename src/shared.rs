@@ -1,7 +1,8 @@
 //! 共享数据模块，包含消息队列和数据结构定义。
 
 use crate::data_types::{
-    AllMeasurements, Bq76920Alerts, Bq76920Measurements, Ina226Measurements, Sc8815Alerts, Sc8815Measurements,
+    AllMeasurements, Bq76920Alerts, Bq76920Measurements, Ina226Measurements, Sc8815Alerts,
+    Sc8815Measurements,
 };
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::pubsub::{PubSubChannel, Publisher, Subscriber};

@@ -1,5 +1,5 @@
 //! USB端点处理模块
-//! 
+//!
 //! 定义USB数据协议和端点通信逻辑
 
 use binrw::io::Cursor;
@@ -166,10 +166,14 @@ impl<'d, D: Driver<'d>> UsbEndpoints<'d, D> {
                 self.status_subscription_active = false;
                 let response = UsbData::StatusResponse(*current_payload);
                 self.send_response(response).await?;
-                defmt::info!("process_command: UnsubscribeStatus processed, subscription deactivated");
+                defmt::info!(
+                    "process_command: UnsubscribeStatus processed, subscription deactivated"
+                );
             }
             UsbData::StatusResponse(_) | UsbData::StatusPush(_) => {
-                defmt::warn!("process_command: Received unexpected response/push command, ignoring");
+                defmt::warn!(
+                    "process_command: Received unexpected response/push command, ignoring"
+                );
             }
         }
 
