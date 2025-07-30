@@ -22,14 +22,18 @@ use bq769x0_async_rs::registers::SysStatFlags;
 /// LED状态枚举
 #[derive(Debug, Clone, Copy, PartialEq, defmt::Format)]
 pub enum LedStatus {
-    /// 故障状态 - 4Hz闪烁
+    /// 系统初始化中 - 2Hz中速闪烁 (温和的初始化指示)
+    Initializing,
+    /// 故障状态 - 4Hz快速闪烁 (紧急故障警告)
     Fault,
-    /// 充电状态 - 0.5Hz闪烁
+    /// 充电状态 - 0.5Hz慢闪烁
     Charging,
     /// 放电状态 - 10100000节奏闪烁
     Discharging,
     /// 充满状态 - 111011110节奏闪烁
     ChargingComplete,
+    /// 系统正常运行 - 1Hz心跳闪烁
+    SystemActive,
     /// 正常状态 - LED关闭
     Normal,
 }
@@ -46,65 +50,100 @@ pub async fn led_status_task(
 
     // 配置LED为推挽输出，高使能（RP2040板载LED）
     let mut led = led_pin;
+
+    // 启动时测试LED - 快速闪烁3次确认LED工作
+    info!("Testing LED functionality...");
+    for _ in 0..3 {
+        led.set_high();
+        Timer::after(Duration::from_millis(100)).await;
+        led.set_low();
+        Timer::after(Duration::from_millis(100)).await;
+    }
+    info!("LED test completed");
+
     led.set_low(); // 初始状态LED关闭（低电平）
 
-    let mut current_status = LedStatus::Normal;
+    let mut current_status = LedStatus::Initializing; // 启动时强制进入初始化状态
     let mut pattern_index = 0;
     let mut last_update = embassy_time::Instant::now();
 
-    // 保存最新的SC8815数据
+    // 系统状态跟踪
+    let startup_time = embassy_time::Instant::now();
+    let initialization_timeout = Duration::from_secs(30); // 30秒初始化超时
+
+    // 设备状态跟踪
+    let mut sc8815_initialized = false;
+    let mut bq76920_initialized = false;
+    let mut sc8815_last_seen = None::<embassy_time::Instant>;
+    let mut bq76920_last_seen = None::<embassy_time::Instant>;
+
+    // 保存最新的数据用于状态评估
     let mut latest_sc8815_alerts: Option<Sc8815Alerts> = None;
     let mut latest_sc8815_measurements: Option<Sc8815Measurements> = None;
+    let mut latest_bq76920_alerts: Option<Bq76920Alerts> = None;
 
     loop {
-        // 检查是否有新的状态更新
-        let mut new_status = LedStatus::Normal;
+        let now = embassy_time::Instant::now();
 
-        // 检查SC8815告警状态（非阻塞）
-        if let Some(sc8815_result) = sc8815_alerts_subscriber.try_next_message() {
-            match sc8815_result {
-                embassy_sync::pubsub::WaitResult::Message(alerts) => {
-                    latest_sc8815_alerts = Some(alerts);
-                }
-                embassy_sync::pubsub::WaitResult::Lagged(_) => {
-                    // 忽略滞后消息，继续处理
-                }
+        // 检查SC8815数据更新（非阻塞）
+        if let Some(embassy_sync::pubsub::WaitResult::Message(alerts)) =
+            sc8815_alerts_subscriber.try_next_message()
+        {
+            latest_sc8815_alerts = Some(alerts);
+            sc8815_last_seen = Some(now);
+            if !sc8815_initialized {
+                sc8815_initialized = true;
+                info!("SC8815 device initialized and responding");
             }
         }
 
-        // 检查SC8815测量数据（非阻塞）
-        if let Some(sc8815_measurements_result) = sc8815_measurements_subscriber.try_next_message()
+        if let Some(embassy_sync::pubsub::WaitResult::Message(measurements)) =
+            sc8815_measurements_subscriber.try_next_message()
         {
-            match sc8815_measurements_result {
-                embassy_sync::pubsub::WaitResult::Message(measurements) => {
-                    latest_sc8815_measurements = Some(measurements);
-                }
-                embassy_sync::pubsub::WaitResult::Lagged(_) => {
-                    // 忽略滞后消息，继续处理
-                }
+            latest_sc8815_measurements = Some(measurements);
+            sc8815_last_seen = Some(now);
+            if !sc8815_initialized {
+                sc8815_initialized = true;
+                info!("SC8815 device initialized and responding");
             }
         }
 
-        // 如果有SC8815数据，评估状态
-        if let (Some(alerts), Some(measurements)) =
-            (&latest_sc8815_alerts, &latest_sc8815_measurements)
+        // 检查BQ76920数据更新（非阻塞）
+        if let Some(embassy_sync::pubsub::WaitResult::Message(alerts)) =
+            bq76920_alerts_subscriber.try_next_message()
         {
-            new_status = evaluate_sc8815_status(alerts, measurements);
+            latest_bq76920_alerts = Some(alerts);
+            bq76920_last_seen = Some(now);
+            if !bq76920_initialized {
+                bq76920_initialized = true;
+                info!("BQ76920 device initialized and responding");
+            }
         }
 
-        // 检查BQ76920告警状态（非阻塞）
-        if let Some(bq76920_result) = bq76920_alerts_subscriber.try_next_message() {
-            match bq76920_result {
-                embassy_sync::pubsub::WaitResult::Message(alerts) => {
-                    let bq_status = evaluate_bq76920_status(&alerts);
-                    // BQ76920故障优先级更高
-                    if matches!(bq_status, LedStatus::Fault) {
-                        new_status = bq_status;
-                    }
-                }
-                embassy_sync::pubsub::WaitResult::Lagged(_) => {
-                    // 忽略滞后消息，继续处理
-                }
+        // 确定系统状态
+        let new_status = determine_system_status(
+            now,
+            startup_time,
+            initialization_timeout,
+            sc8815_initialized,
+            bq76920_initialized,
+            sc8815_last_seen,
+            bq76920_last_seen,
+            &latest_sc8815_alerts,
+            &latest_sc8815_measurements,
+            &latest_bq76920_alerts,
+        );
+
+        // 每5秒输出一次状态调试信息
+        static mut LAST_DEBUG_TIME: u32 = 0;
+        let current_time = now.as_millis() as u32;
+        unsafe {
+            if current_time - LAST_DEBUG_TIME > 5000 {
+                info!(
+                    "LED Debug - Status: {:?}, SC8815_init: {}, BQ76920_init: {}",
+                    new_status, sc8815_initialized, bq76920_initialized
+                );
+                LAST_DEBUG_TIME = current_time;
             }
         }
 
@@ -119,8 +158,15 @@ pub async fn led_status_task(
         // 根据当前状态执行LED控制
         let now = embassy_time::Instant::now();
         match current_status {
+            LedStatus::Initializing => {
+                // 2Hz闪烁 (500ms周期，250ms亮，250ms灭) - 系统初始化中
+                if now.duration_since(last_update) >= Duration::from_millis(250) {
+                    led.toggle();
+                    last_update = now;
+                }
+            }
             LedStatus::Fault => {
-                // 4Hz闪烁 (250ms周期，125ms亮，125ms灭)
+                // 4Hz快闪 (250ms周期，125ms亮，125ms灭) - 故障状态
                 if now.duration_since(last_update) >= Duration::from_millis(125) {
                     led.toggle();
                     last_update = now;
@@ -131,6 +177,18 @@ pub async fn led_status_task(
                 if now.duration_since(last_update) >= Duration::from_millis(1000) {
                     led.toggle();
                     last_update = now;
+                }
+            }
+            LedStatus::SystemActive => {
+                // 1Hz心跳闪烁 (1000ms周期，100ms亮，900ms灭)
+                let cycle_time = now.duration_since(last_update);
+                if cycle_time >= Duration::from_millis(1000) {
+                    // 重新开始周期
+                    led.set_high();
+                    last_update = now;
+                } else if cycle_time >= Duration::from_millis(100) {
+                    // 100ms后关闭LED
+                    led.set_low();
                 }
             }
             LedStatus::Discharging => {
@@ -216,6 +274,75 @@ fn evaluate_sc8815_status(alerts: &Sc8815Alerts, measurements: &Sc8815Measuremen
     // TODO: 添加放电状态检测逻辑
     // 目前放电功能暂未实现，所以暂时不检测
 
+    LedStatus::Normal
+}
+
+/// 确定系统整体状态
+#[allow(clippy::too_many_arguments)]
+fn determine_system_status(
+    now: embassy_time::Instant,
+    startup_time: embassy_time::Instant,
+    initialization_timeout: Duration,
+    sc8815_initialized: bool,
+    bq76920_initialized: bool,
+    sc8815_last_seen: Option<embassy_time::Instant>,
+    bq76920_last_seen: Option<embassy_time::Instant>,
+    sc8815_alerts: &Option<Sc8815Alerts>,
+    sc8815_measurements: &Option<Sc8815Measurements>,
+    bq76920_alerts: &Option<Bq76920Alerts>,
+) -> LedStatus {
+    let system_age = now.duration_since(startup_time);
+
+    // 1. 检查是否在初始化阶段
+    if system_age < initialization_timeout {
+        if !sc8815_initialized && !bq76920_initialized {
+            return LedStatus::Initializing;
+        }
+    } else {
+        // 初始化超时，检查是否有设备未响应
+        if !sc8815_initialized || !bq76920_initialized {
+            return LedStatus::Fault;
+        }
+    }
+
+    // 2. 检查设备通信超时（5秒无数据视为通信故障）
+    let comm_timeout = Duration::from_secs(5);
+    if let Some(last_seen) = sc8815_last_seen {
+        if now.duration_since(last_seen) > comm_timeout {
+            return LedStatus::Fault;
+        }
+    }
+    if let Some(last_seen) = bq76920_last_seen {
+        if now.duration_since(last_seen) > comm_timeout {
+            return LedStatus::Fault;
+        }
+    }
+
+    // 3. 检查BQ76920故障状态（最高优先级）
+    if let Some(alerts) = bq76920_alerts {
+        let fault_status = evaluate_bq76920_status(alerts);
+        if matches!(fault_status, LedStatus::Fault) {
+            return LedStatus::Fault;
+        }
+    }
+
+    // 4. 检查SC8815状态并确定充电状态
+    if let (Some(alerts), Some(measurements)) = (sc8815_alerts, sc8815_measurements) {
+        let charging_status = evaluate_sc8815_status(alerts, measurements);
+        // 如果不是充电状态，且系统正常运行，显示系统活跃状态
+        if matches!(charging_status, LedStatus::Normal) && sc8815_initialized && bq76920_initialized
+        {
+            return LedStatus::SystemActive;
+        }
+        return charging_status;
+    }
+
+    // 5. 如果所有设备都已初始化但没有完整数据，显示系统活跃状态
+    if sc8815_initialized && bq76920_initialized {
+        return LedStatus::SystemActive;
+    }
+
+    // 6. 默认状态 - 只有在设备未初始化时才显示Normal
     LedStatus::Normal
 }
 
