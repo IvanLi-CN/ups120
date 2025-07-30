@@ -1,19 +1,12 @@
 //! 共享数据模块，包含消息队列和数据结构定义。
 
 use crate::data_types::{
-    AllMeasurements, Bq76920Alerts, Bq76920Measurements, Sc8815Alerts, Sc8815Measurements,
+    AllMeasurements, Bq76920Alerts, Bq76920Measurements, Ina226Measurements, Sc8815Alerts,
+    Sc8815Measurements,
 };
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::pubsub::{PubSubChannel, Publisher, Subscriber};
 use static_cell::StaticCell;
-
-// Removed BQ25730 imports as we're using SC8815 now
-
-// LocalNtcParametersWrapper and its impls are removed as Bq76920RuntimeConfig is removed.
-
-// Removed BQ25730RuntimeConfig as we're using SC8815 now
-
-// Bq76920RuntimeConfig and its impl Default are removed.
 
 // 定义消息队列 (PubSub)
 // 测量数据 PubSub
@@ -57,7 +50,7 @@ static BQ76920_ALERTS_PUBSUB: StaticCell<
 
 // BQ76920 测量数据 PubSub
 const BQ76920_MEASUREMENTS_PUBSUB_DEPTH: usize = 4; // 消息队列深度
-const BQ76920_MEASUREMENTS_PUBSUB_READERS: usize = 2; // 消费者数量 (usb_task, bq25730_task)
+const BQ76920_MEASUREMENTS_PUBSUB_READERS: usize = 2; // 消费者数量 (usb_task, charger_task)
 static BQ76920_MEASUREMENTS_PUBSUB: StaticCell<
     PubSubChannel<
         CriticalSectionRawMutex,
@@ -81,8 +74,18 @@ static SC8815_MEASUREMENTS_PUBSUB: StaticCell<
     >,
 > = StaticCell::new();
 
-// BQ25730_RUNTIME_CONFIG_PUBSUB related consts and StaticCell were removed.
-// BQ76920_RUNTIME_CONFIG_PUBSUB related consts and StaticCell were removed.
+// INA226 测量数据 PubSub
+const INA226_MEASUREMENTS_PUBSUB_DEPTH: usize = 4; // 消息队列深度
+const INA226_MEASUREMENTS_PUBSUB_READERS: usize = 1; // 消费者数量 (usb_task)
+static INA226_MEASUREMENTS_PUBSUB: StaticCell<
+    PubSubChannel<
+        CriticalSectionRawMutex,
+        Ina226Measurements,
+        INA226_MEASUREMENTS_PUBSUB_DEPTH,
+        INA226_MEASUREMENTS_PUBSUB_READERS,
+        1,
+    >,
+> = StaticCell::new();
 
 pub type MeasurementsPublisher<'a, const N: usize> = Publisher<
     'a,
@@ -145,28 +148,39 @@ pub type Sc8815MeasurementsSubscriber<'a> = Subscriber<
 >;
 
 pub type Bq76920MeasurementsPublisher<'a, const N: usize> = Publisher<
-    // Added generic parameter
     'a,
     CriticalSectionRawMutex,
-    Bq76920Measurements<N>, // Added generic parameter
+    Bq76920Measurements<N>,
     BQ76920_MEASUREMENTS_PUBSUB_DEPTH,
     BQ76920_MEASUREMENTS_PUBSUB_READERS,
     1,
 >;
 pub type Bq76920MeasurementsSubscriber<'a, const N: usize> = Subscriber<
-    // Added generic parameter
     'a,
     CriticalSectionRawMutex,
-    Bq76920Measurements<N>, // Added generic parameter
+    Bq76920Measurements<N>,
     BQ76920_MEASUREMENTS_PUBSUB_DEPTH,
     BQ76920_MEASUREMENTS_PUBSUB_READERS,
     1,
 >;
 
-// Removed INA226 types as we're replacing with SC8815
-
-// Removed Bq25730RuntimeConfigPublisher and Bq25730RuntimeConfigSubscriber type aliases
-// Removed Bq76920RuntimeConfigPublisher and Bq76920RuntimeConfigSubscriber type aliases
+// INA226 类型别名
+pub type Ina226MeasurementsPublisher<'a> = Publisher<
+    'a,
+    CriticalSectionRawMutex,
+    Ina226Measurements,
+    INA226_MEASUREMENTS_PUBSUB_DEPTH,
+    INA226_MEASUREMENTS_PUBSUB_READERS,
+    1,
+>;
+pub type Ina226MeasurementsSubscriber<'a> = Subscriber<
+    'a,
+    CriticalSectionRawMutex,
+    Ina226Measurements,
+    INA226_MEASUREMENTS_PUBSUB_DEPTH,
+    INA226_MEASUREMENTS_PUBSUB_READERS,
+    1,
+>;
 
 // Channel Type Aliases
 pub type MeasurementsChannelType<const N: usize> = PubSubChannel<
@@ -204,9 +218,13 @@ pub type Bq76920MeasurementsChannelType<const N: usize> = PubSubChannel<
     BQ76920_MEASUREMENTS_PUBSUB_READERS,
     1,
 >;
-// Removed INA226 channel type as we're replacing with SC8815
-// Removed Bq25730RuntimeConfigChannelType type alias.
-// Bq76920RuntimeConfigChannelType type alias was removed.
+pub type Ina226MeasurementsChannelType = PubSubChannel<
+    CriticalSectionRawMutex,
+    Ina226Measurements,
+    INA226_MEASUREMENTS_PUBSUB_DEPTH,
+    INA226_MEASUREMENTS_PUBSUB_READERS,
+    1,
+>;
 
 // Define a type alias for the complex return type, now named PubSubSetup
 // This tuple returns Publishers and references to their corresponding Channels
@@ -223,6 +241,8 @@ pub type PubSubSetup<'a, const N: usize> = (
     &'a Sc8815MeasurementsChannelType,
     Bq76920MeasurementsPublisher<'a, N>,
     &'a Bq76920MeasurementsChannelType<N>,
+    Ina226MeasurementsPublisher<'a>,
+    &'a Ina226MeasurementsChannelType,
 );
 
 // 初始化 PubSubChannel 实例的函数
@@ -237,6 +257,8 @@ pub fn init_pubsubs() -> PubSubSetup<'static, 5> {
         BQ76920_MEASUREMENTS_PUBSUB.init(PubSubChannel::new());
     let sc8815_measurements_pubsub: &'static Sc8815MeasurementsChannelType =
         SC8815_MEASUREMENTS_PUBSUB.init(PubSubChannel::new());
+    let ina226_measurements_pubsub: &'static Ina226MeasurementsChannelType =
+        INA226_MEASUREMENTS_PUBSUB.init(PubSubChannel::new());
 
     (
         measurements_pubsub.publisher().unwrap(),
@@ -249,5 +271,7 @@ pub fn init_pubsubs() -> PubSubSetup<'static, 5> {
         sc8815_measurements_pubsub,
         bq76920_measurements_pubsub.publisher().unwrap(),
         bq76920_measurements_pubsub,
+        ina226_measurements_pubsub.publisher().unwrap(),
+        ina226_measurements_pubsub,
     )
 }

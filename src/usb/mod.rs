@@ -1,57 +1,59 @@
+//! USB通信模块
+//!
+//! 提供WebUSB功能，用于与外部设备进行数据通信和状态监控
+
+pub mod endpoints;
+
 use embassy_futures::select::{Either, select};
-use embassy_stm32::uid;
-use embassy_stm32::{peripherals, usb};
+use embassy_rp::{peripherals, usb};
 use embassy_usb::{
     Builder,
     class::web_usb::{self, Url, WebUsb},
-    driver::EndpointError,
 };
 use static_cell::StaticCell;
 
 use crate::data_types::{
-    AllMeasurements, Bq76920Alerts, Bq76920Measurements, Sc8815Alerts, Sc8815Measurements,
+    AllMeasurements, Bq76920Alerts, Bq76920Measurements, Ina226Measurements, Sc8815Alerts,
+    Sc8815Measurements,
 };
 use crate::shared::{
-    Bq76920AlertsSubscriber, Bq76920MeasurementsSubscriber, MeasurementsPublisher,
-    Sc8815AlertsSubscriber, Sc8815MeasurementsSubscriber,
+    Bq76920AlertsSubscriber, Bq76920MeasurementsSubscriber, Ina226MeasurementsSubscriber,
+    MeasurementsPublisher, Sc8815AlertsSubscriber, Sc8815MeasurementsSubscriber,
 };
 
-pub mod endpoints;
+use self::endpoints::UsbEndpoints;
 
-use crate::usb::endpoints::UsbEndpoints;
-
-// Define statics for USB builder buffers
+// Static cells for USB descriptors and state
 static CONFIG_DESCRIPTOR_CELL: StaticCell<[u8; 256]> = StaticCell::new();
 static BOS_DESCRIPTOR_CELL: StaticCell<[u8; 256]> = StaticCell::new();
 static MSOS_DESCRIPTOR_CELL: StaticCell<[u8; 256]> = StaticCell::new();
 static CONTROL_BUF_CELL: StaticCell<[u8; 64]> = StaticCell::new();
-
-// Define StaticCells for WebUSB state and config
 static WEB_USB_STATE_CELL: StaticCell<web_usb::State> = StaticCell::new();
 static WEBUSB_CONFIG_CELL: StaticCell<web_usb::Config> = StaticCell::new();
 
+/// USB任务
 #[embassy_executor::task]
 pub async fn usb_task(
     driver: usb::Driver<'static, peripherals::USB>,
-    measurements_publisher: MeasurementsPublisher<'static, 5>, // usb_task now publishes AllMeasurements
-    mut sc8815_measurements_subscriber: Sc8815MeasurementsSubscriber<'static>, // SC8815 subscriber
-    mut bq76920_measurements_subscriber: Bq76920MeasurementsSubscriber<'static, 5>, // BQ76920 subscriber - Added generic parameter
-    mut sc8815_alerts_subscriber: Sc8815AlertsSubscriber<'static>, // SC8815 alerts subscriber
-    mut bq76920_alerts_subscriber: Bq76920AlertsSubscriber<'static>, // BQ76920 alerts subscriber
+    measurements_publisher: MeasurementsPublisher<'static, 5>,
+    mut ina226_measurements_subscriber: Ina226MeasurementsSubscriber<'static>,
+    mut sc8815_measurements_subscriber: Sc8815MeasurementsSubscriber<'static>,
+    mut bq76920_measurements_subscriber: Bq76920MeasurementsSubscriber<'static, 5>,
+    mut sc8815_alerts_subscriber: Sc8815AlertsSubscriber<'static>,
+    mut bq76920_alerts_subscriber: Bq76920AlertsSubscriber<'static>,
 ) {
-    let vid: u16 =
-        u16::from_str_radix(env!("USB_VID").trim_start_matches("0x"), 16).expect("Invalid USB_VID");
-    let pid: u16 =
-        u16::from_str_radix(env!("USB_PID").trim_start_matches("0x"), 16).expect("Invalid USB_PID");
+    // USB配置
+    let vid: u16 = 0x1209; // Generic PID.codes VID
+    let pid: u16 = 0x0001; // Test PID
 
     let mut usb_config = embassy_usb::Config::new(vid, pid);
     usb_config.manufacturer = Some("Ivan");
     usb_config.product = Some("UPS120");
-    usb_config.serial_number = Some(uid::uid_hex());
+    usb_config.serial_number = Some("123456789");
     usb_config.max_power = 100;
     usb_config.max_packet_size_0 = 64;
 
-    // Initialize descriptor and control buffers using StaticCell
+    // 初始化描述符缓冲区
     let config_descriptor: &'static mut [u8; 256] = CONFIG_DESCRIPTOR_CELL.init([0; 256]);
     let bos_descriptor: &'static mut [u8; 256] = BOS_DESCRIPTOR_CELL.init([0; 256]);
     let msos_descriptor: &'static mut [u8; 256] = MSOS_DESCRIPTOR_CELL.init([0; 256]);
@@ -61,7 +63,7 @@ pub async fn usb_task(
     let webusb_config = WEBUSB_CONFIG_CELL.init(web_usb::Config {
         max_packet_size: 64,
         vendor_code: 1,
-        landing_url: Some(Url::new(env!("WEBUSB_LANDING_URL"))),
+        landing_url: Some(Url::new("https://ups120.example.com")),
     });
 
     let mut builder = Builder::new(
@@ -77,37 +79,52 @@ pub async fn usb_task(
 
     let mut usb_endpoints = UsbEndpoints::new(&mut builder);
 
+    // 数据聚合和处理逻辑
     let main_usb_processing_fut = async {
-        // Variables to hold the latest measurements from each task
+        let mut latest_ina226_measurements: Option<Ina226Measurements> = None;
         let mut latest_sc8815_measurements: Option<Sc8815Measurements> = None;
         let mut latest_bq76920_measurements: Option<Bq76920Measurements<5>> = None;
         let mut latest_sc8815_alerts: Option<Sc8815Alerts> = None;
         let mut latest_bq76920_alerts: Option<Bq76920Alerts> = None;
         #[allow(unused_assignments)]
-        let mut usb_command_to_process: Option<endpoints::UsbData> = None; // Variable to store command from select
+        let mut usb_command_to_process: Option<endpoints::UsbData> = None;
 
         loop {
             usb_endpoints.wait_connected().await;
-            usb_command_to_process = None; // Clear previous command at the start of each loop iteration
+            usb_command_to_process = None;
 
-            // Use select to prioritize handling USB commands and new data
+            // 使用select来处理多个数据源
             match select(
-                sc8815_measurements_subscriber.next_message(),
+                ina226_measurements_subscriber.next_message(),
                 select(
-                    bq76920_measurements_subscriber.next_message(),
+                    sc8815_measurements_subscriber.next_message(),
                     select(
-                        sc8815_alerts_subscriber.next_message(),
+                        bq76920_measurements_subscriber.next_message(),
                         select(
-                            bq76920_alerts_subscriber.next_message(),
-                            usb_endpoints.parse_command(),
+                            sc8815_alerts_subscriber.next_message(),
+                            select(
+                                bq76920_alerts_subscriber.next_message(),
+                                usb_endpoints.parse_command(),
+                            ),
                         ),
                     ),
                 ),
             )
             .await
             {
-                Either::First(sc8815_meas_res) => {
-                    // SC8815 Measurements
+                Either::First(ina226_meas_res) => {
+                    // INA226测量数据
+                    match ina226_meas_res {
+                        embassy_sync::pubsub::WaitResult::Message(msg) => {
+                            latest_ina226_measurements = Some(msg)
+                        }
+                        embassy_sync::pubsub::WaitResult::Lagged(c) => {
+                            defmt::warn!("USB INA226 Meas sub: lagged {} messages", c)
+                        }
+                    }
+                }
+                Either::Second(Either::First(sc8815_meas_res)) => {
+                    // SC8815测量数据
                     match sc8815_meas_res {
                         embassy_sync::pubsub::WaitResult::Message(msg) => {
                             latest_sc8815_measurements = Some(msg)
@@ -117,152 +134,99 @@ pub async fn usb_task(
                         }
                     }
                 }
-                Either::Second(either_b_c_d_e) => {
-                    match either_b_c_d_e {
-                        Either::First(bq76920_meas_res) => {
-                            // BQ76920 Measurements
-                            match bq76920_meas_res {
-                                embassy_sync::pubsub::WaitResult::Message(msg) => {
-                                    latest_bq76920_measurements = Some(msg)
-                                }
-                                embassy_sync::pubsub::WaitResult::Lagged(c) => {
-                                    defmt::warn!("USB BQ76920 Meas sub: lagged {} messages", c)
-                                }
-                            }
+                Either::Second(Either::Second(Either::First(bq76920_meas_res))) => {
+                    // BQ76920测量数据
+                    match bq76920_meas_res {
+                        embassy_sync::pubsub::WaitResult::Message(msg) => {
+                            latest_bq76920_measurements = Some(msg)
                         }
-                        Either::Second(either_c_d_e) => {
-                            match either_c_d_e {
-                                Either::First(sc8815_alert_res) => {
-                                    // SC8815 Alerts
-                                    match sc8815_alert_res {
-                                        embassy_sync::pubsub::WaitResult::Message(msg) => {
-                                            latest_sc8815_alerts = Some(msg)
-                                        }
-                                        embassy_sync::pubsub::WaitResult::Lagged(c) => {
-                                            defmt::warn!(
-                                                "USB SC8815 Alerts sub: lagged {} messages",
-                                                c
-                                            )
-                                        }
-                                    }
-                                }
-                                Either::Second(either_d_e) => {
-                                    match either_d_e {
-                                        Either::First(bq76920_alert_res) => {
-                                            // BQ76920 Alerts
-                                            match bq76920_alert_res {
-                                                embassy_sync::pubsub::WaitResult::Message(msg) => {
-                                                    latest_bq76920_alerts = Some(msg)
-                                                }
-                                                embassy_sync::pubsub::WaitResult::Lagged(c) => {
-                                                    defmt::warn!(
-                                                        "USB BQ76920 Alerts sub: lagged {} messages",
-                                                        c
-                                                    )
-                                                }
-                                            }
-                                        }
-                                        Either::Second(cmd_result) => {
-                                            // USB Command
-                                            match cmd_result {
-                                                Ok(cmd) => {
-                                                    defmt::info!(
-                                                        "usb_task: USB command received by select, will process after aggregation: {:?}",
-                                                        cmd
-                                                    );
-                                                    usb_command_to_process = Some(cmd); // Store command for later processing
-                                                }
-                                                Err(e) => {
-                                                    defmt::error!(
-                                                        "usb_task: USB command endpoint error: {:?}",
-                                                        e
-                                                    );
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
+                        embassy_sync::pubsub::WaitResult::Lagged(c) => {
+                            defmt::warn!("USB BQ76920 Meas sub: lagged {} messages", c)
+                        }
+                    }
+                }
+                Either::Second(Either::Second(Either::Second(Either::First(
+                    sc8815_alerts_res,
+                )))) => {
+                    // SC8815告警数据
+                    match sc8815_alerts_res {
+                        embassy_sync::pubsub::WaitResult::Message(msg) => {
+                            latest_sc8815_alerts = Some(msg)
+                        }
+                        embassy_sync::pubsub::WaitResult::Lagged(c) => {
+                            defmt::warn!("USB SC8815 Alerts sub: lagged {} messages", c)
+                        }
+                    }
+                }
+                Either::Second(Either::Second(Either::Second(Either::Second(Either::First(
+                    bq76920_alerts_res,
+                ))))) => {
+                    // BQ76920告警数据
+                    match bq76920_alerts_res {
+                        embassy_sync::pubsub::WaitResult::Message(msg) => {
+                            latest_bq76920_alerts = Some(msg)
+                        }
+                        embassy_sync::pubsub::WaitResult::Lagged(c) => {
+                            defmt::warn!("USB BQ76920 Alerts sub: lagged {} messages", c)
+                        }
+                    }
+                }
+                Either::Second(Either::Second(Either::Second(Either::Second(Either::Second(
+                    usb_cmd_res,
+                ))))) => {
+                    // USB命令
+                    match usb_cmd_res {
+                        Ok(cmd) => {
+                            defmt::info!("USB task: Received USB command: {:?}", cmd);
+                            usb_command_to_process = Some(cmd);
+                        }
+                        Err(e) => {
+                            defmt::error!("USB task: Error parsing USB command: {:?}", e);
                         }
                     }
                 }
             }
 
-            // Unified aggregation of all latest data (measurements and alerts)
+            // 聚合所有数据
             let aggregated_data = AllMeasurements {
+                ina226: latest_ina226_measurements.unwrap_or_default(),
                 sc8815: latest_sc8815_measurements.unwrap_or_default(),
                 bq76920: latest_bq76920_measurements.unwrap_or_default(),
                 sc8815_alerts: latest_sc8815_alerts.unwrap_or_default(),
                 bq76920_alerts: latest_bq76920_alerts.unwrap_or_default(),
             };
-            // Process USB command if one was stored from select!
+
+            // 处理USB命令
             if let Some(cmd) = usb_command_to_process.take() {
-                defmt::info!("usb_task: Processing stored USB command: {:?}", cmd);
+                defmt::info!("USB task: Processing stored USB command: {:?}", cmd);
                 let command_payload = aggregated_data.to_usb_payload();
                 if let Err(e) = usb_endpoints.process_command(cmd, &command_payload).await {
-                    defmt::error!("usb_task: Error processing USB command: {:?}", e);
+                    defmt::error!("USB task: Error processing USB command: {:?}", e);
                 }
-                defmt::debug!(
-                    "usb_task: process_command finished. Current status_subscription_active: {}",
-                    usb_endpoints.status_subscription_active
-                );
             }
 
-            defmt::trace!(
-                "usb_task: Aggregated data for publishing/sending: {:?}",
-                aggregated_data
-            );
-
-            // Publish the aggregated data
+            // 发布聚合数据
             measurements_publisher.publish_immediate(aggregated_data);
-            defmt::debug!("usb_task: Published aggregated data.");
 
-            // Send the aggregated data over USB if subscription is active
-            defmt::debug!(
-                "usb_task: Checking if status subscription is active for sending update. status_subscription_active: {}",
-                usb_endpoints.status_subscription_active
-            );
+            // 如果订阅活跃，发送状态更新
             if usb_endpoints.status_subscription_active {
-                defmt::info!(
-                    "usb_task: Subscription active, attempting to send status update via USB."
-                );
-                // Convert to AllMeasurementsUsbPayload before sending
+                defmt::info!("USB task: Subscription active, sending status update via USB.");
                 let status_update_payload = aggregated_data.to_usb_payload();
                 if let Err(e) = usb_endpoints
-                    .send_status_update(status_update_payload) // Pass the converted payload
+                    .send_status_update(status_update_payload)
                     .await
                 {
-                    defmt::error!("usb_task: Failed to send status update over USB: {:?}", e);
+                    defmt::error!("USB task: Failed to send status update over USB: {:?}", e);
                 } else {
-                    defmt::debug!("usb_task: Successfully sent status update via USB.");
+                    defmt::debug!("USB task: Successfully sent status update via USB.");
                 }
-            } else {
-                defmt::debug!(
-                    "usb_task: Subscription not active, not sending status update via USB."
-                );
             }
-
-            // Note: The result of parse_command() is now handled within the select_biased! arm.
-            // The previous comment about the result not being directly accessible here is no longer fully accurate.
-            defmt::trace!("usb_task: End of loop iteration.");
         }
     };
 
     let mut usb = builder.build();
     let usb_fut = usb.run();
 
-    // Join the USB driver future with the main processing future
+    // 并发运行USB驱动和主处理逻辑
     embassy_futures::join::join(usb_fut, main_usb_processing_fut).await;
-}
-
-// The convert_to_payload function has been moved to an impl block for AllMeasurements in data_types.rs
-struct Disconnected {}
-
-impl From<EndpointError> for Disconnected {
-    fn from(val: EndpointError) -> Self {
-        match val {
-            EndpointError::BufferOverflow => panic!("Buffer overflow"),
-            EndpointError::Disabled => Disconnected {},
-        }
-    }
 }

@@ -4,7 +4,7 @@ use defmt::*;
 use embassy_time::{Duration, Timer};
 
 use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
-use embassy_stm32::{gpio::Input, i2c::I2c};
+use embassy_rp::{gpio::Input, i2c::I2c, peripherals};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 
 use bq769x0_async_rs::ProtectionConfig;
@@ -18,7 +18,11 @@ use crate::shared::{Bq76920AlertsPublisher, Bq76920MeasurementsPublisher};
 // Smart cell balancing logic based on charging status and voltage thresholds
 async fn execute_smart_battery_balancing<'a>(
     bq: &'a mut Bq769x0<
-        I2cDevice<'static, CriticalSectionRawMutex, I2c<'static, embassy_stm32::mode::Async>>,
+        I2cDevice<
+            'static,
+            CriticalSectionRawMutex,
+            I2c<'static, peripherals::I2C0, embassy_rp::i2c::Async>,
+        >,
         bq769x0_async_rs::Enabled,
         5,
     >,
@@ -104,16 +108,15 @@ async fn execute_smart_battery_balancing<'a>(
                     for i in 0..valid_count {
                         for j in 0..valid_count - 1 - i {
                             if valid_cells_list[j].1 < valid_cells_list[j + 1].1 {
-                                let temp = valid_cells_list[j];
-                                valid_cells_list[j] = valid_cells_list[j + 1];
-                                valid_cells_list[j + 1] = temp;
+                                valid_cells_list.swap(j, j + 1);
                             }
                         }
                     }
 
                     info!("  Cells sorted by voltage (highest first):");
-                    for idx in 0..valid_count {
-                        let (cell_idx, voltage) = valid_cells_list[idx];
+                    for (idx, &(cell_idx, voltage)) in
+                        valid_cells_list.iter().enumerate().take(valid_count)
+                    {
                         info!("    {}. Cell {}: {} mV", idx + 1, cell_idx + 1, voltage);
                     }
 
@@ -121,8 +124,7 @@ async fn execute_smart_battery_balancing<'a>(
                     // Balance cells that are significantly higher than the minimum
                     let min_cell_voltage = valid_cells_list[valid_count - 1].1; // Lowest voltage (last after sorting)
 
-                    for idx in 0..valid_count {
-                        let (cell_idx, voltage) = valid_cells_list[idx];
+                    for &(cell_idx, voltage) in valid_cells_list.iter().take(valid_count) {
                         let voltage_diff = voltage - min_cell_voltage;
 
                         if voltage_diff >= MIN_BALANCE_DIFF_MV && balance_candidate_count < 2 {
@@ -157,8 +159,10 @@ async fn execute_smart_battery_balancing<'a>(
                 if balance_candidate_count > 0 {
                     let mut balancing_mask: u16 = 0;
 
-                    for i in 0..NUM_CELLS {
-                        if cells_need_balancing[i] {
+                    for (i, &needs_balancing) in
+                        cells_need_balancing.iter().enumerate().take(NUM_CELLS)
+                    {
+                        if needs_balancing {
                             balancing_mask |= 1 << i;
                             info!(
                                 "  Balancing Cell {}: {} mV",
@@ -172,16 +176,16 @@ async fn execute_smart_battery_balancing<'a>(
                         "Enabling cell balancing: mask = 0b{:05b} ({} cells)",
                         balancing_mask, balance_candidate_count
                     );
-                    if let Err(e) = bq.set_cell_balancing(balancing_mask).await {
-                        error!("Failed to enable cell balancing: {:?}", e);
+                    if let Err(_e) = bq.set_cell_balancing(balancing_mask).await {
+                        error!("Failed to enable cell balancing");
                     } else {
                         info!("Cell balancing enabled successfully.");
                     }
                 } else {
                     info!("No cells need balancing - disabling balancing");
                     // Disable cell balancing
-                    if let Err(e) = bq.set_cell_balancing(0).await {
-                        error!("Failed to disable cell balancing: {:?}", e);
+                    if let Err(_e) = bq.set_cell_balancing(0).await {
+                        error!("Failed to disable cell balancing");
                     } else {
                         info!("Cell balancing disabled - no imbalance.");
                     }
@@ -197,67 +201,63 @@ async fn execute_smart_battery_balancing<'a>(
                 );
 
                 // Disable cell balancing
-                if let Err(e) = bq.set_cell_balancing(0).await {
-                    error!("Failed to disable cell balancing: {:?}", e);
+                if let Err(_e) = bq.set_cell_balancing(0).await {
+                    error!("Failed to disable cell balancing");
                 } else {
                     info!("Cell balancing disabled - conditions not met.");
                 }
             }
         } else {
-            error!(
-                "Insufficient valid cell voltage readings for balancing (need at least 2 cells)"
-            );
-            // Disable balancing if insufficient data
-            if let Err(e) = bq.set_cell_balancing(0).await {
-                error!("Failed to disable cell balancing: {:?}", e);
-            }
+            info!("Insufficient valid cell readings for balancing");
         }
+    } else {
+        info!("No measurements available for balancing");
     }
 }
 
-/// Embassy task for managing the BQ76920 battery monitor IC.
+/// BQ76920 battery management task for RP2040
 ///
-/// This task is responsible for:
-/// 1. Initializing the BQ76920 chip with a defined battery configuration.
-///    This includes setting protection parameters (overvoltage, undervoltage, overcurrent).
-/// 2. Critically, verifying that the applied configuration has been correctly written to the chip
-///    by reading back key safety-related registers. This is done using `try_apply_config`.
-/// 3. If configuration is successful and verified, enabling the Charge (CHG) and Discharge (DSG) FETs.
-///    If verification fails, FETs are NOT enabled to prevent unsafe operation.
-/// 4. In a continuous loop:
-///    - Reading various measurements from the BQ76920:
-///      - Individual cell voltages.
-///      - Total pack voltage.
-///      - Temperature sensor readings.
-///      - Current (via Coulomb Counter).
-///      - System status flags (e.g., OV, UV, SCD, OCD alerts).
-///      - MOS FET status (CHG_ON, DSG_ON).
-///    - Clearing any set status flags in the BQ76920.
-///    - Publishing the collected alert information (system status) via `bq76920_alerts_publisher`.
-///    - Publishing the comprehensive measurement data via `bq76920_measurements_publisher`.
+/// This task manages the BQ76920 battery management IC, including:
+/// - Battery monitoring (voltage, current, temperature)
+/// - Safety protection (overvoltage, undervoltage, overcurrent)
+/// - Cell balancing
+/// - MOS FET control for charging and discharging
 ///
 /// # Arguments
 ///
 /// * `i2c_bus`: A shared I2C bus device for communication with the BQ76920.
 /// * `address`: The I2C address of the BQ76920 chip.
+/// * `sense_resistor_m_ohm`: Sense resistor value in mOhms
+/// * `ntc_params`: NTC parameters for temperature sensing
+/// * `discharge_control`: GPIO pin for discharge control (GP3)
+/// * `charge_control`: GPIO pin for charge control (GP4)
 /// * `bq76920_alerts_publisher`: Publisher for sending BQ76920 alert data.
 /// * `bq76920_measurements_publisher`: Publisher for sending BQ76920 measurement data.
-///   The const generic `5` indicates the number of cells, matching the `N` for `Bq769x0`.
 #[embassy_executor::task]
+#[allow(clippy::too_many_arguments)]
 pub async fn bq76920_task(
-    i2c_bus: I2cDevice<'static, CriticalSectionRawMutex, I2c<'static, embassy_stm32::mode::Async>>,
+    i2c_bus: I2cDevice<
+        'static,
+        CriticalSectionRawMutex,
+        I2c<'static, peripherals::I2C0, embassy_rp::i2c::Async>,
+    >,
     address: u8,
-    sense_resistor_m_ohm: u32, // Added: Sense resistor value in mOhms
-    ntc_params: Option<NtcParameters>, // Added: NTC parameters
-    pb9_discharge_control: Input<'static>, // Added: PB9 discharge control pin
-    pa1_charge_control: Input<'static>, // Added: PA1 charge control pin
+    sense_resistor_m_ohm: u32,
+    ntc_params: Option<NtcParameters>,
+    discharge_control: Input<'static>,
+    charge_control: Input<'static>,
     bq76920_alerts_publisher: Bq76920AlertsPublisher<'static>,
     bq76920_measurements_publisher: Bq76920MeasurementsPublisher<'static, 5>,
 ) {
+    info!("BQ76920 task started");
+
     // Initialize the BQ769x0 driver instance with CRC enabled and for 5 cells.
-    // sense_resistor_m_ohm and ntc_params are now passed as arguments to this task.
     let mut bq: Bq769x0<
-        I2cDevice<'static, CriticalSectionRawMutex, I2c<'static, embassy_stm32::mode::Async>>,
+        I2cDevice<
+            'static,
+            CriticalSectionRawMutex,
+            I2c<'static, peripherals::I2C0, embassy_rp::i2c::Async>,
+        >,
         bq769x0_async_rs::Enabled,
         5,
     > = Bq769x0::new(i2c_bus, address, sense_resistor_m_ohm, ntc_params);
@@ -275,9 +275,6 @@ pub async fn bq76920_task(
     // This task assumes the chip is already in NORMAL mode or has been woken up by such means.
 
     // Define the battery configuration.
-    // Start with default values and then override specific parameters.
-    // Define the battery configuration using struct update syntax.
-    // `sense_resistor_uohms` is defined earlier in the function.
     let battery_config = BatteryConfig {
         overvoltage_trip: 3600u32,  // Set to 3.6V
         undervoltage_trip: 2500u32, // Set to 2.5V
@@ -289,13 +286,15 @@ pub async fn bq76920_task(
         ..Default::default()          // Inherit other BatteryConfig fields
     };
 
-    // Attempt to apply the configuration and, critically, verify that key safety registers
+    // Attempt to apply the configuration and verify that key safety registers
     // have been written correctly by reading them back.
     match bq.try_apply_config(&battery_config).await {
         Ok(_) => {
+            info!("BQ76920 configuration applied successfully");
             // If configuration is verified, proceed to enable the Discharge FET.
-            // Charge FET will be controlled by PA1 in the main loop.
+            // Charge FET will be controlled by charge_control pin in the main loop.
             let _ = bq.enable_discharging().await;
+            info!("BQ76920 discharge FET enabled");
         }
         Err(BQ769x0Error::ConfigVerificationFailed {
             register,
@@ -312,40 +311,25 @@ pub async fn bq76920_task(
             error!(
                 "FETs will NOT be enabled due to this configuration error. System may be unsafe."
             );
-            // Depending on system requirements, this might warrant a panic or a safe shutdown procedure.
         }
-        Err(e) => {
+        Err(_e) => {
             // Handles other errors from try_apply_config, such as I2C communication errors.
-            // Also a CRITICAL failure scenario.
-            error!(
-                "CRITICAL: Failed to apply BQ76920 configuration due to other error: {:?}",
-                e
-            );
+            error!("CRITICAL: Failed to apply BQ76920 configuration due to other error");
             error!("FETs will NOT be enabled. System may be unsafe.");
         }
     }
-
-    // Runtime config (Bq76920RuntimeConfig) is no longer published from here,
-    // as NTC parameters and sense resistor are now part of Bq769x0 driver initialization.
 
     // Main loop for continuous data acquisition and publishing.
     let mut balance_timer_counter: u32 = 0; // Counter for battery balancing frequency
 
     loop {
-        // This task focuses on reading data from the BQ76920 itself.
-        // Communication with other chips (like BQ25730 charger) is handled in their respective tasks.
-
-        // Note: The CC_EN (Coulomb Counter Enable) flag in SYS_CTRL2 is set by default
-        // in `BatteryConfig::default()` and verified by `try_apply_config`.
-        // Therefore, an explicit check and write for CC_EN in this loop is no longer necessary.
-
         info!("--- Reading BQ76920 Data ---");
 
         // Read ADC calibration values (not used in current logging but kept for potential future use)
         let (_adc_gain_uv_per_lsb, _adc_offset_mv) = match bq.read_adc_calibration().await {
             Ok(cal) => cal,
-            Err(e) => {
-                error!("Failed to read ADC calibration: {:?}", e);
+            Err(_e) => {
+                error!("Failed to read ADC calibration");
                 // Use default calibration values if reading fails
                 (365, 0) // Default values from datasheet
             }
@@ -457,32 +441,36 @@ pub async fn bq76920_task(
                     core_meas.mos_status.0.contains(SysCtrl2Flags::DELAY_DIS)
                 );
 
-                // PB9 discharge control: Check if PB9 is connected to GND (low level)
-                let pb9_enable_discharge = pb9_discharge_control.is_low();
+                // GPIO discharge control: Check if discharge control pin is connected to GND (low level)
+                let gpio_enable_discharge = discharge_control.is_low();
 
-                // Combined discharge control logic: UV fault management + PB9 control
-                let should_enable_discharge = !uv_fault && pb9_enable_discharge;
+                // Combined discharge control logic: UV fault management + GPIO control
+                let should_enable_discharge = !uv_fault && gpio_enable_discharge;
                 let is_discharge_currently_on =
                     core_meas.mos_status.0.contains(SysCtrl2Flags::DSG_ON);
 
                 if should_enable_discharge && !is_discharge_currently_on {
+                    info!("Enabling discharge FET");
                     let _ = bq.enable_discharging().await;
                 } else if !should_enable_discharge && is_discharge_currently_on {
+                    info!("Disabling discharge FET");
                     let _ = bq.disable_discharging().await;
                 }
 
-                // PA1 charge control: Check if PA1 is connected to GND (low level)
-                let pa1_allow_charging = pa1_charge_control.is_low();
+                // GPIO charge control: Check if charge control pin is connected to GND (low level)
+                let gpio_allow_charging = charge_control.is_low();
 
-                // Combined charge control logic: OV fault management + PA1 control
+                // Combined charge control logic: OV fault management + GPIO control
                 let ov_fault = core_meas.system_status.0.contains(SysStatFlags::OV);
-                let should_enable_charging = !ov_fault && pa1_allow_charging;
+                let should_enable_charging = !ov_fault && gpio_allow_charging;
                 let is_charging_currently_on =
                     core_meas.mos_status.0.contains(SysCtrl2Flags::CHG_ON);
 
                 if should_enable_charging && !is_charging_currently_on {
+                    info!("Enabling charge FET");
                     let _ = bq.enable_charging().await;
                 } else if !should_enable_charging && is_charging_currently_on {
+                    info!("Disabling charge FET");
                     let _ = bq.disable_charging().await;
                 }
 
@@ -496,15 +484,15 @@ pub async fn bq76920_task(
                 // so that new events can be detected. Writing '1' to a bit clears it.
                 let flags_to_clear = core_meas.system_status.0.bits();
                 if flags_to_clear != 0 {
-                    if let Err(e_clear) = bq.clear_status_flags(flags_to_clear).await {
-                        error!("Failed to clear BQ76920 status flags: {:?}", e_clear);
+                    if let Err(_e_clear) = bq.clear_status_flags(flags_to_clear).await {
+                        error!("Failed to clear BQ76920 status flags");
                     } else {
                         info!("Cleared BQ76920 status flags: {:#010b}", flags_to_clear);
                     }
                 }
             }
-            Err(e) => {
-                error!("Failed to read BQ76920 measurements: {:?}", e);
+            Err(_e) => {
+                error!("Failed to read BQ76920 measurements");
                 latest_core_measurements = None;
                 // Optionally publish default/error state for alerts if needed
                 let alerts = crate::data_types::Bq76920Alerts::default();

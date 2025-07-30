@@ -1,8 +1,12 @@
+//! SC8815 充电器任务模块
+//!
+//! 负责管理SC8815充电器IC的配置、监控和控制功能
+
 use defmt::*;
 use embassy_time::{Duration, Timer};
 
 use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
-use embassy_stm32::{gpio::Output, i2c::I2c};
+use embassy_rp::{gpio::Output, i2c::I2c};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 
 use sc8815::{DeadTime, DeviceConfiguration, OperatingMode, SC8815, SwitchingFrequency};
@@ -14,19 +18,25 @@ use crate::shared::{
 /// Embassy task for managing the SC8815 charger IC.
 #[embassy_executor::task]
 pub async fn charger_task(
-    i2c_bus: I2cDevice<'static, CriticalSectionRawMutex, I2c<'static, embassy_stm32::mode::Async>>,
+    i2c_bus: I2cDevice<
+        'static,
+        CriticalSectionRawMutex,
+        I2c<'static, embassy_rp::peripherals::I2C0, embassy_rp::i2c::Async>,
+    >,
     address: u8,
     mut pstop_pin: Output<'static>,
     sc8815_alerts_publisher: Sc8815AlertsPublisher<'static>,
     sc8815_measurements_publisher: Sc8815MeasurementsPublisher<'static>,
     mut bq76920_measurements_subscriber: Bq76920MeasurementsSubscriber<'static, 5>,
 ) {
+    info!("SC8815 charger task started");
+
     // Create SC8815 driver instance
     let mut sc8815 = SC8815::new(i2c_bus, address);
 
     // Initialize the SC8815
-    if let Err(e) = sc8815.init().await {
-        error!("Failed to initialize SC8815: {:?}", e);
+    if let Err(_e) = sc8815.init().await {
+        error!("Failed to initialize SC8815");
         return;
     }
 
@@ -53,31 +63,33 @@ pub async fn charger_task(
     config.use_ibus_for_charging = false; // Use IBAT (battery side) for charging current
 
     // Apply configuration
-    if let Err(e) = sc8815.configure_device(&config).await {
-        error!("Failed to configure SC8815: {:?}", e);
+    if let Err(_e) = sc8815.configure_device(&config).await {
+        error!("Failed to configure SC8815");
         return;
     }
 
     // In external mode, manually set VBAT monitor ratio for typical battery voltages
     // Use 12.5x ratio for batteries >10.24V (most Li-ion applications)
-    if let Err(e) = sc8815.set_vbat_monitor_ratio(0).await {
-        error!("Failed to set VBAT monitor ratio: {:?}", e);
+    if let Err(_e) = sc8815.set_vbat_monitor_ratio(0).await {
+        error!("Failed to set VBAT monitor ratio");
         return;
     }
 
-    info!("SC8815 OK");
+    info!("SC8815 configuration applied successfully");
 
     // Enable charging mode (disable OTG mode)
-    if let Err(e) = sc8815.set_otg_mode(false).await {
-        error!("Failed to enable charging mode: {:?}", e);
+    if let Err(_e) = sc8815.set_otg_mode(false).await {
+        error!("Failed to enable charging mode");
         return;
     }
     info!("Charging mode enabled successfully");
 
     // Enable ADC conversion
-    if let Err(e) = sc8815.set_adc_conversion(true).await {
-        error!("Failed to start SC8815 ADC conversion: {:?}", e);
+    if let Err(_e) = sc8815.set_adc_conversion(true).await {
+        error!("Failed to start SC8815 ADC conversion");
     }
+
+    info!("SC8815 initialization complete");
 
     // SC8815 state tracking
     let sc8815_initialized = true; // Set to true after successful initialization
@@ -100,8 +112,8 @@ pub async fn charger_task(
                 );
                 Some(measurements)
             }
-            Err(e) => {
-                error!("[SC8815] Failed to read ADC measurements: {:?}", e);
+            Err(_e) => {
+                error!("[SC8815] Failed to read ADC measurements");
                 sc8815_comm_failed = true; // Mark communication failure
                 None
             }
@@ -119,15 +131,15 @@ pub async fn charger_task(
                 }
                 Some(status)
             }
-            Err(e) => {
-                error!("Failed to read SC8815 device status: {:?}", e);
+            Err(_e) => {
+                error!("Failed to read SC8815 device status");
                 sc8815_comm_failed = true; // Mark communication failure
                 None
             }
         };
 
         // Charging control with safety checks
-        let _bq76920_measurements = _bq76920_measurements;
+        // BQ76920 measurements are available for safety checks if needed
 
         let can_charge = sc8815_initialized && !sc8815_comm_failed;
 
@@ -136,10 +148,10 @@ pub async fn charger_task(
                 if measurements.vbat_mv < 18000 {
                     pstop_pin.set_low();
                     info!("[DEBUG] PSTOP set to LOW - charging should be enabled");
-                    if let Err(_) = sc8815.set_ibat_limit(500, 0, 5).await {
+                    if (sc8815.set_ibat_limit(500, 0, 5).await).is_err() {
                         sc8815_comm_failed = true;
                     }
-                    if let Err(_) = sc8815.set_otg_mode(false).await {
+                    if (sc8815.set_otg_mode(false).await).is_err() {
                         sc8815_comm_failed = true;
                     }
                     // Log charging status every 10 seconds

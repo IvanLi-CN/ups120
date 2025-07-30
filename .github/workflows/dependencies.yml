@@ -1,0 +1,127 @@
+name: Dependencies
+
+on:
+  schedule:
+    # Run weekly on Sundays at 00:00 UTC
+    - cron: '0 0 * * 0'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit
+
+      - name: Run cargo audit
+        run: cargo audit
+
+  outdated:
+    name: Check Outdated Dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-outdated
+        run: cargo install cargo-outdated
+
+      - name: Check outdated dependencies
+        run: |
+          echo "## Project Dependencies" > outdated-report.md
+          cargo outdated --format json | jq -r '.dependencies[] | "- \(.name): \(.project) -> \(.latest)"' >> outdated-report.md || echo "No outdated dependencies found" >> outdated-report.md
+
+      - name: Upload outdated report
+        uses: actions/upload-artifact@v4
+        with:
+          name: outdated-dependencies-report
+          path: outdated-report.md
+
+  update-lockfile:
+    name: Update Cargo.lock
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv6m-none-eabi
+
+      - name: Update Cargo.lock
+        run: cargo update
+
+      - name: Test updated dependencies
+        run: |
+          cargo check --target thumbv6m-none-eabi
+          cargo test
+          cargo clippy --target thumbv6m-none-eabi -- -D warnings
+
+      - name: Create Pull Request
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: 'chore: update Cargo.lock files'
+          title: 'chore: update Cargo.lock files'
+          body: |
+            This PR updates the Cargo.lock file for the main project.
+
+            ## Changes
+            - Updated main project dependencies
+
+            ## Testing
+            - ✅ Compilation check passed
+            - ✅ Tests passed
+            - ✅ Clippy lints passed
+            
+            This is an automated PR created by the dependencies workflow.
+          branch: chore/update-cargo-lock
+          delete-branch: true
+
+  check-licenses:
+    name: License Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-license
+        run: cargo install cargo-license
+
+      - name: Check licenses
+        run: |
+          echo "## Project Licenses" > license-report.md
+          cargo license --json | jq -r '.[] | "- \(.name) (\(.version)): \(.license)"' >> license-report.md
+
+      - name: Upload license report
+        uses: actions/upload-artifact@v4
+        with:
+          name: license-report
+          path: license-report.md
