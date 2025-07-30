@@ -169,7 +169,7 @@ impl<const N: usize> AllMeasurements<N> {
 }
 
 /// Payload structure for USB communication, containing flattened data from AllMeasurements.
-#[derive(Debug, Copy, Clone, PartialEq, binrw::BinWrite, defmt::Format)]
+#[derive(Debug, Copy, Clone, PartialEq, binrw::BinWrite, binrw::BinRead, defmt::Format)]
 pub struct AllMeasurementsUsbPayload {
     // Fields from SC8815 ADC measurements
     pub sc8815_adc_vbus_mv: u16, // VBUS voltage in mV

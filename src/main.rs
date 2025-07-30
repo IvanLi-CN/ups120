@@ -8,6 +8,7 @@ mod shared;
 mod led_status_task;
 mod bq76920_task;
 mod charger_task;
+mod usb;
 
 use defmt::*;
 use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
@@ -17,6 +18,7 @@ use embassy_rp::{
     gpio::{Input, Level, Output, Pull},
     i2c::{self, I2c},
     peripherals,
+    usb::{Driver, InterruptHandler},
 };
 use embassy_time::{Duration, Timer};
 use {defmt_rtt as _, panic_probe as _};
@@ -34,10 +36,11 @@ use embedded_alloc::LlffHeap as Heap;
 #[global_allocator]
 static HEAP: Heap = Heap::empty();
 
-// Bind interrupts for I2C
+// Bind interrupts for I2C and USB
 bind_interrupts!(struct Irqs {
     I2C0_IRQ => i2c::InterruptHandler<peripherals::I2C0>;
     I2C1_IRQ => i2c::InterruptHandler<peripherals::I2C1>;
+    USBCTRL_IRQ => InterruptHandler<peripherals::USB>;
 });
 
 #[embassy_executor::main]
@@ -115,7 +118,7 @@ async fn main(spawner: Spawner) {
 
     // Initialize PubSub system
     let (
-        _measurements_publisher,
+        measurements_publisher,
         _measurements_channel,
         sc8815_alerts_publisher,
         sc8815_alerts_channel,
@@ -186,6 +189,27 @@ async fn main(spawner: Spawner) {
     )).unwrap();
 
     info!("SC8815 charger task spawned");
+
+    // Create USB driver
+    let usb_driver = Driver::new(p.USB, Irqs);
+
+    // Create subscribers for USB task
+    let sc8815_measurements_subscriber_for_usb = sc8815_measurements_channel.subscriber().unwrap();
+    let bq76920_measurements_subscriber_for_usb = bq76920_measurements_channel.subscriber().unwrap();
+    let sc8815_alerts_subscriber_for_usb = sc8815_alerts_channel.subscriber().unwrap();
+    let bq76920_alerts_subscriber_for_usb = bq76920_alerts_channel.subscriber().unwrap();
+
+    // Spawn USB task
+    spawner.spawn(usb::usb_task(
+        usb_driver,
+        measurements_publisher,
+        sc8815_measurements_subscriber_for_usb,
+        bq76920_measurements_subscriber_for_usb,
+        sc8815_alerts_subscriber_for_usb,
+        bq76920_alerts_subscriber_for_usb,
+    )).unwrap();
+
+    info!("USB task spawned");
 
     // Main loop - just keep the system running
     loop {
