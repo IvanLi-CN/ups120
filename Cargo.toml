@@ -1,50 +1,101 @@
 [package]
-name = "rp2040-embassy-demo"
-version = "0.1.0"
+authors = ["Ivan Li<ivanli2048@gmail.com>"]
 edition = "2024"
+name = "ups120"
+version = "0.1.0"
+
+[build-dependencies]
+# Add this to enable build.rs
+# This is needed to read environment variables at compile time
+# and make them available to the application via env! macro.
 
 [dependencies]
-embassy-executor = { git = "https://github.com/IvanLi-CN/embassy", features = ["arch-cortex-m", "executor-thread", "defmt"] }
-embassy-time = { git = "https://github.com/IvanLi-CN/embassy", features = ["defmt"] }
-embassy-rp = { git = "https://github.com/IvanLi-CN/embassy", features = ["defmt", "time-driver", "critical-section-impl", "rp2040"] }
+# RP2040 Embassy dependencies
+embassy-rp = { git = "https://github.com/IvanLi-CN/embassy", features = [
+  "defmt",
+  "time-driver",
+  "critical-section-impl",
+  "rp2040",
+  "unstable-pac",
+] }
+embassy-sync = { git = "https://github.com/IvanLi-CN/embassy", features = [
+  "defmt",
+] }
+embassy-executor = { git = "https://github.com/IvanLi-CN/embassy", features = [
+  "arch-cortex-m",
+  "executor-thread",
+  "defmt",
+] }
+embassy-time = { git = "https://github.com/IvanLi-CN/embassy", features = [
+  "defmt",
+  "defmt-timestamp-uptime",
+] }
+embassy-usb = { git = "https://github.com/IvanLi-CN/embassy", default-features = false, features = [
+  "defmt",
+] }
 embassy-futures = { git = "https://github.com/IvanLi-CN/embassy" }
+embassy-embedded-hal = { git = "https://github.com/IvanLi-CN/embassy" }
 
-cortex-m = { version = "0.7.7", features = ["inline-asm"] }
-cortex-m-rt = "0.7.5"
 defmt = "1.0.1"
 defmt-rtt = "1.0.0"
-panic-probe = { version = "1.0.0", features = ["print-defmt"] }
 
-# cargo build/run
+cortex-m = { version = "0.7.7", features = [
+  "inline-asm",
+] }
+cortex-m-rt = "0.7.5"
+embedded-hal = "1.0.0"
+panic-probe = { version = "1.0.0", features = ["print-defmt"] }
+heapless = { version = "0.8", default-features = false }
+portable-atomic = { version = "1.11.0", features = ["critical-section"] }
+static_cell = "2.1.0"
+libm = "0.2.8"
+embedded-alloc = "0.6.0"
+
+embedded-io-async = { version = "0.6.1" }
+binrw = { version = "0.15", default-features = false }
+
+# Local sub-modules (will be added later)
+# bq769x0-async-rs = { version = "*", path = "./bq76920", features = [
+#   "async",
+#   "defmt",
+# ] }
+# sc8815 = { version = "*", path = "./sc8815", features = [
+#   "async",
+#   "defmt",
+# ] }
+
+ina226 = { version = "0.3.0", features = ["async"] }
+
+[[bin]]
+name = "ups120"
+path = "src/main.rs"
+test = false
+
 [profile.dev]
 codegen-units = 1
 debug = 2
-debug-assertions = true
+debug-assertions = true # <-
 incremental = false
-opt-level = 3
-overflow-checks = true
+opt-level = 3           # <-
+overflow-checks = true  # <-
 
 # cargo build/run --release
 [profile.release]
 codegen-units = 1
-debug = 2
-debug-assertions = false
+debug = 0
+strip = "symbols"
+debug-assertions = false # <-
 incremental = false
 lto = 'fat'
-opt-level = 3
-overflow-checks = false
+opt-level = 3            # <-
+overflow-checks = false  # <-
 
-# do not optimize proc-macro crates = faster builds from scratch
-[profile.dev.build-override]
-codegen-units = 8
-debug = false
-debug-assertions = false
-opt-level = 0
-overflow-checks = false
-
-[profile.release.build-override]
-codegen-units = 8
-debug = false
-debug-assertions = false
-opt-level = 0
-overflow-checks = false
+# cargo test --release
+[profile.bench]
+codegen-units = 1
+debug = 2
+debug-assertions = false # <-
+incremental = false
+lto = 'fat'
+opt-level = 3            # <-
+overflow-checks = false  # <-
