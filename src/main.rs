@@ -8,6 +8,7 @@ mod shared;
 mod led_status_task;
 mod bq76920_task;
 mod charger_task;
+mod ina226_task;
 mod usb;
 
 use defmt::*;
@@ -128,6 +129,8 @@ async fn main(spawner: Spawner) {
         sc8815_measurements_channel,
         bq76920_measurements_publisher,
         bq76920_measurements_channel,
+        ina226_measurements_publisher,
+        ina226_measurements_channel,
     ) = shared::init_pubsubs();
 
     info!("PubSub system initialized");
@@ -190,10 +193,26 @@ async fn main(spawner: Spawner) {
 
     info!("SC8815 charger task spawned");
 
+    // Create INA226 I2C device
+    let ina226_i2c_device = I2cDevice::new(i2c_bus_mutex);
+
+    // INA226 configuration parameters
+    let ina226_address = 0x40; // 7-bit I2C address (default for INA226)
+
+    // Spawn INA226 task
+    spawner.spawn(ina226_task::ina226_task(
+        ina226_i2c_device,
+        ina226_address,
+        ina226_measurements_publisher,
+    )).unwrap();
+
+    info!("INA226 task spawned");
+
     // Create USB driver
     let usb_driver = Driver::new(p.USB, Irqs);
 
     // Create subscribers for USB task
+    let ina226_measurements_subscriber_for_usb = ina226_measurements_channel.subscriber().unwrap();
     let sc8815_measurements_subscriber_for_usb = sc8815_measurements_channel.subscriber().unwrap();
     let bq76920_measurements_subscriber_for_usb = bq76920_measurements_channel.subscriber().unwrap();
     let sc8815_alerts_subscriber_for_usb = sc8815_alerts_channel.subscriber().unwrap();
@@ -203,6 +222,7 @@ async fn main(spawner: Spawner) {
     spawner.spawn(usb::usb_task(
         usb_driver,
         measurements_publisher,
+        ina226_measurements_subscriber_for_usb,
         sc8815_measurements_subscriber_for_usb,
         bq76920_measurements_subscriber_for_usb,
         sc8815_alerts_subscriber_for_usb,

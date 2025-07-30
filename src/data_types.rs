@@ -33,12 +33,13 @@ impl Default for Bq76920Alerts {
     }
 }
 
-/// INA226 测量数据
+/// INA226 测量数据 - 监控输入电源功率
+/// 用于监测输入电源的总功率消耗，包括充电模块和后级用电器的功耗
 #[derive(Debug, Copy, Clone, PartialEq, defmt::Format)]
 pub struct Ina226Measurements {
-    pub voltage: f32,
-    pub current: f32,
-    pub power: f32,
+    pub voltage: f32,  // 输入电压 (V)
+    pub current: f32,  // 输入电流 (A)
+    pub power: f32,    // 输入功率 (W)
 }
 
 impl Default for Ina226Measurements {
@@ -79,9 +80,12 @@ impl Default for Sc8815Alerts {
     }
 }
 
+
+
 /// 聚合所有设备的测量数据
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub struct AllMeasurements<const N: usize> {
+    pub ina226: Ina226Measurements,
     pub sc8815: Sc8815Measurements,
     pub bq76920: Bq76920Measurements<N>,
     pub sc8815_alerts: Sc8815Alerts,
@@ -91,6 +95,7 @@ pub struct AllMeasurements<const N: usize> {
 impl<const N: usize> Default for AllMeasurements<N> {
     fn default() -> Self {
         Self {
+            ina226: Ina226Measurements::default(),
             sc8815: Sc8815Measurements::default(),
             bq76920: Bq76920Measurements::default(),
             sc8815_alerts: Sc8815Alerts::default(),
@@ -120,6 +125,11 @@ impl<const N: usize> AllMeasurements<N> {
         let bq76920_is_thermistor_flag = self.bq76920.core_measurements.is_thermistor_mode;
 
         AllMeasurementsUsbPayload {
+            // INA226 fields (输入电源监控)
+            ina226_voltage_mv: (self.ina226.voltage * 1000.0) as u32,
+            ina226_current_ma: (self.ina226.current * 1000.0) as i32,
+            ina226_power_mw: (self.ina226.power * 1000.0) as u32,
+
             sc8815_adc_vbus_mv,
             sc8815_adc_vbat_mv,
             sc8815_adc_ibus_ma,
@@ -171,6 +181,11 @@ impl<const N: usize> AllMeasurements<N> {
 /// Payload structure for USB communication, containing flattened data from AllMeasurements.
 #[derive(Debug, Copy, Clone, PartialEq, binrw::BinWrite, binrw::BinRead, defmt::Format)]
 pub struct AllMeasurementsUsbPayload {
+    // Fields from INA226 measurements (输入电源监控)
+    pub ina226_voltage_mv: u32,  // 输入电压 (mV)
+    pub ina226_current_ma: i32,  // 输入电流 (mA)
+    pub ina226_power_mw: u32,    // 输入功率 (mW)
+
     // Fields from SC8815 ADC measurements
     pub sc8815_adc_vbus_mv: u16, // VBUS voltage in mV
     pub sc8815_adc_vbat_mv: u16, // VBAT voltage in mV

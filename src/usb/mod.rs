@@ -14,10 +14,10 @@ use embassy_usb::{
 use static_cell::StaticCell;
 
 use crate::data_types::{
-    AllMeasurements, Bq76920Alerts, Bq76920Measurements, Sc8815Alerts, Sc8815Measurements,
+    AllMeasurements, Bq76920Alerts, Bq76920Measurements, Ina226Measurements, Sc8815Alerts, Sc8815Measurements,
 };
 use crate::shared::{
-    Bq76920AlertsSubscriber, Bq76920MeasurementsSubscriber, MeasurementsPublisher,
+    Bq76920AlertsSubscriber, Bq76920MeasurementsSubscriber, Ina226MeasurementsSubscriber, MeasurementsPublisher,
     Sc8815AlertsSubscriber, Sc8815MeasurementsSubscriber,
 };
 
@@ -36,6 +36,7 @@ static WEBUSB_CONFIG_CELL: StaticCell<web_usb::Config> = StaticCell::new();
 pub async fn usb_task(
     driver: usb::Driver<'static, peripherals::USB>,
     measurements_publisher: MeasurementsPublisher<'static, 5>,
+    mut ina226_measurements_subscriber: Ina226MeasurementsSubscriber<'static>,
     mut sc8815_measurements_subscriber: Sc8815MeasurementsSubscriber<'static>,
     mut bq76920_measurements_subscriber: Bq76920MeasurementsSubscriber<'static, 5>,
     mut sc8815_alerts_subscriber: Sc8815AlertsSubscriber<'static>,
@@ -80,6 +81,7 @@ pub async fn usb_task(
 
     // 数据聚合和处理逻辑
     let main_usb_processing_fut = async {
+        let mut latest_ina226_measurements: Option<Ina226Measurements> = None;
         let mut latest_sc8815_measurements: Option<Sc8815Measurements> = None;
         let mut latest_bq76920_measurements: Option<Bq76920Measurements<5>> = None;
         let mut latest_sc8815_alerts: Option<Sc8815Alerts> = None;
@@ -92,21 +94,35 @@ pub async fn usb_task(
 
             // 使用select来处理多个数据源
             match select(
-                sc8815_measurements_subscriber.next_message(),
+                ina226_measurements_subscriber.next_message(),
                 select(
-                    bq76920_measurements_subscriber.next_message(),
+                    sc8815_measurements_subscriber.next_message(),
                     select(
-                        sc8815_alerts_subscriber.next_message(),
+                        bq76920_measurements_subscriber.next_message(),
                         select(
-                            bq76920_alerts_subscriber.next_message(),
-                            usb_endpoints.parse_command(),
+                            sc8815_alerts_subscriber.next_message(),
+                            select(
+                                bq76920_alerts_subscriber.next_message(),
+                                usb_endpoints.parse_command(),
+                            ),
                         ),
                     ),
                 ),
             )
             .await
             {
-                Either::First(sc8815_meas_res) => {
+                Either::First(ina226_meas_res) => {
+                    // INA226测量数据
+                    match ina226_meas_res {
+                        embassy_sync::pubsub::WaitResult::Message(msg) => {
+                            latest_ina226_measurements = Some(msg)
+                        }
+                        embassy_sync::pubsub::WaitResult::Lagged(c) => {
+                            defmt::warn!("USB INA226 Meas sub: lagged {} messages", c)
+                        }
+                    }
+                }
+                Either::Second(Either::First(sc8815_meas_res)) => {
                     // SC8815测量数据
                     match sc8815_meas_res {
                         embassy_sync::pubsub::WaitResult::Message(msg) => {
@@ -117,7 +133,7 @@ pub async fn usb_task(
                         }
                     }
                 }
-                Either::Second(Either::First(bq76920_meas_res)) => {
+                Either::Second(Either::Second(Either::First(bq76920_meas_res))) => {
                     // BQ76920测量数据
                     match bq76920_meas_res {
                         embassy_sync::pubsub::WaitResult::Message(msg) => {
@@ -128,7 +144,7 @@ pub async fn usb_task(
                         }
                     }
                 }
-                Either::Second(Either::Second(Either::First(sc8815_alerts_res))) => {
+                Either::Second(Either::Second(Either::Second(Either::First(sc8815_alerts_res)))) => {
                     // SC8815告警数据
                     match sc8815_alerts_res {
                         embassy_sync::pubsub::WaitResult::Message(msg) => {
@@ -139,7 +155,7 @@ pub async fn usb_task(
                         }
                     }
                 }
-                Either::Second(Either::Second(Either::Second(Either::First(bq76920_alerts_res)))) => {
+                Either::Second(Either::Second(Either::Second(Either::Second(Either::First(bq76920_alerts_res))))) => {
                     // BQ76920告警数据
                     match bq76920_alerts_res {
                         embassy_sync::pubsub::WaitResult::Message(msg) => {
@@ -150,7 +166,7 @@ pub async fn usb_task(
                         }
                     }
                 }
-                Either::Second(Either::Second(Either::Second(Either::Second(usb_cmd_res)))) => {
+                Either::Second(Either::Second(Either::Second(Either::Second(Either::Second(usb_cmd_res))))) => {
                     // USB命令
                     match usb_cmd_res {
                         Ok(cmd) => {
@@ -166,6 +182,7 @@ pub async fn usb_task(
 
             // 聚合所有数据
             let aggregated_data = AllMeasurements {
+                ina226: latest_ina226_measurements.unwrap_or_default(),
                 sc8815: latest_sc8815_measurements.unwrap_or_default(),
                 bq76920: latest_bq76920_measurements.unwrap_or_default(),
                 sc8815_alerts: latest_sc8815_alerts.unwrap_or_default(),
