@@ -7,6 +7,7 @@ mod data_types;
 mod shared;
 mod led_status_task;
 mod bq76920_task;
+mod charger_task;
 
 use defmt::*;
 use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
@@ -89,7 +90,7 @@ async fn main(spawner: Spawner) {
 
     // Configure GPIO pins for RP2040
     // PSTOP control pin for SC8815 (GP2) - High = charging disabled, Low = charging enabled
-    let _pstop_pin = Output::new(p.PIN_2, Level::High);
+    let pstop_pin = Output::new(p.PIN_2, Level::High);
 
     // LED status pin (GP25 - onboard LED)
     let led_pin = Output::new(p.PIN_25, Level::Low);
@@ -116,11 +117,11 @@ async fn main(spawner: Spawner) {
     let (
         _measurements_publisher,
         _measurements_channel,
-        _sc8815_alerts_publisher,
+        sc8815_alerts_publisher,
         sc8815_alerts_channel,
         bq76920_alerts_publisher,
         bq76920_alerts_channel,
-        _sc8815_measurements_publisher,
+        sc8815_measurements_publisher,
         sc8815_measurements_channel,
         bq76920_measurements_publisher,
         bq76920_measurements_channel,
@@ -164,6 +165,27 @@ async fn main(spawner: Spawner) {
     )).unwrap();
 
     info!("BQ76920 task spawned");
+
+    // Create SC8815 I2C device
+    let sc8815_i2c_device = I2cDevice::new(i2c_bus_mutex);
+
+    // SC8815 configuration parameters
+    let sc8815_address = 0x74; // 7-bit I2C address
+
+    // Create BQ76920 measurements subscriber for charger task
+    let bq76920_measurements_subscriber_for_charger = bq76920_measurements_channel.subscriber().unwrap();
+
+    // Spawn SC8815 charger task
+    spawner.spawn(charger_task::charger_task(
+        sc8815_i2c_device,
+        sc8815_address,
+        pstop_pin,
+        sc8815_alerts_publisher,
+        sc8815_measurements_publisher,
+        bq76920_measurements_subscriber_for_charger,
+    )).unwrap();
+
+    info!("SC8815 charger task spawned");
 
     // Main loop - just keep the system running
     loop {
