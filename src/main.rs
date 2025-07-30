@@ -5,6 +5,7 @@ extern crate alloc; // Required for global allocator
 
 mod data_types;
 mod shared;
+mod led_status_task;
 
 use defmt::*;
 use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
@@ -35,7 +36,7 @@ bind_interrupts!(struct Irqs {
 });
 
 #[embassy_executor::main]
-async fn main(_spawner: Spawner) {
+async fn main(spawner: Spawner) {
     // Initialize global allocator
     {
         const HEAP_SIZE: usize = 16_384;
@@ -83,7 +84,7 @@ async fn main(_spawner: Spawner) {
     let _pstop_pin = Output::new(p.PIN_2, Level::High);
 
     // LED status pin (GP25 - onboard LED)
-    let mut led_pin = Output::new(p.PIN_25, Level::Low);
+    let led_pin = Output::new(p.PIN_25, Level::Low);
 
     // Discharge control input (GP3) - Low = discharge enabled
     let _discharge_control = Input::new(p.PIN_3, Pull::Up);
@@ -103,13 +104,40 @@ async fn main(_spawner: Spawner) {
     let _i2c_device = I2cDevice::new(i2c_bus_mutex);
     info!("I2C device created successfully");
 
-    // Basic LED blink to show system is working
-    loop {
-        info!("System heartbeat - LED on");
-        led_pin.set_high();
-        Timer::after(Duration::from_millis(100)).await;
+    // Initialize PubSub system
+    let (
+        _measurements_publisher,
+        _measurements_channel,
+        _sc8815_alerts_publisher,
+        sc8815_alerts_channel,
+        _bq76920_alerts_publisher,
+        bq76920_alerts_channel,
+        _sc8815_measurements_publisher,
+        sc8815_measurements_channel,
+        _bq76920_measurements_publisher,
+        _bq76920_measurements_channel,
+    ) = shared::init_pubsubs();
 
-        led_pin.set_low();
-        Timer::after(Duration::from_millis(900)).await;
+    info!("PubSub system initialized");
+
+    // Create subscribers for LED task
+    let sc8815_alerts_subscriber = sc8815_alerts_channel.subscriber().unwrap();
+    let sc8815_measurements_subscriber = sc8815_measurements_channel.subscriber().unwrap();
+    let bq76920_alerts_subscriber = bq76920_alerts_channel.subscriber().unwrap();
+
+    // Spawn LED status task
+    spawner.spawn(led_status_task::led_status_task(
+        led_pin,
+        sc8815_alerts_subscriber,
+        sc8815_measurements_subscriber,
+        bq76920_alerts_subscriber,
+    )).unwrap();
+
+    info!("LED status task spawned");
+
+    // Main loop - just keep the system running
+    loop {
+        info!("System heartbeat");
+        Timer::after(Duration::from_millis(5000)).await;
     }
 }
