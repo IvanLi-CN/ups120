@@ -6,6 +6,7 @@ extern crate alloc; // Required for global allocator
 mod data_types;
 mod shared;
 mod led_status_task;
+mod bq76920_task;
 
 use defmt::*;
 use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
@@ -18,6 +19,9 @@ use embassy_rp::{
 };
 use embassy_time::{Duration, Timer};
 use {defmt_rtt as _, panic_probe as _};
+
+// Import BQ76920 related types
+use bq769x0_async_rs::data_types::NtcParameters;
 
 // For sharing I2C bus
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
@@ -51,18 +55,22 @@ async fn main(spawner: Spawner) {
     let p = embassy_rp::init(Default::default());
     info!("UPS120 RP2040 Firmware Starting...");
 
-    // Configure I2C0 (GP4 SDA, GP5 SCL) for device communication
-    let i2c_config = i2c::Config::default();
+    // Configure I2C0 (GP0 SDA, GP1 SCL) for device communication
+    // External 4.7kΩ pull-up resistors added for reliable operation
+    let mut i2c_config = i2c::Config::default();
+    i2c_config.frequency = 100_000; // 100kHz with external pull-ups for optimal performance
 
     // Create a static Mutex to share the I2C bus between multiple drivers
     static I2C_BUS_MUTEX_CELL: static_cell::StaticCell<
         Mutex<CriticalSectionRawMutex, I2c<'static, peripherals::I2C0, i2c::Async>>,
     > = static_cell::StaticCell::new();
 
+    // Create I2C instance
+    // Note: If communication is unstable, add external 4.7kΩ pull-up resistors
     let i2c_instance = I2c::new_async(
         p.I2C0,
-        p.PIN_1,  // SCL
-        p.PIN_0,  // SDA
+        p.PIN_1,  // SCL (GP1)
+        p.PIN_0,  // SDA (GP0)
         Irqs,
         i2c_config,
     );
@@ -110,12 +118,12 @@ async fn main(spawner: Spawner) {
         _measurements_channel,
         _sc8815_alerts_publisher,
         sc8815_alerts_channel,
-        _bq76920_alerts_publisher,
+        bq76920_alerts_publisher,
         bq76920_alerts_channel,
         _sc8815_measurements_publisher,
         sc8815_measurements_channel,
-        _bq76920_measurements_publisher,
-        _bq76920_measurements_channel,
+        bq76920_measurements_publisher,
+        bq76920_measurements_channel,
     ) = shared::init_pubsubs();
 
     info!("PubSub system initialized");
@@ -134,6 +142,28 @@ async fn main(spawner: Spawner) {
     )).unwrap();
 
     info!("LED status task spawned");
+
+    // Create BQ76920 I2C device
+    let bq76920_i2c_device = I2cDevice::new(i2c_bus_mutex);
+
+    // BQ76920 configuration parameters
+    let bq76920_address = 0x08; // 7-bit I2C address
+    let sense_resistor_m_ohm = 1; // 1mΩ sense resistor
+    let ntc_params: Option<NtcParameters> = None; // No NTC parameters for now
+
+    // Spawn BQ76920 task
+    spawner.spawn(bq76920_task::bq76920_task(
+        bq76920_i2c_device,
+        bq76920_address,
+        sense_resistor_m_ohm,
+        ntc_params,
+        _discharge_control,
+        _charge_control,
+        bq76920_alerts_publisher,
+        bq76920_measurements_publisher,
+    )).unwrap();
+
+    info!("BQ76920 task spawned");
 
     // Main loop - just keep the system running
     loop {
