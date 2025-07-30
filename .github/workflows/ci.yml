@@ -136,31 +136,7 @@ jobs:
           rustup component add llvm-tools-preview
           cargo size --target thumbv6m-none-eabi --release --bin ups120
 
-  submodule-check:
-    name: Submodule Check
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout sources
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
 
-      - name: Install stable toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Check BQ76920 submodule
-        run: |
-          cd bq76920
-          cargo check
-          cargo clippy -- -D warnings
-          cargo fmt -- --check
-
-      - name: Check SC8815 submodule
-        run: |
-          cd sc8815
-          cargo check
-          cargo clippy -- -D warnings
-          cargo fmt -- --check
 
   commit-check:
     name: Commit Convention Check

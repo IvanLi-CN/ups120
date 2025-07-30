@@ -16,8 +16,6 @@ jobs:
     steps:
       - name: Checkout sources
         uses: actions/checkout@v4
-        with:
-          submodules: recursive
 
       - name: Install stable toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -28,19 +26,12 @@ jobs:
       - name: Run cargo audit
         run: cargo audit
 
-      - name: Audit submodules
-        run: |
-          cd bq76920 && cargo audit
-          cd ../sc8815 && cargo audit
-
   outdated:
     name: Check Outdated Dependencies
     runs-on: ubuntu-latest
     steps:
       - name: Checkout sources
         uses: actions/checkout@v4
-        with:
-          submodules: recursive
 
       - name: Install stable toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -50,19 +41,8 @@ jobs:
 
       - name: Check outdated dependencies
         run: |
-          echo "## Main Project Dependencies" > outdated-report.md
+          echo "## Project Dependencies" > outdated-report.md
           cargo outdated --format json | jq -r '.dependencies[] | "- \(.name): \(.project) -> \(.latest)"' >> outdated-report.md || echo "No outdated dependencies found" >> outdated-report.md
-          
-          echo "" >> outdated-report.md
-          echo "## BQ76920 Submodule Dependencies" >> outdated-report.md
-          cd bq76920
-          cargo outdated --format json | jq -r '.dependencies[] | "- \(.name): \(.project) -> \(.latest)"' >> ../outdated-report.md || echo "No outdated dependencies found" >> ../outdated-report.md
-          cd ..
-          
-          echo "" >> outdated-report.md
-          echo "## SC8815 Submodule Dependencies" >> outdated-report.md
-          cd sc8815
-          cargo outdated --format json | jq -r '.dependencies[] | "- \(.name): \(.project) -> \(.latest)"' >> ../outdated-report.md || echo "No outdated dependencies found" >> ../outdated-report.md
 
       - name: Upload outdated report
         uses: actions/upload-artifact@v4
@@ -78,7 +58,6 @@ jobs:
       - name: Checkout sources
         uses: actions/checkout@v4
         with:
-          submodules: recursive
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install stable toolchain
@@ -87,10 +66,7 @@ jobs:
           targets: thumbv6m-none-eabi
 
       - name: Update Cargo.lock
-        run: |
-          cargo update
-          cd bq76920 && cargo update && cd ..
-          cd sc8815 && cargo update && cd ..
+        run: cargo update
 
       - name: Test updated dependencies
         run: |
@@ -105,13 +81,11 @@ jobs:
           commit-message: 'chore: update Cargo.lock files'
           title: 'chore: update Cargo.lock files'
           body: |
-            This PR updates the Cargo.lock files for the main project and submodules.
-            
+            This PR updates the Cargo.lock file for the main project.
+
             ## Changes
             - Updated main project dependencies
-            - Updated BQ76920 submodule dependencies  
-            - Updated SC8815 submodule dependencies
-            
+
             ## Testing
             - ✅ Compilation check passed
             - ✅ Tests passed
@@ -127,8 +101,6 @@ jobs:
     steps:
       - name: Checkout sources
         uses: actions/checkout@v4
-        with:
-          submodules: recursive
 
       - name: Install stable toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -138,19 +110,8 @@ jobs:
 
       - name: Check licenses
         run: |
-          echo "## Main Project Licenses" > license-report.md
+          echo "## Project Licenses" > license-report.md
           cargo license --json | jq -r '.[] | "- \(.name) (\(.version)): \(.license)"' >> license-report.md
-          
-          echo "" >> license-report.md
-          echo "## BQ76920 Submodule Licenses" >> license-report.md
-          cd bq76920
-          cargo license --json | jq -r '.[] | "- \(.name) (\(.version)): \(.license)"' >> ../license-report.md
-          cd ..
-          
-          echo "" >> license-report.md
-          echo "## SC8815 Submodule Licenses" >> license-report.md
-          cd sc8815
-          cargo license --json | jq -r '.[] | "- \(.name) (\(.version)): \(.license)"' >> ../license-report.md
 
       - name: Upload license report
         uses: actions/upload-artifact@v4

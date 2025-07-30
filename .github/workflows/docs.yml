@@ -26,8 +26,6 @@ jobs:
     steps:
       - name: Checkout sources
         uses: actions/checkout@v4
-        with:
-          submodules: recursive
 
       - name: Install stable toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -47,13 +45,6 @@ jobs:
         run: |
           # Generate main project docs
           cargo doc --target thumbv6m-none-eabi --no-deps --document-private-items
-          
-          # Generate submodule docs
-          cd bq76920
-          cargo doc --no-deps --document-private-items
-          cd ../sc8815
-          cargo doc --no-deps --document-private-items
-          cd ..
 
       - name: Check documentation warnings
         run: |
@@ -136,8 +127,6 @@ jobs:
     steps:
       - name: Checkout sources
         uses: actions/checkout@v4
-        with:
-          submodules: recursive
 
       - name: Install stable toolchain
         uses: dtolnay/rust-toolchain@stable
