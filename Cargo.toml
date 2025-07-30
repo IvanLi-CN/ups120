@@ -54,15 +54,15 @@ embedded-alloc = "0.6.0"
 embedded-io-async = { version = "0.6.1" }
 binrw = { version = "0.15", default-features = false }
 
-# Local sub-modules (will be added later)
-# bq769x0-async-rs = { version = "*", path = "./bq76920", features = [
-#   "async",
-#   "defmt",
-# ] }
-# sc8815 = { version = "*", path = "./sc8815", features = [
-#   "async",
-#   "defmt",
-# ] }
+# Local sub-modules
+bq769x0-async-rs = { version = "*", path = "./bq76920", features = [
+  "async",
+  "defmt",
+] }
+sc8815 = { version = "*", path = "./sc8815", features = [
+  "async",
+  "defmt",
+] }
 
 ina226 = { version = "0.3.0", features = ["async"] }
 
