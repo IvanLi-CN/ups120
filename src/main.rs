@@ -3,6 +3,9 @@
 
 extern crate alloc; // Required for global allocator
 
+mod data_types;
+mod shared;
+
 use defmt::*;
 use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
 use embassy_executor::Spawner;
