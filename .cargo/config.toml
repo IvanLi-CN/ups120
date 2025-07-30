@@ -1,0 +1,12 @@
+[target.'cfg(all(target_arch = "arm", target_os = "none"))']
+# Choose a default "cargo run" tool:
+# - probe-rs-debugger
+# - probe-rs run
+# - probe-rs attach
+runner = "probe-rs run --chip RP2040 --protocol swd"
+
+[build]
+target = "thumbv6m-none-eabi"
+
+[env]
+DEFMT_LOG = "debug"
