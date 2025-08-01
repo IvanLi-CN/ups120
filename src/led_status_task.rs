@@ -1,12 +1,13 @@
-//! LED状态指示任务
+//! LED Status Indication Task
 //!
-//! 管理GP25引脚上的LED，根据系统状态显示不同的闪烁模式：
-//! - 存在任何故障时，LED 以 4Hz频率闪烁
-//! - 充电时，0.5 Hz 频率闪烁
-//! - 放电时，10100000 节奏闪烁（1亮0不亮，每位 0.25 秒）
-//! - 充满时，111011110 节奏闪烁
+//! Manages the LED on GPIO25 pin, displaying different blink patterns based on system state:
+//! - Fault: 4Hz fast blink when any component fault occurs
+//! - Charging with Mains: Double flash every 3 seconds (mains power normal, battery charging)
+//! - Mains without Charging: Triple flash every 3 seconds (mains power normal, battery full)
+//! - Backup Power Output: Custom pattern (mains interrupted, battery discharging)
+//! - Initialization: 2Hz medium blink during system startup
 //!
-//! 按优先级从高到低执行，同一时间只显示一个匹配的情况。
+//! Executes by priority from high to low, displaying only one matching condition at a time.
 
 use defmt::*;
 use embassy_rp::gpio::Output;
@@ -20,24 +21,20 @@ use crate::shared::{
 
 use bq769x0_async_rs::registers::SysStatFlags;
 
-/// LED状态枚举
+/// LED Status Enumeration
 #[derive(Debug, Clone, Copy, PartialEq, defmt::Format)]
 #[allow(dead_code)]
 pub enum LedStatus {
-    /// 系统初始化中 - 2Hz中速闪烁 (温和的初始化指示)
-    Initializing,
-    /// 故障状态 - 4Hz快速闪烁 (紧急故障警告)
+    /// System initialization - 2Hz medium blink (gentle initialization indicator)
+    Initialization,
+    /// Fault state - 4Hz fast blink (any component fault or communication error)
     Fault,
-    /// 充电状态 - 0.5Hz慢闪烁
-    Charging,
-    /// 放电状态 - 10100000节奏闪烁
-    Discharging,
-    /// 充满状态 - 111011110节奏闪烁
-    ChargingComplete,
-    /// 系统正常运行 - 1Hz心跳闪烁
-    SystemActive,
-    /// 正常状态 - LED关闭
-    Normal,
+    /// Charging with mains power - Double flash every 3 seconds
+    ChargingWithMains,
+    /// Mains power without charging - Triple flash every 3 seconds
+    MainsWithoutCharging,
+    /// Backup power output - Custom pattern (mains interrupted, battery discharging)
+    BackupPowerOutput,
 }
 
 /// LED状态指示任务
@@ -66,8 +63,7 @@ pub async fn led_status_task(
 
     led.set_low(); // 初始状态LED关闭（低电平）
 
-    let mut current_status = LedStatus::Initializing; // 启动时强制进入初始化状态
-    let mut pattern_index = 0;
+    let mut current_status = LedStatus::Initialization; // 启动时强制进入初始化状态
     let mut last_update = embassy_time::Instant::now();
 
     // 系统状态跟踪
@@ -144,6 +140,7 @@ pub async fn led_status_task(
             &latest_sc8815_measurements,
             &latest_bq76920_alerts,
             &latest_otg_status,
+            current_status,
         );
 
         // 每秒输出一次状态调试信息
@@ -162,71 +159,64 @@ pub async fn led_status_task(
 
         // 如果状态改变，重置模式索引
         if new_status != current_status {
-            info!("LED状态变化: {:?} -> {:?}", current_status, new_status);
+            info!(
+                "LED status changed: {:?} -> {:?}",
+                current_status, new_status
+            );
             current_status = new_status;
-            pattern_index = 0;
-            last_update = embassy_time::Instant::now();
+            // Don't reset last_update to avoid disrupting LED patterns
         }
 
-        // 根据当前状态执行LED控制
+        // Execute LED control based on current status
         let now = embassy_time::Instant::now();
         match current_status {
-            LedStatus::Initializing => {
-                // 2Hz闪烁 (500ms周期，250ms亮，250ms灭) - 系统初始化中
+            LedStatus::Initialization => {
+                // 2Hz blink: 250ms on, 250ms off - System initialization
                 if now.duration_since(last_update) >= Duration::from_millis(250) {
                     led.toggle();
                     last_update = now;
                 }
             }
             LedStatus::Fault => {
-                // 4Hz快闪 (250ms周期，125ms亮，125ms灭) - 故障状态
+                // 4Hz fast blink: 125ms on, 125ms off - Fault state
                 if now.duration_since(last_update) >= Duration::from_millis(125) {
                     led.toggle();
                     last_update = now;
                 }
             }
-            LedStatus::Charging => {
-                // 0.5Hz闪烁 (2000ms周期，1000ms亮，1000ms灭)
-                if now.duration_since(last_update) >= Duration::from_millis(1000) {
-                    led.toggle();
-                    last_update = now;
+            LedStatus::ChargingWithMains => {
+                // Double flash every 3 seconds - use absolute time to avoid reset issues
+                let cycle_time = now.as_millis() % 3000;
+                match cycle_time {
+                    0..100 => led.set_high(), // First flash
+                    100..200 => led.set_low(),
+                    200..300 => led.set_high(), // Second flash
+                    300..3000 => led.set_low(), // Long off period
+                    _ => {}
                 }
             }
-            LedStatus::SystemActive => {
-                // 1Hz心跳闪烁 (1000ms周期，100ms亮，900ms灭)
+            LedStatus::MainsWithoutCharging => {
+                // Triple flash every 3 seconds - use absolute time to avoid reset issues
+                let cycle_time = now.as_millis() % 3000;
+                match cycle_time {
+                    0..100 => led.set_high(), // First flash
+                    100..200 => led.set_low(),
+                    200..300 => led.set_high(), // Second flash
+                    300..400 => led.set_low(),
+                    400..500 => led.set_high(), // Third flash
+                    500..3000 => led.set_low(), // Long off period
+                    _ => {}
+                }
+            }
+            LedStatus::BackupPowerOutput => {
+                // Custom pattern for backup power mode - 1Hz heartbeat for now
                 let cycle_time = now.duration_since(last_update);
                 if cycle_time >= Duration::from_millis(1000) {
-                    // 重新开始周期
                     led.set_high();
                     last_update = now;
                 } else if cycle_time >= Duration::from_millis(100) {
-                    // 100ms后关闭LED
                     led.set_low();
                 }
-            }
-            LedStatus::Discharging => {
-                // 10100000节奏闪烁，每位250ms
-                execute_pattern(
-                    &mut led,
-                    &mut pattern_index,
-                    &mut last_update,
-                    &[true, false, true, false, false, false, false, false],
-                    Duration::from_millis(250),
-                );
-            }
-            LedStatus::ChargingComplete => {
-                // 111011110节奏闪烁，每位250ms
-                execute_pattern(
-                    &mut led,
-                    &mut pattern_index,
-                    &mut last_update,
-                    &[true, true, true, false, true, true, true, true, false],
-                    Duration::from_millis(250),
-                );
-            }
-            LedStatus::Normal => {
-                // LED关闭
-                led.set_low();
             }
         }
 
@@ -235,62 +225,34 @@ pub async fn led_status_task(
     }
 }
 
-/// 执行特定的闪烁模式
-fn execute_pattern(
-    led: &mut Output<'static>,
-    pattern_index: &mut usize,
-    last_update: &mut embassy_time::Instant,
-    pattern: &[bool],
-    bit_duration: Duration,
-) {
-    let now = embassy_time::Instant::now();
-
-    if now.duration_since(*last_update) >= bit_duration {
-        if *pattern_index < pattern.len() {
-            if pattern[*pattern_index] {
-                led.set_high(); // LED亮（高使能，RP2040板载LED）
-            } else {
-                led.set_low(); // LED灭
-            }
-            *pattern_index += 1;
-        } else {
-            // 模式结束，重新开始
-            *pattern_index = 0;
-        }
-        *last_update = now;
-    }
-}
-
-/// 评估SC8815状态
+/// Evaluate SC8815 status for charging states
 fn evaluate_sc8815_status(alerts: &Sc8815Alerts, measurements: &Sc8815Measurements) -> LedStatus {
     let status = &alerts.device_status;
     let adc_measurements = &measurements.adc_measurements;
 
-    // 检查故障状态（最高优先级）
+    // Check fault conditions (highest priority)
     if status.otp_fault || status.vbus_short_fault {
         return LedStatus::Fault;
     }
 
-    // 检查是否有充电器连接 (VBUS > 5V)
+    // Check if charger is connected (VBUS > 5V) - indicates mains power available
     if adc_measurements.vbus_mv > 5000 {
-        // 有充电器连接，检查充电状态
+        // Mains power available, check charging status
         if status.eoc {
-            // EOC=true 表示充电完成，没有在充电
-            return LedStatus::ChargingComplete;
+            // EOC=true means charging complete, not actively charging
+            return LedStatus::MainsWithoutCharging;
         } else {
-            // EOC=false 表示正在充电（默认情况下充电功能是开启的）
-            return LedStatus::Charging;
+            // EOC=false means actively charging
+            return LedStatus::ChargingWithMains;
         }
     }
 
-    // 没有充电器连接，检查是否在放电
-    // TODO: 添加放电状态检测逻辑
-    // 目前放电功能暂未实现，所以暂时不检测
-
-    LedStatus::Normal
+    // No charger connected - this could indicate backup power mode
+    // Return a neutral state, let the main logic decide
+    LedStatus::MainsWithoutCharging
 }
 
-/// 确定系统整体状态
+/// Determine overall system status based on priority
 #[allow(clippy::too_many_arguments)]
 fn determine_system_status(
     now: embassy_time::Instant,
@@ -304,22 +266,23 @@ fn determine_system_status(
     sc8815_measurements: &Option<Sc8815Measurements>,
     bq76920_alerts: &Option<Bq76920Alerts>,
     otg_status: &Option<OtgStatus>,
+    current_status: LedStatus,
 ) -> LedStatus {
     let system_age = now.duration_since(startup_time);
 
-    // 1. 检查是否在初始化阶段
+    // Priority 1: Check if in initialization phase
     if system_age < initialization_timeout {
         if !sc8815_initialized && !bq76920_initialized {
-            return LedStatus::Initializing;
+            return LedStatus::Initialization;
         }
     } else {
-        // 初始化超时，检查是否有设备未响应
+        // Initialization timeout, check if any device is unresponsive
         if !sc8815_initialized || !bq76920_initialized {
             return LedStatus::Fault;
         }
     }
 
-    // 2. 检查设备通信超时（5秒无数据视为通信故障）
+    // Priority 2: Check device communication timeout (5 seconds without data = fault)
     let comm_timeout = Duration::from_secs(5);
     if let Some(last_seen) = sc8815_last_seen {
         if now.duration_since(last_seen) > comm_timeout {
@@ -332,7 +295,7 @@ fn determine_system_status(
         }
     }
 
-    // 3. 检查BQ76920故障状态（最高优先级）
+    // Priority 3: Check BQ76920 fault conditions (highest priority for faults)
     if let Some(alerts) = bq76920_alerts {
         let fault_status = evaluate_bq76920_status(alerts);
         if matches!(fault_status, LedStatus::Fault) {
@@ -340,37 +303,41 @@ fn determine_system_status(
         }
     }
 
-    // 4. 检查OTG故障状态
+    // Priority 4: Check OTG fault conditions
     if has_otg_fault(otg_status, now) {
         return LedStatus::Fault;
     }
 
-    // 5. 检查OTG放电状态
+    // Priority 5: Check backup power output (OTG discharging) with hysteresis
     if let Some(otg) = otg_status {
-        if otg.enabled && otg.output_current_ma > 100 {
-            // OTG正在输出电流，显示为放电状态
-            return LedStatus::Discharging;
+        if otg.enabled {
+            // Use hysteresis to prevent rapid switching
+            // If currently in backup mode, need current to drop below 80mA to switch out
+            // If not in backup mode, need current to exceed 120mA to switch in
+            let threshold = match current_status {
+                LedStatus::BackupPowerOutput => 80, // Lower threshold to exit backup mode
+                _ => 120,                           // Higher threshold to enter backup mode
+            };
+
+            if otg.output_current_ma > threshold {
+                return LedStatus::BackupPowerOutput;
+            }
         }
     }
 
-    // 6. 检查SC8815状态并确定充电状态
+    // Priority 6: Check SC8815 status for mains power and charging states
     if let (Some(alerts), Some(measurements)) = (sc8815_alerts, sc8815_measurements) {
         let charging_status = evaluate_sc8815_status(alerts, measurements);
-        // 如果不是充电状态，且系统正常运行，显示系统活跃状态
-        if matches!(charging_status, LedStatus::Normal) && sc8815_initialized && bq76920_initialized
-        {
-            return LedStatus::SystemActive;
-        }
         return charging_status;
     }
 
-    // 5. 如果所有设备都已初始化但没有完整数据，显示系统活跃状态
+    // Priority 7: If all devices initialized but no complete data, default to mains without charging
     if sc8815_initialized && bq76920_initialized {
-        return LedStatus::SystemActive;
+        return LedStatus::MainsWithoutCharging;
     }
 
-    // 8. 默认状态 - 只有在设备未初始化时才显示Normal
-    LedStatus::Normal
+    // Fallback: Initialization state if devices not ready
+    LedStatus::Initialization
 }
 
 /// 检查OTG是否有故障
@@ -397,19 +364,20 @@ fn has_otg_fault(otg_status: &Option<OtgStatus>, now: embassy_time::Instant) -> 
     false
 }
 
-/// 评估BQ76920状态
+/// Evaluate BQ76920 status for fault conditions
 fn evaluate_bq76920_status(alerts: &Bq76920Alerts) -> LedStatus {
     let sys_stat = alerts.system_status.0;
 
-    // 检查各种故障状态（最高优先级）
-    if sys_stat.contains(SysStatFlags::OV) ||      // 过压
-       sys_stat.contains(SysStatFlags::UV) ||      // 欠压
-       sys_stat.contains(SysStatFlags::SCD) ||     // 短路放电
+    // Check various fault conditions (highest priority)
+    if sys_stat.contains(SysStatFlags::OV) ||      // Overvoltage
+       sys_stat.contains(SysStatFlags::UV) ||      // Undervoltage
+       sys_stat.contains(SysStatFlags::SCD) ||     // Short circuit discharge
        sys_stat.contains(SysStatFlags::OCD)
+    // Overcurrent discharge
     {
-        // 过流放电
         return LedStatus::Fault;
     }
 
-    LedStatus::Normal
+    // No faults detected, return a neutral state
+    LedStatus::MainsWithoutCharging
 }
