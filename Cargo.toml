@@ -82,12 +82,12 @@ overflow-checks = true  # <-
 # cargo build/run --release
 [profile.release]
 codegen-units = 1
-debug = 0
-strip = "symbols"
+debug = 2                # Enable debug info to preserve defmt symbols
+strip = "none"           # Don't strip symbols to preserve defmt
 debug-assertions = false # <-
 incremental = false
-lto = 'fat'
-opt-level = 3            # <-
+lto = 'thin'             # Changed from 'fat' to 'thin' to preserve defmt symbols
+opt-level = 2            # Reduced from 3 to 2 to preserve defmt symbols
 overflow-checks = false  # <-
 
 # cargo test --release

@@ -378,7 +378,6 @@ pub async fn bq76920_task(
                 info!("Current: {} mA", core_meas.current_ma);
 
                 // Log temperatures
-                info!("Temperatures (0.01°C):");
                 info!(
                     "  TS1: {} ({}°C)",
                     core_meas.temperatures.ts1,

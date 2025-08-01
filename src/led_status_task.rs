@@ -12,9 +12,10 @@ use defmt::*;
 use embassy_rp::gpio::Output;
 use embassy_time::{Duration, Timer};
 
-use crate::data_types::{Bq76920Alerts, Sc8815Alerts, Sc8815Measurements};
+use crate::data_types::{Bq76920Alerts, OtgStatus, Sc8815Alerts, Sc8815Measurements};
 use crate::shared::{
-    Bq76920AlertsSubscriber, Sc8815AlertsSubscriber, Sc8815MeasurementsSubscriber,
+    Bq76920AlertsSubscriber, OtgStatusSubscriber, Sc8815AlertsSubscriber,
+    Sc8815MeasurementsSubscriber,
 };
 
 use bq769x0_async_rs::registers::SysStatFlags;
@@ -46,6 +47,7 @@ pub async fn led_status_task(
     mut sc8815_alerts_subscriber: Sc8815AlertsSubscriber<'static>,
     mut sc8815_measurements_subscriber: Sc8815MeasurementsSubscriber<'static>,
     mut bq76920_alerts_subscriber: Bq76920AlertsSubscriber<'static>,
+    mut otg_status_subscriber: OtgStatusSubscriber<'static>,
 ) {
     info!("LED status task started");
 
@@ -82,6 +84,7 @@ pub async fn led_status_task(
     let mut latest_sc8815_alerts: Option<Sc8815Alerts> = None;
     let mut latest_sc8815_measurements: Option<Sc8815Measurements> = None;
     let mut latest_bq76920_alerts: Option<Bq76920Alerts> = None;
+    let mut latest_otg_status: Option<OtgStatus> = None;
 
     loop {
         let now = embassy_time::Instant::now();
@@ -121,6 +124,13 @@ pub async fn led_status_task(
             }
         }
 
+        // 检查OTG状态更新（非阻塞）
+        if let Some(embassy_sync::pubsub::WaitResult::Message(otg_status)) =
+            otg_status_subscriber.try_next_message()
+        {
+            latest_otg_status = Some(otg_status);
+        }
+
         // 确定系统状态
         let new_status = determine_system_status(
             now,
@@ -133,27 +143,29 @@ pub async fn led_status_task(
             &latest_sc8815_alerts,
             &latest_sc8815_measurements,
             &latest_bq76920_alerts,
+            &latest_otg_status,
         );
 
-        // 每5秒输出一次状态调试信息
+        // 每秒输出一次状态调试信息
         static mut LAST_DEBUG_TIME: u32 = 0;
         let current_time = now.as_millis() as u32;
         unsafe {
-            if current_time - LAST_DEBUG_TIME > 5000 {
+            if current_time - LAST_DEBUG_TIME > 1000 {
                 info!(
                     "LED Debug - Status: {:?}, SC8815_init: {}, BQ76920_init: {}",
                     new_status, sc8815_initialized, bq76920_initialized
                 );
+                info!("LED当前状态: {:?}", new_status);
                 LAST_DEBUG_TIME = current_time;
             }
         }
 
         // 如果状态改变，重置模式索引
         if new_status != current_status {
+            info!("LED状态变化: {:?} -> {:?}", current_status, new_status);
             current_status = new_status;
             pattern_index = 0;
             last_update = embassy_time::Instant::now();
-            info!("LED status changed to: {:?}", current_status);
         }
 
         // 根据当前状态执行LED控制
@@ -291,6 +303,7 @@ fn determine_system_status(
     sc8815_alerts: &Option<Sc8815Alerts>,
     sc8815_measurements: &Option<Sc8815Measurements>,
     bq76920_alerts: &Option<Bq76920Alerts>,
+    otg_status: &Option<OtgStatus>,
 ) -> LedStatus {
     let system_age = now.duration_since(startup_time);
 
@@ -327,7 +340,20 @@ fn determine_system_status(
         }
     }
 
-    // 4. 检查SC8815状态并确定充电状态
+    // 4. 检查OTG故障状态
+    if has_otg_fault(otg_status, now) {
+        return LedStatus::Fault;
+    }
+
+    // 5. 检查OTG放电状态
+    if let Some(otg) = otg_status {
+        if otg.enabled && otg.output_current_ma > 100 {
+            // OTG正在输出电流，显示为放电状态
+            return LedStatus::Discharging;
+        }
+    }
+
+    // 6. 检查SC8815状态并确定充电状态
     if let (Some(alerts), Some(measurements)) = (sc8815_alerts, sc8815_measurements) {
         let charging_status = evaluate_sc8815_status(alerts, measurements);
         // 如果不是充电状态，且系统正常运行，显示系统活跃状态
@@ -343,8 +369,32 @@ fn determine_system_status(
         return LedStatus::SystemActive;
     }
 
-    // 6. 默认状态 - 只有在设备未初始化时才显示Normal
+    // 8. 默认状态 - 只有在设备未初始化时才显示Normal
     LedStatus::Normal
+}
+
+/// 检查OTG是否有故障
+fn has_otg_fault(otg_status: &Option<OtgStatus>, now: embassy_time::Instant) -> bool {
+    if let Some(otg) = otg_status {
+        // 检查通信超时（5秒）
+        let last_update_instant = embassy_time::Instant::from_millis(otg.last_update_ms);
+        let time_since_update = now.duration_since(last_update_instant);
+        if time_since_update > Duration::from_secs(5) {
+            return true;
+        }
+
+        // 检查过载保护（1.2A = 1A + 20%容差）
+        if otg.output_current_ma > 1200 {
+            return true;
+        }
+
+        // 检查OTG启用但输出电压为0（可能的故障）
+        if otg.enabled && otg.output_voltage_mv == 0 {
+            return true;
+        }
+    }
+
+    false
 }
 
 /// 评估BQ76920状态

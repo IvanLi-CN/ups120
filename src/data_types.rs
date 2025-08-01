@@ -56,6 +56,79 @@ pub struct Sc8815Alerts {
     pub device_status: SC8815Status,
 }
 
+/// OTG配置参数
+#[derive(Debug, Clone, Copy, PartialEq, defmt::Format)]
+pub struct OtgConfiguration {
+    /// 设定电压 Vs (mV)
+    pub target_voltage_mv: u16,
+    /// 高阈值百分比 (默认90%)
+    pub high_threshold_percent: u8,
+    /// 低阈值百分比 (默认70%)
+    pub low_threshold_percent: u8,
+    /// 电压降低值 (默认500mV)
+    pub voltage_reduction_mv: u16,
+    /// 输出限流 (默认1000mA)
+    pub current_limit_ma: u16,
+    /// OTG功能使能
+    pub enabled: bool,
+}
+
+impl Default for OtgConfiguration {
+    fn default() -> Self {
+        Self {
+            target_voltage_mv: 12000, // 12V
+            high_threshold_percent: 90,
+            low_threshold_percent: 70,
+            voltage_reduction_mv: 500, // 0.5V
+            current_limit_ma: 1000,    // 1A
+            enabled: true,
+        }
+    }
+}
+
+/// OTG控制状态枚举
+#[derive(Debug, Clone, Copy, PartialEq, defmt::Format)]
+pub enum OtgControlState {
+    /// 高电压状态 (>90% Vs) - 输出 Vs-0.5V
+    HighVoltage,
+    /// 低电压状态 (<70% Vs) - 输出 Vs
+    LowVoltage,
+    /// 正常状态 (70%-90% Vs) - 滞回控制
+    Normal,
+    /// 禁用状态
+    Disabled,
+}
+
+/// OTG运行状态
+#[derive(Debug, Clone, Copy, PartialEq, defmt::Format)]
+pub struct OtgStatus {
+    /// OTG是否启用
+    pub enabled: bool,
+    /// 当前输出电压 (mV)
+    pub output_voltage_mv: u16,
+    /// 当前输出电流 (mA)
+    pub output_current_ma: u16,
+    /// 检测到的输入电压 (mV)
+    pub input_voltage_mv: u16,
+    /// 控制状态
+    pub control_state: OtgControlState,
+    /// 最后更新时间戳 (ms)
+    pub last_update_ms: u64,
+}
+
+impl Default for OtgStatus {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            output_voltage_mv: 0,
+            output_current_ma: 0,
+            input_voltage_mv: 0,
+            control_state: OtgControlState::Disabled,
+            last_update_ms: 0,
+        }
+    }
+}
+
 /// 聚合所有设备的测量数据
 #[derive(Debug, Copy, Clone, PartialEq, Default)]
 pub struct AllMeasurements<const N: usize> {
@@ -70,7 +143,7 @@ pub struct AllMeasurements<const N: usize> {
 impl<const N: usize> AllMeasurements<N> {
     /// Converts the aggregated measurements into the flattened USB payload structure.
     /// Assumes that BQ76920 temperatures and current are already in physical units within `self.bq76920.core_measurements`.
-    pub fn to_usb_payload(self) -> AllMeasurementsUsbPayload {
+    pub fn to_usb_payload(self, otg_status: Option<OtgStatus>) -> AllMeasurementsUsbPayload {
         // SC8815 ADC measurements (already in mV/mA in self.sc8815.adc_measurements)
         let sc8815_adc_vbus_mv = self.sc8815.adc_measurements.vbus_mv;
         let sc8815_adc_vbat_mv = self.sc8815.adc_measurements.vbat_mv;
@@ -136,6 +209,13 @@ impl<const N: usize> AllMeasurements<N> {
             },
 
             bq76920_alerts_system_status_mask: self.bq76920_alerts.system_status.0.bits(),
+
+            // OTG字段
+            otg_enabled: otg_status.map(|s| s.enabled as u8).unwrap_or(0),
+            otg_output_voltage_mv: otg_status.map(|s| s.output_voltage_mv).unwrap_or(0),
+            otg_output_current_ma: otg_status.map(|s| s.output_current_ma).unwrap_or(0),
+            otg_input_voltage_mv: otg_status.map(|s| s.input_voltage_mv).unwrap_or(0),
+            otg_control_state: otg_status.map(|s| s.control_state as u8).unwrap_or(0),
         }
     }
 }
@@ -178,4 +258,11 @@ pub struct AllMeasurementsUsbPayload {
 
     // Fields from Bq76920Alerts
     pub bq76920_alerts_system_status_mask: u8, // BQ76920 alerts system status bits
+
+    // OTG相关字段
+    pub otg_enabled: u8,            // OTG使能状态
+    pub otg_output_voltage_mv: u16, // OTG输出电压
+    pub otg_output_current_ma: u16, // OTG输出电流
+    pub otg_input_voltage_mv: u16,  // OTG检测输入电压
+    pub otg_control_state: u8,      // OTG控制状态
 }

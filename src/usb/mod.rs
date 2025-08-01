@@ -13,12 +13,13 @@ use embassy_usb::{
 use static_cell::StaticCell;
 
 use crate::data_types::{
-    AllMeasurements, Bq76920Alerts, Bq76920Measurements, Ina226Measurements, Sc8815Alerts,
-    Sc8815Measurements,
+    AllMeasurements, Bq76920Alerts, Bq76920Measurements, Ina226Measurements, OtgStatus,
+    Sc8815Alerts, Sc8815Measurements,
 };
 use crate::shared::{
     Bq76920AlertsSubscriber, Bq76920MeasurementsSubscriber, Ina226MeasurementsSubscriber,
-    MeasurementsPublisher, Sc8815AlertsSubscriber, Sc8815MeasurementsSubscriber,
+    MeasurementsPublisher, OtgStatusSubscriber, Sc8815AlertsSubscriber,
+    Sc8815MeasurementsSubscriber,
 };
 
 use self::endpoints::UsbEndpoints;
@@ -33,6 +34,7 @@ static WEBUSB_CONFIG_CELL: StaticCell<web_usb::Config> = StaticCell::new();
 
 /// USB任务
 #[embassy_executor::task]
+#[allow(clippy::too_many_arguments)]
 pub async fn usb_task(
     driver: usb::Driver<'static, peripherals::USB>,
     measurements_publisher: MeasurementsPublisher<'static, 5>,
@@ -41,6 +43,7 @@ pub async fn usb_task(
     mut bq76920_measurements_subscriber: Bq76920MeasurementsSubscriber<'static, 5>,
     mut sc8815_alerts_subscriber: Sc8815AlertsSubscriber<'static>,
     mut bq76920_alerts_subscriber: Bq76920AlertsSubscriber<'static>,
+    mut otg_status_subscriber: OtgStatusSubscriber<'static>,
 ) {
     // USB配置
     let vid: u16 = 0x1209; // Generic PID.codes VID
@@ -86,6 +89,7 @@ pub async fn usb_task(
         let mut latest_bq76920_measurements: Option<Bq76920Measurements<5>> = None;
         let mut latest_sc8815_alerts: Option<Sc8815Alerts> = None;
         let mut latest_bq76920_alerts: Option<Bq76920Alerts> = None;
+        let mut latest_otg_status: Option<OtgStatus> = None;
         #[allow(unused_assignments)]
         let mut usb_command_to_process: Option<endpoints::UsbData> = None;
 
@@ -104,7 +108,10 @@ pub async fn usb_task(
                             sc8815_alerts_subscriber.next_message(),
                             select(
                                 bq76920_alerts_subscriber.next_message(),
-                                usb_endpoints.parse_command(),
+                                select(
+                                    otg_status_subscriber.next_message(),
+                                    usb_endpoints.parse_command(),
+                                ),
                             ),
                         ),
                     ),
@@ -172,7 +179,20 @@ pub async fn usb_task(
                     }
                 }
                 Either::Second(Either::Second(Either::Second(Either::Second(Either::Second(
-                    usb_cmd_res,
+                    Either::First(otg_status_res),
+                ))))) => {
+                    // OTG状态数据
+                    match otg_status_res {
+                        embassy_sync::pubsub::WaitResult::Message(msg) => {
+                            latest_otg_status = Some(msg)
+                        }
+                        embassy_sync::pubsub::WaitResult::Lagged(c) => {
+                            defmt::warn!("USB OTG Status sub: lagged {} messages", c)
+                        }
+                    }
+                }
+                Either::Second(Either::Second(Either::Second(Either::Second(Either::Second(
+                    Either::Second(usb_cmd_res),
                 ))))) => {
                     // USB命令
                     match usb_cmd_res {
@@ -199,7 +219,7 @@ pub async fn usb_task(
             // 处理USB命令
             if let Some(cmd) = usb_command_to_process.take() {
                 defmt::info!("USB task: Processing stored USB command: {:?}", cmd);
-                let command_payload = aggregated_data.to_usb_payload();
+                let command_payload = aggregated_data.to_usb_payload(latest_otg_status);
                 if let Err(e) = usb_endpoints.process_command(cmd, &command_payload).await {
                     defmt::error!("USB task: Error processing USB command: {:?}", e);
                 }
@@ -211,7 +231,7 @@ pub async fn usb_task(
             // 如果订阅活跃，发送状态更新
             if usb_endpoints.status_subscription_active {
                 defmt::info!("USB task: Subscription active, sending status update via USB.");
-                let status_update_payload = aggregated_data.to_usb_payload();
+                let status_update_payload = aggregated_data.to_usb_payload(latest_otg_status);
                 if let Err(e) = usb_endpoints
                     .send_status_update(status_update_payload)
                     .await

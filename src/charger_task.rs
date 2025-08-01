@@ -104,7 +104,7 @@ pub async fn charger_task(
             Ok(measurements) => {
                 // Print SC8815 voltage and current information
                 info!(
-                    "[SC8815] VBUS:{}mV, VBAT:{}mV, IBUS:{}mA, IBAT:{}mA",
+                    "[CHARGE] VBUS:{}mV, VBAT:{}mV, IBUS:{}mA, IBAT:{}mA",
                     measurements.vbus_mv,
                     measurements.vbat_mv,
                     measurements.ibus_ma,
@@ -127,7 +127,7 @@ pub async fn charger_task(
                     warn!("[SC8815] Over-temperature protection fault detected!");
                 }
                 if status.vbus_short_fault {
-                    warn!("[SC8815] VBUS short circuit fault detected!");
+                    warn!("[CHARGE] VBUS short circuit fault detected!");
                 }
                 Some(status)
             }
