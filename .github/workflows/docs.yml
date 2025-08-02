@@ -48,10 +48,16 @@ jobs:
           # Generate main project docs
           cargo doc --target thumbv6m-none-eabi --no-deps --document-private-items
 
+          # Create symlink for compatibility with tools expecting target/doc
+          ln -sf thumbv6m-none-eabi/doc target/doc
+
       - name: Check documentation warnings
         run: |
           # Check for documentation warnings
           RUSTDOCFLAGS="-D warnings" cargo doc --target thumbv6m-none-eabi --no-deps --document-private-items
+
+          # Ensure symlink exists for compatibility
+          ln -sf thumbv6m-none-eabi/doc target/doc
 
       - name: Upload documentation
         uses: actions/upload-artifact@v4
@@ -140,9 +146,12 @@ jobs:
       - name: Generate documentation
         run: |
           cargo doc --target thumbv6m-none-eabi --no-deps --document-private-items
-          
+
+          # Create symlink for compatibility
+          ln -sf thumbv6m-none-eabi/doc target/doc
+
           # Create index.html for GitHub Pages
-          cat > target/doc/index.html << 'EOF'
+          cat > target/thumbv6m-none-eabi/doc/index.html << 'EOF'
           <!DOCTYPE html>
           <html>
           <head>
