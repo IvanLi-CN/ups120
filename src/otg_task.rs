@@ -32,33 +32,30 @@ pub async fn otg_task(
     otg_status_publisher: OtgStatusPublisher<'static>,
     mut otg_pstop_pin: embassy_rp::gpio::Output<'static>,
 ) {
-    info!("OTG task started - SC8815 OTG mode with voltage control");
+    info!("OTG task started - OTG mode with voltage control");
     info!(
         "OTG Config: Vs={}mV, High={}%, Low={}%",
         config.target_voltage_mv, config.high_threshold_percent, config.low_threshold_percent
     );
 
-    // 创建SC8815驱动实例
-    let mut sc8815 = SC8815::new(i2c_bus, address);
+    // 创建OTG驱动实例
+    let mut otg = SC8815::new(i2c_bus, address);
 
-    // 初始化SC8815为OTG模式
-    if let Err(e) = sc8815.init().await {
-        error!(
-            "Failed to initialize SC8815 for OTG: {}",
-            defmt::Debug2Format(&e)
-        );
+    // 初始化OTG模式
+    if let Err(e) = otg.init().await {
+        error!("Failed to initialize OTG: {}", defmt::Debug2Format(&e));
         publish_fault_status(&otg_status_publisher, &config).await;
         return;
     }
 
-    // 保持PSTOP为HIGH - SC8815在安全待机模式下进行配置
+    // 保持PSTOP为HIGH - OTG在安全待机模式下进行配置
     otg_pstop_pin.set_high();
-    info!("OTG PSTOP set to HIGH - SC8815 in safe standby mode for configuration");
+    info!("OTG PSTOP set to HIGH - OTG in safe standby mode for configuration");
 
     // 首先禁用短路折返功能以允许带负载启动
-    // 当VBUS < 1V时，SC8815通常会将电流限制降低到22%(IBUS)和10%(IBAT)
+    // 当VBUS < 1V时，OTG通常会将电流限制降低到22%(IBUS)和10%(IBAT)
     // 禁用此功能以允许带负载启动
-    if let Err(_e) = sc8815.set_short_foldback_disable(true).await {
+    if let Err(_e) = otg.set_short_foldback_disable(true).await {
         error!("Failed to disable short circuit foldback");
         publish_fault_status(&otg_status_publisher, &config).await;
         return;
@@ -87,21 +84,21 @@ pub async fn otg_task(
 
     // OTG模式特定配置
     device_config.trickle_charging = false; // 禁用涓流充电
-    info!("Configuring SC8815 for OTG mode in standby...");
+    info!("Configuring OTG mode in standby...");
     device_config.charging_termination = false; // 禁用充电终止
     device_config.use_ibus_for_charging = false; // 不使用IBUS作为充电参考
 
-    if let Err(_e) = sc8815.configure_device(&device_config).await {
-        error!("Failed to configure SC8815 for OTG");
+    if let Err(_e) = otg.configure_device(&device_config).await {
+        error!("Failed to configure OTG");
         publish_fault_status(&otg_status_publisher, &config).await;
         return;
     }
 
-    info!("SC8815 OTG mode configured successfully in standby");
+    info!("OTG mode configured successfully in standby");
 
     // 配置OTG模式（在待机模式下）
     info!("Configuring OTG mode in standby...");
-    if let Err(_e) = sc8815.set_otg_mode(true).await {
+    if let Err(_e) = otg.set_otg_mode(true).await {
         error!("Failed to configure OTG mode");
         publish_fault_status(&otg_status_publisher, &config).await;
         return;
@@ -118,7 +115,7 @@ pub async fn otg_task(
         "Setting VBUS output voltage to {}mV with ratio {}...",
         config.target_voltage_mv, vbus_ratio
     );
-    if let Err(_e) = sc8815
+    if let Err(_e) = otg
         .set_vbus_internal_voltage(config.target_voltage_mv, vbus_ratio)
         .await
     {
@@ -132,7 +129,7 @@ pub async fn otg_task(
     );
 
     // 启用ADC转换（在待机模式下）
-    if let Err(_e) = sc8815.set_adc_conversion(true).await {
+    if let Err(_e) = otg.set_adc_conversion(true).await {
         error!("Failed to configure ADC conversion");
         publish_fault_status(&otg_status_publisher, &config).await;
         return;
@@ -141,7 +138,7 @@ pub async fn otg_task(
 
     // 清除VBUS短路故障（如果存在）- 在待机模式下安全执行
     // 使用官方推荐的方法：清除DIS_ShortFoldBack（保持10ms），然后重新设置为1
-    if let Err(_e) = sc8815
+    if let Err(_e) = otg
         .clear_vbus_short_fault_with_delay(|| async {
             embassy_time::Timer::after(embassy_time::Duration::from_millis(10)).await;
         })
@@ -158,7 +155,7 @@ pub async fn otg_task(
     Timer::after(Duration::from_millis(10)).await; // 等待电源块稳定
 
     info!(
-        "✅ SC8815 configured as OTG: {}mV output, 1.5A current limit",
+        "✅ OTG configured: {}mV output, 1.5A current limit",
         config.target_voltage_mv
     );
     info!("Connect load to start power delivery");
@@ -217,7 +214,7 @@ pub async fn otg_task(
                 1
             };
 
-            if let Err(_e) = sc8815
+            if let Err(_e) = otg
                 .set_vbus_internal_voltage(target_output_voltage_mv, vbus_ratio)
                 .await
             {
@@ -244,7 +241,7 @@ pub async fn otg_task(
                 } else {
                     1
                 };
-                if sc8815
+                if otg
                     .set_vbus_internal_voltage(target_output_voltage_mv, vbus_ratio)
                     .await
                     .is_ok()
@@ -252,12 +249,9 @@ pub async fn otg_task(
                     info!("Force updated OTG voltage: {}mV", target_output_voltage_mv);
                 }
 
-                // 读取SC8815状态寄存器进行调试
-                if let Ok(status) = sc8815
-                    .read_register(sc8815::registers::Register::Status)
-                    .await
-                {
-                    info!("SC8815 OTG Status: 0x{:02X}", status);
+                // 读取OTG状态寄存器进行调试
+                if let Ok(status) = otg.read_register(sc8815::registers::Register::Status).await {
+                    info!("OTG Status: 0x{:02X}", status);
                 }
 
                 LAST_FORCE_UPDATE = current_time;
@@ -265,7 +259,7 @@ pub async fn otg_task(
         }
 
         // 读取当前输出状态
-        let (output_current_ma, actual_voltage_mv) = match read_otg_status(&mut sc8815).await {
+        let (output_current_ma, actual_voltage_mv) = match read_otg_status(&mut otg).await {
             Ok(status) => status,
             Err(_e) => {
                 error!("Failed to read OTG status");
@@ -284,7 +278,7 @@ pub async fn otg_task(
 
         // 发布OTG状态
         // 调试：读取原始ADC寄存器值
-        if let Ok((vbus_high, vbus_low)) = sc8815
+        if let Ok((vbus_high, vbus_low)) = otg
             .read_consecutive_registers(sc8815::registers::Register::VbusFbValue)
             .await
         {
@@ -296,10 +290,7 @@ pub async fn otg_task(
         }
 
         // 读取RATIO寄存器来确认比率设置
-        if let Ok(ratio_reg) = sc8815
-            .read_register(sc8815::registers::Register::Ratio)
-            .await
-        {
+        if let Ok(ratio_reg) = otg.read_register(sc8815::registers::Register::Ratio).await {
             let vbus_ratio_bit = ratio_reg & 0x01;
             let vbat_ratio_bit = (ratio_reg >> 1) & 0x01;
             info!(
@@ -320,7 +311,7 @@ pub async fn otg_task(
         otg_status_publisher.publish_immediate(otg_status);
 
         // 读取完整的ADC测量值
-        let measurements = match sc8815.get_adc_measurements().await {
+        let measurements = match otg.get_adc_measurements().await {
             Ok(m) => m,
             Err(_) => {
                 error!("Failed to read OTG ADC measurements");
@@ -353,7 +344,7 @@ pub async fn otg_task(
 
 /// 读取OTG状态
 async fn read_otg_status(
-    sc8815: &mut SC8815<
+    otg: &mut SC8815<
         I2cDevice<
             'static,
             CriticalSectionRawMutex,
@@ -361,7 +352,7 @@ async fn read_otg_status(
         >,
     >,
 ) -> Result<(u16, u16), ()> {
-    match sc8815.get_adc_measurements().await {
+    match otg.get_adc_measurements().await {
         Ok(measurements) => Ok((measurements.ibus_ma, measurements.vbus_mv)),
         Err(_) => Err(()),
     }

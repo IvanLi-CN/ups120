@@ -220,7 +220,7 @@ async fn main(spawner: Spawner) {
     let bq76920_measurements_subscriber_for_charger =
         bq76920_measurements_channel.subscriber().unwrap();
 
-    // Spawn SC8815 charger task
+    // Spawn charger task
     spawner
         .spawn(charger_task::charger_task(
             sc8815_i2c_device,
@@ -232,7 +232,7 @@ async fn main(spawner: Spawner) {
         ))
         .unwrap();
 
-    info!("SC8815 charger task spawned");
+    info!("Charger task spawned");
 
     // Create INA226 I2C device
     let ina226_i2c_device = I2cDevice::new(i2c_bus_mutex);
