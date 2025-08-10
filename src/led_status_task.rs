@@ -147,15 +147,15 @@ pub async fn led_status_task(
 
         // 检查通信超时
         let comm_timeout = Duration::from_secs(5);
-        if let Some(last_seen) = sc8815_last_seen {
-            if now.duration_since(last_seen) > comm_timeout && sc8815_initialized {
-                sc8815_error_reason = "COMMUNICATION_TIMEOUT";
-            }
+        if sc8815_last_seen.is_some_and(|last_seen| {
+            now.duration_since(last_seen) > comm_timeout && sc8815_initialized
+        }) {
+            sc8815_error_reason = "COMMUNICATION_TIMEOUT";
         }
-        if let Some(last_seen) = bq76920_last_seen {
-            if now.duration_since(last_seen) > comm_timeout && bq76920_initialized {
-                bq76920_error_reason = "COMMUNICATION_TIMEOUT";
-            }
+        if bq76920_last_seen.is_some_and(|last_seen| {
+            now.duration_since(last_seen) > comm_timeout && bq76920_initialized
+        }) {
+            bq76920_error_reason = "COMMUNICATION_TIMEOUT";
         }
 
         // 确定系统状态
@@ -314,15 +314,11 @@ fn determine_system_status(
 
     // Priority 2: Check device communication timeout (5 seconds without data = fault)
     let comm_timeout = Duration::from_secs(5);
-    if let Some(last_seen) = sc8815_last_seen {
-        if now.duration_since(last_seen) > comm_timeout {
-            return LedStatus::Fault;
-        }
+    if sc8815_last_seen.is_some_and(|last_seen| now.duration_since(last_seen) > comm_timeout) {
+        return LedStatus::Fault;
     }
-    if let Some(last_seen) = bq76920_last_seen {
-        if now.duration_since(last_seen) > comm_timeout {
-            return LedStatus::Fault;
-        }
+    if bq76920_last_seen.is_some_and(|last_seen| now.duration_since(last_seen) > comm_timeout) {
+        return LedStatus::Fault;
     }
 
     // Priority 3: Check BQ76920 fault conditions (highest priority for faults)
@@ -339,16 +335,16 @@ fn determine_system_status(
     }
 
     // Priority 5: Check backup power output (OTG discharging) with hysteresis
-    if let Some(otg) = otg_status {
-        if otg.enabled {
-            // Use hysteresis to prevent rapid switching
-            // If currently in backup mode, need current to drop below 80mA to switch out
-            // If not in backup mode, need current to exceed 120mA to switch in
-            let threshold = match current_status {
-                LedStatus::BackupPowerOutput => 80, // Lower threshold to exit backup mode
-                _ => 120,                           // Higher threshold to enter backup mode
-            };
+    if otg_status.is_some_and(|otg| otg.enabled) {
+        // Use hysteresis to prevent rapid switching
+        // If currently in backup mode, need current to drop below 80mA to switch out
+        // If not in backup mode, need current to exceed 120mA to switch in
+        let threshold = match current_status {
+            LedStatus::BackupPowerOutput => 80, // Lower threshold to exit backup mode
+            _ => 120,                           // Higher threshold to enter backup mode
+        };
 
+        if let Some(otg) = otg_status {
             if otg.output_current_ma > threshold {
                 return LedStatus::BackupPowerOutput;
             }
