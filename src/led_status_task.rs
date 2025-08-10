@@ -76,6 +76,10 @@ pub async fn led_status_task(
     let mut sc8815_last_seen = None::<embassy_time::Instant>;
     let mut bq76920_last_seen = None::<embassy_time::Instant>;
 
+    // 错误状态跟踪
+    let mut sc8815_error_reason = "NOT_STARTED";
+    let mut bq76920_error_reason = "NOT_STARTED";
+
     // 保存最新的数据用于状态评估
     let mut latest_sc8815_alerts: Option<Sc8815Alerts> = None;
     let mut latest_sc8815_measurements: Option<Sc8815Measurements> = None;
@@ -93,6 +97,7 @@ pub async fn led_status_task(
             sc8815_last_seen = Some(now);
             if !sc8815_initialized {
                 sc8815_initialized = true;
+                sc8815_error_reason = "INITIALIZED";
                 info!("SC8815 device initialized and responding");
             }
         }
@@ -104,6 +109,7 @@ pub async fn led_status_task(
             sc8815_last_seen = Some(now);
             if !sc8815_initialized {
                 sc8815_initialized = true;
+                sc8815_error_reason = "INITIALIZED";
                 info!("SC8815 device initialized and responding");
             }
         }
@@ -116,6 +122,7 @@ pub async fn led_status_task(
             bq76920_last_seen = Some(now);
             if !bq76920_initialized {
                 bq76920_initialized = true;
+                bq76920_error_reason = "INITIALIZED";
                 info!("BQ76920 device initialized and responding");
             }
         }
@@ -125,6 +132,30 @@ pub async fn led_status_task(
             otg_status_subscriber.try_next_message()
         {
             latest_otg_status = Some(otg_status);
+        }
+
+        // 检查超时并更新错误原因
+        let system_age = now.duration_since(startup_time);
+        if system_age >= initialization_timeout {
+            if !sc8815_initialized {
+                sc8815_error_reason = "INITIALIZATION_TIMEOUT";
+            }
+            if !bq76920_initialized {
+                bq76920_error_reason = "INITIALIZATION_TIMEOUT";
+            }
+        }
+
+        // 检查通信超时
+        let comm_timeout = Duration::from_secs(5);
+        if let Some(last_seen) = sc8815_last_seen {
+            if now.duration_since(last_seen) > comm_timeout && sc8815_initialized {
+                sc8815_error_reason = "COMMUNICATION_TIMEOUT";
+            }
+        }
+        if let Some(last_seen) = bq76920_last_seen {
+            if now.duration_since(last_seen) > comm_timeout && bq76920_initialized {
+                bq76920_error_reason = "COMMUNICATION_TIMEOUT";
+            }
         }
 
         // 确定系统状态
@@ -148,11 +179,10 @@ pub async fn led_status_task(
         let current_time = now.as_millis() as u32;
         unsafe {
             if current_time - LAST_DEBUG_TIME > 1000 {
-                info!(
-                    "LED Debug - Status: {:?}, SC8815_init: {}, BQ76920_init: {}",
-                    new_status, sc8815_initialized, bq76920_initialized
-                );
-                info!("LED当前状态: {:?}", new_status);
+                info!("LED Debug - Initialization Phase:");
+                info!("  [POWER] SC8815 Main Controller: {}", sc8815_error_reason);
+                info!("  [BMS] BQ76920 Battery Monitor: {}", bq76920_error_reason);
+                info!("  [SYSTEM] Current LED Status: {:?}", new_status);
                 LAST_DEBUG_TIME = current_time;
             }
         }
