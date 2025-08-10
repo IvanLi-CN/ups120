@@ -191,7 +191,7 @@ async fn main(spawner: Spawner) {
 
     // BQ76920 configuration parameters
     let bq76920_address = 0x08; // 7-bit I2C address
-    let sense_resistor_m_ohm = 1; // 1mΩ sense resistor
+    let sense_resistor_m_ohm = 3; // 3mΩ sense resistor (corrected to match actual hardware)
     let ntc_params: Option<NtcParameters> = None; // No NTC parameters for now
 
     // Spawn BQ76920 task
