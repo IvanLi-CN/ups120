@@ -344,10 +344,8 @@ fn determine_system_status(
             _ => 120,                           // Higher threshold to enter backup mode
         };
 
-        if let Some(otg) = otg_status {
-            if otg.output_current_ma > threshold {
-                return LedStatus::BackupPowerOutput;
-            }
+        if otg_status.is_some_and(|otg| otg.output_current_ma > threshold) {
+            return LedStatus::BackupPowerOutput;
         }
     }
 
