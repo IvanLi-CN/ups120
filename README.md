@@ -1,27 +1,54 @@
-# Ivan's UPS Firmware
+# UPS120 Firmware (Split Architecture)
 
-**This project is currently under development.**
+This repository now hosts two firmware targets under a unified workspace:
 
-This project contains the firmware for a digitally controlled Uninterruptible Power Supply (UPS) with a power capacity of 120W.
+- Smart Battery Controller: `STM32L051C8T6` (battery BMS + charger orchestration)
+- UPS Main Controller: `ESP32S3FH4R2` (system coordination; placeholder for now)
 
-For a detailed description of the project's MVP (Minimum Viable Product) business workflow, including device initialization, data acquisition, and control logic, please see the [WORKFLOW.md](WORKFLOW.md) file.
+Refer to [WORKFLOW.md](WORKFLOW.md) and [DESIGN_MEMORANDUM.md](DESIGN_MEMORANDUM.md) for project context.
 
-## Hardware Connection
+## Repository Layout
 
-Here is a brief overview of the hardware connections:
+- `firmware/smart-battery/`: Rust + Embassy firmware for `STM32L051C8T6`
+- `firmware/ups-main/`: Placeholder for `ESP32S3FH4R2` UPS main controller
+- `embassy/`, `bq76920/`, `sc8815/`: Local dependencies and submodules
 
-* **Battery:** Connect a compatible battery to the designated battery connector.
-* **Power Input:** Connect a power source (e.g., AC adapter) to the power input connector.
-* **Load Output:** Connect the load to the load output connector.
-* **Communication:** Connect the communication interface (e.g., I2C, UART) to the designated pins for communication with a host device.
+## Smart Battery (STM32L051C8T6)
 
-## Hardware Information
+- MCU: `STM32L051C8T6` (Cortex‑M0+)
+- BMS: `BQ76920`
+- Charger: `SC8815`
+- Embassy setup: async I2C shared-bus; no USB on L0
 
-* **UPS Capacity:** 120W
-* **Battery:** 5S LiFePO4 (Lithium Iron Phosphate) battery pack (e.g., nominal 16V, full charge ~18.25V)
-* **Battery Management IC:** BQ76920 (AFE for 3-5 series Li-Ion/LiFePO4 cells)
-* **Battery Charger IC:** BQ25730 (NVDC Buck-Boost Charger for 1-5 series cells, configured for 5S LiFePO4, ~18V charge voltage)
-* **Current/Voltage Sensor:** INA226 (High-Side/Low-Side I2C Current and Power Monitor, e.g., 16V bus voltage range)
-* **Microcontroller:** STM32G031 (e.g., STM32G031F8P6 Arm Cortex-M0+)
+I2C default pins (adjust to your board):
+- `I2C1_SCL`: `PB6`
+- `I2C1_SDA`: `PB7`
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+GPIO default mapping (adjust as needed):
+- `PA0`: `SC8815_PSTOP` (active low to enable charging)
+- `PA5`: Status LED (open-drain, active low)
+- `PB9`: Discharge enable input (low = enable)
+- `PA1`: Charge allow input (low = allow)
+
+### Build & Run
+
+From `firmware/smart-battery`:
+
+1) Ensure Rust targets installed: `rustup target add thumbv6m-none-eabi`
+2) Flash/Run with probe-rs: `cargo run` (uses local `.cargo/config.toml`)
+
+Config uses `probe-rs` runner with chip `STM32L051C8Tx`. Update if your package differs.
+
+### Notes on Port
+
+- Migrated from `STM32G431` to `STM32L051C8T6` feature flags in `embassy-stm32`.
+- Removed USB stack/tasks; L051 parts do not provide USB FS.
+- I2C runs at 100 kHz async; DMA channel placeholders may be adjusted per board.
+
+## UPS Main (ESP32S3FH4R2)
+
+`firmware/ups-main` is a placeholder. ESP‑IDF (C/C++) or Rust (esp‑idf‑hal) integration will be added later.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

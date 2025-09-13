@@ -1,10 +1,15 @@
-# Workspace-level cargo config for default build behavior
-
-[build]
-target = "thumbv6m-none-eabi"  # Make `cargo build` at repo root build the MCU crate by default
-
 [target.'cfg(all(target_arch = "arm", target_os = "none"))']
 runner = "probe-rs run --chip STM32L051C8Tx --probe 0d28:0204:2BDC77EE006DCE9B589D7AD8F22BD989"
+
+rustflags = [
+  # Linker scripts
+  "-C", "link-arg=-Tlink.x",
+  "-C", "link-arg=-Tdefmt.x",
+  "-C", "link-arg=--nmagic",
+]
+
+[build]
+target = "thumbv6m-none-eabi"    # Cortex-M0+
 
 [env]
 DEFMT_LOG = "info"

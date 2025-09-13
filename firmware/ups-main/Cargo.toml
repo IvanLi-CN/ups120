@@ -1,0 +1,11 @@
+[package]
+name = "ups-main"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "ups-main"
+path = "src/main.rs"
+test = false
+
