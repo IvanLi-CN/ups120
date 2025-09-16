@@ -23,6 +23,7 @@ embassy-time = { workspace = true, features = [
   "defmt-timestamp-uptime",
   "tick-hz-32_768",
 ] }
+sc8815 = { workspace = true, features = ["async", "defmt"] }
 defmt = { workspace = true }
 defmt-rtt = { workspace = true }
 
