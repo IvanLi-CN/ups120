@@ -279,14 +279,17 @@ pub async fn bq76920_task(
     // Define the battery configuration using struct update syntax.
     // `sense_resistor_uohms` is defined earlier in the function.
     let battery_config = BatteryConfig {
-        overvoltage_trip: 3600u32,  // Set to 3.6V
-        undervoltage_trip: 2500u32, // Set to 2.5V
+        // Per-cell thresholds
+        overvoltage_trip: 3650u32,  // 3.65V OV per cell
+        undervoltage_trip: 2800u32, // 2.80V UV per cell
         protection_config: ProtectionConfig {
-            ocd_limit: 10_000i32,                         // Set to 10A (10_000 mA)
-            ..BatteryConfig::default().protection_config  // Inherit other protection_config fields
+            // 15A short-circuit, 10A overcurrent discharge
+            scd_limit: 15_000i32,                         // 15_000 mA
+            ocd_limit: 10_000i32,                         // 10_000 mA
+            ..BatteryConfig::default().protection_config  // Keep default delays and flags
         },
-        rsense: sense_resistor_m_ohm, // Use mOhms directly as per BatteryConfig field
-        ..Default::default()          // Inherit other BatteryConfig fields
+        rsense: sense_resistor_m_ohm, // mΩ sense resistor (e.g., 3 mΩ)
+        ..Default::default()
     };
 
     // Attempt to apply the configuration and, critically, verify that key safety registers

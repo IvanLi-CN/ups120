@@ -26,12 +26,18 @@ embassy-time = { workspace = true, features = [
 sc8815 = { workspace = true, features = ["async", "defmt"] }
 defmt = { workspace = true }
 defmt-rtt = { workspace = true }
+embassy-embedded-hal = { workspace = true }
+bq769x0-async-rs = { workspace = true, features = ["async", "defmt"] }
+static_cell = { workspace = true }
+portable-atomic = { workspace = true, features = ["critical-section"] }
+## binrw not required in firmware (avoid pulling alloc)
 
 cortex-m = { workspace = true, features = [
   "critical-section-single-core",
 ] }
 cortex-m-rt = { workspace = true }
 panic-probe = { workspace = true }
+## no dynamic allocation required in firmware
 
 [[bin]]
 name = "smart-battery"

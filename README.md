@@ -20,15 +20,19 @@ Refer to [WORKFLOW.md](WORKFLOW.md) and [DESIGN_MEMORANDUM.md](DESIGN_MEMORANDUM
 - Charger: `SC8815`
 - Embassy setup: async I2C shared-bus; no USB on L0
 
-I2C default pins (adjust to your board):
-- `I2C1_SCL`: `PB6`
-- `I2C1_SDA`: `PB7`
+I2C pins (per CubeMX .ioc):
+- `I2C2` (INNER bus): `PB10` = SCL, `PB11` = SDA
+- `I2C1` (SMBus alert mode enabled): `PB6` = SCL, `PB7` = SDA, `PB5` = SMBA
 
-GPIO default mapping (adjust as needed):
-- `PA0`: `SC8815_PSTOP` (active low to enable charging)
-- `PA5`: Status LED (open-drain, active low)
-- `PB9`: Discharge enable input (low = enable)
-- `PA1`: Charge allow input (low = allow)
+GPIO mapping (per smart-battery.ioc):
+- `PA9`: `PSTOP` (GPIO Output) — HIGH = power stage gated, LOW = enable
+- `PA10`: `CE` (GPIO Output) — LOW = charger enabled
+- `PA5`: `LEDK` (TIM2_CH1 alternate, open‑drain LED in firmware)
+- `PA2`: `PCHG_EN` (GPIO Output)
+- `PA1`: `EXIT_SHIPMODE` (GPIO Output)
+- `PA0`: `ADC_IN0`
+- `PB1`: `ALERT` (EXTI1)
+- `PB2`: `INNER_INT` (EXTI2)
 
 ### Build & Run
 
