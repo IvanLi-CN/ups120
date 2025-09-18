@@ -4,7 +4,7 @@ use defmt::*;
 use embassy_time::{Duration, Timer};
 
 use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
-use embassy_stm32::{gpio::Input, i2c::I2c};
+use embassy_stm32::i2c::I2c;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 
 use bq769x0_async_rs::ProtectionConfig;
@@ -15,6 +15,12 @@ use bq769x0_async_rs::{
 // Import necessary data types
 use crate::shared::{Bq76920AlertsPublisher, Bq76920MeasurementsPublisher};
 
+const PACK_CHARGE_STOP_THRESHOLD_MV: i32 = 18_500;
+const PACK_OUTPUT_CUTOFF_THRESHOLD_MV: i32 = 12_500;
+const BALANCE_RESUME_THRESHOLD_MV: i32 = 3_305;
+const BALANCE_STOP_THRESHOLD_MV: i32 = 3_300;
+const BALANCE_DELTA_THRESHOLD_MV: i32 = 5;
+
 // Smart cell balancing logic based on charging status and voltage thresholds
 async fn execute_smart_battery_balancing<'a>(
     bq: &'a mut Bq769x0<
@@ -23,194 +29,90 @@ async fn execute_smart_battery_balancing<'a>(
         5,
     >,
     latest_core_measurements: &'a Option<bq769x0_async_rs::data_types::Bq76920Measurements<5>>,
+    active_cell: &mut Option<usize>,
 ) {
-    const NUM_CELLS: usize = 5;
-    const MIN_VOLTAGE_THRESHOLD_MV: i32 = 3300; // Minimum voltage threshold for balancing
-    const PACK_VOLTAGE_DIFF_THRESHOLD_MV: i32 = 10; // Pack voltage difference threshold
-    const MIN_BALANCE_DIFF_MV: i32 = 2; // Minimum voltage difference to trigger balancing
-
     if let Some(measurements) = latest_core_measurements {
-        // Determine if charging: CHG_ON is enabled AND current is positive (flowing into battery)
-        let chg_on = measurements.mos_status.0.contains(SysCtrl2Flags::CHG_ON);
-        let is_charging = chg_on && measurements.current_ma > 10; // 10mA threshold to avoid noise
-
-        info!("Battery Status:");
-        info!("  Charging: {}", is_charging);
-        info!("  Min voltage threshold: {} mV", MIN_VOLTAGE_THRESHOLD_MV);
-        info!(
-            "  Pack voltage diff threshold: {} mV",
-            PACK_VOLTAGE_DIFF_THRESHOLD_MV
-        );
-
-        // Display all cell voltages and find min/max
-        let mut valid_cells = 0;
         let mut min_voltage = i32::MAX;
         let mut max_voltage = 0i32;
+        let mut max_index = None;
 
-        for i in 0..NUM_CELLS {
-            let voltage = measurements.cell_voltages.voltages[i];
-            if voltage > 0 {
-                // Only include valid readings
-                info!("  Cell {}: {} mV", i + 1, voltage);
-                valid_cells += 1;
-                if voltage < min_voltage {
-                    min_voltage = voltage;
-                }
-                if voltage > max_voltage {
-                    max_voltage = voltage;
-                }
+        for (idx, &voltage) in measurements.cell_voltages.voltages.iter().enumerate() {
+            if voltage <= 0 {
+                continue;
+            }
+            if voltage < min_voltage {
+                min_voltage = voltage;
+            }
+            if voltage > max_voltage {
+                max_voltage = voltage;
+                max_index = Some(idx);
             }
         }
 
-        if valid_cells >= 2 {
-            let pack_voltage_diff = max_voltage - min_voltage;
-            info!(
-                "  Pack voltage difference: {} mV (max: {} mV, min: {} mV)",
-                pack_voltage_diff, max_voltage, min_voltage
-            );
+        let Some(max_cell_index) = max_index else {
+            warn!("No valid cell voltages available for balancing");
+            let _ = bq.set_cell_balancing(0).await;
+            *active_cell = None;
+            return;
+        };
 
-            // Check if balancing is allowed
-            let balancing_allowed = pack_voltage_diff > PACK_VOLTAGE_DIFF_THRESHOLD_MV
-                && (is_charging || min_voltage > MIN_VOLTAGE_THRESHOLD_MV);
+        let currently_balancing = *active_cell;
+        let mut desired_balancing: Option<usize> = None;
 
-            info!(
-                "  Balancing allowed: {} (pack_diff > {}mV: {}, charging_or_min_ok: {})",
-                balancing_allowed,
-                PACK_VOLTAGE_DIFF_THRESHOLD_MV,
-                pack_voltage_diff > PACK_VOLTAGE_DIFF_THRESHOLD_MV,
-                is_charging || min_voltage > MIN_VOLTAGE_THRESHOLD_MV
-            );
-
-            if balancing_allowed {
-                // Find the highest voltage cells for balancing
-                let mut cells_need_balancing: [bool; NUM_CELLS] = [false; NUM_CELLS];
-                let mut balance_candidate_count = 0;
-
-                // Create a list of valid cells with their voltages and indices
-                let mut valid_cells_list: [(usize, i32); NUM_CELLS] = [(0, 0); NUM_CELLS];
-                let mut valid_count = 0;
-
-                for i in 0..NUM_CELLS {
-                    let voltage = measurements.cell_voltages.voltages[i];
-                    if voltage > 0 {
-                        // Only include valid readings
-                        valid_cells_list[valid_count] = (i, voltage);
-                        valid_count += 1;
-                    }
-                }
-
-                if valid_count >= 2 {
-                    // Sort cells by voltage (highest first) - simple bubble sort for small arrays
-                    for i in 0..valid_count {
-                        for j in 0..valid_count - 1 - i {
-                            if valid_cells_list[j].1 < valid_cells_list[j + 1].1 {
-                                let temp = valid_cells_list[j];
-                                valid_cells_list[j] = valid_cells_list[j + 1];
-                                valid_cells_list[j + 1] = temp;
-                            }
-                        }
-                    }
-
-                    info!("  Cells sorted by voltage (highest first):");
-                    for idx in 0..valid_count {
-                        let (cell_idx, voltage) = valid_cells_list[idx];
-                        info!("    {}. Cell {}: {} mV", idx + 1, cell_idx + 1, voltage);
-                    }
-
-                    // Check if the highest voltage cells need balancing
-                    // Balance cells that are significantly higher than the minimum
-                    let min_cell_voltage = valid_cells_list[valid_count - 1].1; // Lowest voltage (last after sorting)
-
-                    for idx in 0..valid_count {
-                        let (cell_idx, voltage) = valid_cells_list[idx];
-                        let voltage_diff = voltage - min_cell_voltage;
-
-                        if voltage_diff >= MIN_BALANCE_DIFF_MV && balance_candidate_count < 2 {
-                            cells_need_balancing[cell_idx] = true;
-                            balance_candidate_count += 1;
-                            info!(
-                                "  Cell {} ({} mV) needs balancing (diff: {} mV > {} mV)",
-                                cell_idx + 1,
-                                voltage,
-                                voltage_diff,
-                                MIN_BALANCE_DIFF_MV
-                            );
-                        } else if voltage_diff < MIN_BALANCE_DIFF_MV {
-                            info!(
-                                "  Cell {} ({} mV) skipped balancing (diff: {} mV < {} mV)",
-                                cell_idx + 1,
-                                voltage,
-                                voltage_diff,
-                                MIN_BALANCE_DIFF_MV
-                            );
-                        }
-
-                        if balance_candidate_count >= 2 {
-                            info!("  Reached maximum 2 cells for balancing");
-                            break;
-                        }
-                    }
-                }
-
-                info!("  Cells needing balancing: {}", balance_candidate_count);
-
-                if balance_candidate_count > 0 {
-                    let mut balancing_mask: u16 = 0;
-
-                    for i in 0..NUM_CELLS {
-                        if cells_need_balancing[i] {
-                            balancing_mask |= 1 << i;
-                            info!(
-                                "  Balancing Cell {}: {} mV",
-                                i + 1,
-                                measurements.cell_voltages.voltages[i]
-                            );
-                        }
-                    }
-
-                    info!(
-                        "Enabling cell balancing: mask = 0b{:05b} ({} cells)",
-                        balancing_mask, balance_candidate_count
-                    );
-                    if let Err(e) = bq.set_cell_balancing(balancing_mask).await {
-                        error!("Failed to enable cell balancing: {:?}", e);
-                    } else {
-                        info!("Cell balancing enabled successfully.");
-                    }
-                } else {
-                    info!("No cells need balancing - disabling balancing");
-                    // Disable cell balancing
-                    if let Err(e) = bq.set_cell_balancing(0).await {
-                        error!("Failed to disable cell balancing: {:?}", e);
-                    } else {
-                        info!("Cell balancing disabled - no imbalance.");
-                    }
-                }
-            } else {
-                info!("Balancing not allowed - disabling balancing");
+        if let Some(active_idx) = currently_balancing {
+            let active_voltage = measurements.cell_voltages.voltages[active_idx];
+            if active_voltage <= BALANCE_STOP_THRESHOLD_MV {
                 info!(
-                    "  Pack voltage diff {} mV <= {} mV OR (not charging AND min voltage {} mV <= {} mV)",
-                    pack_voltage_diff,
-                    PACK_VOLTAGE_DIFF_THRESHOLD_MV,
-                    min_voltage,
-                    MIN_VOLTAGE_THRESHOLD_MV
+                    "Stopping balancing on cell {} ({} mV <= {} mV)",
+                    active_idx + 1,
+                    active_voltage,
+                    BALANCE_STOP_THRESHOLD_MV
                 );
+            } else {
+                desired_balancing = Some(active_idx);
+            }
+        }
 
-                // Disable cell balancing
+        if desired_balancing.is_none() {
+            if max_voltage - min_voltage >= BALANCE_DELTA_THRESHOLD_MV
+                && max_voltage >= BALANCE_RESUME_THRESHOLD_MV
+            {
+                desired_balancing = Some(max_cell_index);
+            }
+        }
+
+        match desired_balancing {
+            Some(cell_idx) => {
+                let mask = 1u16 << cell_idx;
+                if *active_cell != Some(cell_idx) {
+                    info!(
+                        "Starting balancing on cell {} ({} mV, spread {} mV)",
+                        cell_idx + 1,
+                        measurements.cell_voltages.voltages[cell_idx],
+                        max_voltage - min_voltage
+                    );
+                }
+                if let Err(e) = bq.set_cell_balancing(mask).await {
+                    error!("Failed to enable cell balancing: {:?}", e);
+                } else {
+                    *active_cell = Some(cell_idx);
+                }
+            }
+            None => {
+                if active_cell.is_some() {
+                    info!("No cells require balancing, disabling balancing FETs");
+                }
                 if let Err(e) = bq.set_cell_balancing(0).await {
                     error!("Failed to disable cell balancing: {:?}", e);
-                } else {
-                    info!("Cell balancing disabled - conditions not met.");
                 }
+                *active_cell = None;
             }
-        } else {
-            error!(
-                "Insufficient valid cell voltage readings for balancing (need at least 2 cells)"
-            );
-            // Disable balancing if insufficient data
-            if let Err(e) = bq.set_cell_balancing(0).await {
-                error!("Failed to disable cell balancing: {:?}", e);
-            }
+        }
+    } else {
+        if active_cell.is_some() {
+            info!("No measurements available, disabling balancing as a precaution");
+            let _ = bq.set_cell_balancing(0).await;
+            *active_cell = None;
         }
     }
 }
@@ -249,8 +151,6 @@ pub async fn bq76920_task(
     address: u8,
     sense_resistor_m_ohm: u32, // Added: Sense resistor value in mOhms
     ntc_params: Option<NtcParameters>, // Added: NTC parameters
-    pb9_discharge_control: Input<'static>, // Added: PB9 discharge control pin
-    pa1_charge_control: Input<'static>, // Added: PA1 charge control pin
     bq76920_alerts_publisher: Bq76920AlertsPublisher<'static>,
     bq76920_measurements_publisher: Bq76920MeasurementsPublisher<'static, 5>,
 ) {
@@ -281,7 +181,7 @@ pub async fn bq76920_task(
     let battery_config = BatteryConfig {
         // Per-cell thresholds
         overvoltage_trip: 3650u32,  // 3.65V OV per cell
-        undervoltage_trip: 2800u32, // 2.80V UV per cell
+        undervoltage_trip: 2500u32, // 2.50V UV per cell
         protection_config: ProtectionConfig {
             // 15A short-circuit, 10A overcurrent discharge
             scd_limit: 15_000i32,                         // 15_000 mA
@@ -297,7 +197,7 @@ pub async fn bq76920_task(
     match bq.try_apply_config(&battery_config).await {
         Ok(_) => {
             // If configuration is verified, proceed to enable the Discharge FET.
-            // Charge FET will be controlled by PA1 in the main loop.
+            // Charge FET gating is handled by the BQ76920 and charger task; leave it enabled here.
             let _ = bq.enable_discharging().await;
         }
         Err(BQ769x0Error::ConfigVerificationFailed {
@@ -333,6 +233,7 @@ pub async fn bq76920_task(
 
     // Main loop for continuous data acquisition and publishing.
     let mut balance_timer_counter: u32 = 0; // Counter for battery balancing frequency
+    let mut active_balancing_cell: Option<usize> = None;
 
     loop {
         // This task focuses on reading data from the BQ76920 itself.
@@ -460,11 +361,23 @@ pub async fn bq76920_task(
                     core_meas.mos_status.0.contains(SysCtrl2Flags::DELAY_DIS)
                 );
 
-                // PB9 discharge control: Check if PB9 is connected to GND (low level)
-                let pb9_enable_discharge = pb9_discharge_control.is_low();
+                // Evaluate pack-level conditions
+                let pack_voltage_mv = core_meas.total_voltage_mv;
+                let ov_fault = core_meas.system_status.0.contains(SysStatFlags::OV);
+                let scd_fault = core_meas.system_status.0.contains(SysStatFlags::SCD);
+                let ocd_fault = core_meas.system_status.0.contains(SysStatFlags::OCD);
+                let protection_allows_discharge = !uv_fault && !scd_fault && !ocd_fault;
 
-                // Combined discharge control logic: UV fault management + PB9 control
-                let should_enable_discharge = !uv_fault && pb9_enable_discharge;
+                let mut should_enable_discharge = protection_allows_discharge;
+
+                if pack_voltage_mv <= PACK_OUTPUT_CUTOFF_THRESHOLD_MV {
+                    info!(
+                        "DSG off: {}<= {} mV",
+                        pack_voltage_mv, PACK_OUTPUT_CUTOFF_THRESHOLD_MV
+                    );
+                    should_enable_discharge = false;
+                }
+
                 let is_discharge_currently_on =
                     core_meas.mos_status.0.contains(SysCtrl2Flags::DSG_ON);
 
@@ -474,18 +387,17 @@ pub async fn bq76920_task(
                     let _ = bq.disable_discharging().await;
                 }
 
-                // PA1 charge control: Check if PA1 is connected to GND (low level)
-                let pa1_allow_charging = pa1_charge_control.is_low();
+                let mut should_enable_charging = !ov_fault && !scd_fault && !ocd_fault && !uv_fault;
 
-                // Combined charge control logic: OV fault management + PA1 control
-                let ov_fault = core_meas.system_status.0.contains(SysStatFlags::OV);
-                let should_enable_charging = !ov_fault && pa1_allow_charging;
-                let is_charging_currently_on =
-                    core_meas.mos_status.0.contains(SysCtrl2Flags::CHG_ON);
+                if pack_voltage_mv >= PACK_CHARGE_STOP_THRESHOLD_MV
+                    || pack_voltage_mv <= PACK_OUTPUT_CUTOFF_THRESHOLD_MV
+                {
+                    should_enable_charging = false;
+                }
 
-                if should_enable_charging && !is_charging_currently_on {
+                if should_enable_charging {
                     let _ = bq.enable_charging().await;
-                } else if !should_enable_charging && is_charging_currently_on {
+                } else {
                     let _ = bq.disable_charging().await;
                 }
 
@@ -528,7 +440,12 @@ pub async fn bq76920_task(
         if balance_timer_counter == 0 || balance_timer_counter >= 3600 {
             // 3600 seconds = 1 hour
             info!("Executing hourly battery balancing logic.");
-            execute_smart_battery_balancing(&mut bq, &latest_core_measurements).await;
+            execute_smart_battery_balancing(
+                &mut bq,
+                &latest_core_measurements,
+                &mut active_balancing_cell,
+            )
+            .await;
             balance_timer_counter = 0; // Reset counter after execution
         }
         // --- End Battery Balancing Logic ---

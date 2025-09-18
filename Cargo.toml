@@ -15,8 +15,8 @@ default-members = [
  version = "0.1.0"
  authors = ["Ivan Li<ivanli2048@gmail.com>"]
 
- [workspace.dependencies]
- embassy-stm32 = { version = "0.2.0", path = "./embassy/embassy-stm32" }
+[workspace.dependencies]
+embassy-stm32 = { version = "0.2.0", path = "./embassy/embassy-stm32" }
  embassy-sync = { version = "0.7.0", path = "./embassy/embassy-sync" }
  embassy-executor = { version = "0.7.0", path = "./embassy/embassy-executor" }
  embassy-time = { version = "0.4.0", path = "./embassy/embassy-time" }
@@ -37,8 +37,18 @@ default-members = [
  embedded-io-async = { version = "0.6.1" }
  binrw = { version = "0.15", default-features = false }
  bq769x0-async-rs = { version = "*", path = "./bq76920" }
- sc8815 = { version = "*", path = "./sc8815" }
- ina226 = { version = "0.3.0" }
+sc8815 = { version = "*", path = "./sc8815" }
+ina226 = { version = "0.3.0" }
 
- [workspace.lints.rust]
- unused = "allow"
+[profile.release]
+codegen-units = 1
+debug = false
+debug-assertions = false
+incremental = false
+lto = "thin"
+opt-level = "z"
+overflow-checks = false
+panic = "abort"
+
+[workspace.lints.rust]
+unused = "allow"

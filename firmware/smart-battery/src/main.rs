@@ -12,7 +12,7 @@ use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
 use embassy_executor::Spawner;
 use embassy_stm32::{
     bind_interrupts,
-    gpio::{Input, Level, Output, Pull, Speed},
+    gpio::{Level, Output, Speed},
     i2c::{self, Config as I2cConfig, I2c},
     peripherals::I2C2,
     time::Hertz,
@@ -41,6 +41,7 @@ async fn main(_spawner: Spawner) {
     // Keep SC8815 power stage disabled during configuration.
     let ce = Output::new(p.PA10, Level::High, Speed::Low);
     let pstop = Output::new(p.PA9, Level::High, Speed::Low);
+    let mut exit_shipmode = Output::new(p.PA1, Level::Low, Speed::Low);
     info!("Startup: CE=HIGH (disabled), PSTOP=HIGH (power stage gated)");
 
     // Prepare INNER I2C bus (I2C2 on PB10/PB11) with 100 kHz clock and wrap as shared bus.
@@ -59,10 +60,6 @@ async fn main(_spawner: Spawner) {
     static I2C2_BUS: StaticCell<I2c2Bus> = StaticCell::new();
     let i2c_bus: &'static I2c2Bus = I2C2_BUS.init(Mutex::new(i2c));
 
-    // Create control inputs for BQ76920 task (active-low enables). Use pull-ups so default is disabled.
-    let pb9_discharge_control = Input::new(p.PB9, Pull::Up);
-    let pa1_charge_control = Input::new(p.PA1, Pull::Up);
-
     // Initialize pubsub channels and get publishers for BQ76920 task
     let (
         _measurements_pub,
@@ -78,6 +75,7 @@ async fn main(_spawner: Spawner) {
     ) = shared::init_pubsubs();
 
     // Gate other tasks on successful BQ76920 initialization using fixed I2C address.
+    let mut ship_mode_pulsed = false;
     let _selected_bq_addr = loop {
         info!(
             "Attempting BQ76920 init at fixed I2C addr=0x{:02x}",
@@ -88,7 +86,7 @@ async fn main(_spawner: Spawner) {
             Bq769x0::new(i2c_dev_for_bq, BQ76920_I2C_ADDR, 3, None);
         let cfg = BatteryConfig {
             overvoltage_trip: 3650,  // 3.65V per cell
-            undervoltage_trip: 2800, // 2.80V per cell
+            undervoltage_trip: 2500, // 2.50V per cell
             protection_config: ProtectionConfig {
                 scd_limit: 15_000, // 15A short-circuit
                 ocd_limit: 10_000, // 10A overcurrent
@@ -112,8 +110,6 @@ async fn main(_spawner: Spawner) {
                         BQ76920_I2C_ADDR,
                         3,    // sense resistor mΩ
                         None, // no NTC parameters provided
-                        pb9_discharge_control,
-                        pa1_charge_control,
                         bq76920_alerts_pub,
                         bq76920_meas_pub,
                     ))
@@ -127,9 +123,23 @@ async fn main(_spawner: Spawner) {
                 );
             }
         }
-        warn!("BQ76920 not responding. Retrying in 5s...");
-        Timer::after(Duration::from_secs(5)).await;
+        if !ship_mode_pulsed {
+            info!("Attempting to exit ship mode via PA1 pulse");
+            exit_shipmode.set_high();
+            Timer::after(Duration::from_millis(500)).await;
+            exit_shipmode.set_low();
+            ship_mode_pulsed = true;
+            continue;
+        }
+
+        warn!("BQ76920 not responding. Retrying in 1s without ship-mode pulse...");
+        Timer::after(Duration::from_secs(1)).await;
     };
+
+    // Create a subscriber for BQ76920 measurements to feed charger control logic.
+    let bq76920_meas_sub = _bq76920_meas_chan
+        .subscriber()
+        .expect("Allocate BQ76920 measurements subscriber");
 
     // Spawn SC8815 charger management task now that the protection IC is live.
     let i2c_dev_for_sc = I2cDevice::new(i2c_bus);
@@ -137,10 +147,12 @@ async fn main(_spawner: Spawner) {
         .spawn(sc8815_task::sc8815_task(
             ce,
             pstop,
+            exit_shipmode,
             i2c_dev_for_sc,
             sc8815_task::SC8815_DEFAULT_ADDRESS,
             sc8815_alerts_pub,
             sc8815_meas_pub,
+            bq76920_meas_sub,
         ))
         .ok();
 

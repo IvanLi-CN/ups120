@@ -35,9 +35,9 @@ pub async fn charger_task(
 
     config.battery.use_internal_setting = false;
 
-    // Configure current limits with 5mΩ sense resistors (as per reference)
-    config.current_limits.rs1_mohm = 5;
-    config.current_limits.rs2_mohm = 5;
+    // Configure current limits with 10mΩ sense resistors
+    config.current_limits.rs1_mohm = 10;
+    config.current_limits.rs2_mohm = 10;
     config.current_limits.ibus_limit_ma = 500; // 500mA input current
     config.current_limits.ibat_limit_ma = 500; // 500mA charging current
 
@@ -136,7 +136,7 @@ pub async fn charger_task(
                 if measurements.vbat_mv < 18000 {
                     pstop_pin.set_low();
                     info!("[DEBUG] PSTOP set to LOW - charging should be enabled");
-                    if let Err(_) = sc8815.set_ibat_limit(500, 0, 5).await {
+                    if let Err(_) = sc8815.set_ibat_limit(500, 0, 10).await {
                         sc8815_comm_failed = true;
                     }
                     if let Err(_) = sc8815.set_otg_mode(false).await {
@@ -183,6 +183,8 @@ pub async fn charger_task(
         if let Some(status) = sc8815_status_option {
             let alerts = crate::data_types::Sc8815Alerts {
                 device_status: status,
+                expected_charging: false,
+                charging_confirmed: false,
             };
             sc8815_alerts_publisher.publish_immediate(alerts);
         }
