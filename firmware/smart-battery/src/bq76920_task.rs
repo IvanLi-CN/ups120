@@ -21,6 +21,10 @@ const BALANCE_RESUME_THRESHOLD_MV: i32 = 3_305;
 const BALANCE_STOP_THRESHOLD_MV: i32 = 3_300;
 const BALANCE_DELTA_THRESHOLD_MV: i32 = 5;
 
+// Test knob: force both CHG/DSG FETs off for charger-path diagnostics.
+// Default false for normal operation; set true only for lab diagnostics.
+const TEST_FORCE_BQ_FETS_OFF: bool = false;
+
 // Smart cell balancing logic based on charging status and voltage thresholds
 async fn execute_smart_battery_balancing<'a>(
     bq: &'a mut Bq769x0<
@@ -154,6 +158,7 @@ pub async fn bq76920_task(
     bq76920_alerts_publisher: Bq76920AlertsPublisher<'static>,
     bq76920_measurements_publisher: Bq76920MeasurementsPublisher<'static, 5>,
 ) {
+    info!("TEST_FORCE_BQ_FETS_OFF={}", TEST_FORCE_BQ_FETS_OFF);
     // Initialize the BQ769x0 driver instance with CRC enabled and for 5 cells.
     // sense_resistor_m_ohm and ntc_params are now passed as arguments to this task.
     let mut bq: Bq769x0<
@@ -196,9 +201,15 @@ pub async fn bq76920_task(
     // have been written correctly by reading them back.
     match bq.try_apply_config(&battery_config).await {
         Ok(_) => {
-            // If configuration is verified, proceed to enable the Discharge FET.
-            // Charge FET gating is handled by the BQ76920 and charger task; leave it enabled here.
-            let _ = bq.enable_discharging().await;
+            if TEST_FORCE_BQ_FETS_OFF {
+                info!("TEST: Forcing BQ76920 FETs OFF after config (init phase)");
+                let _ = bq.disable_discharging().await;
+                let _ = bq.disable_charging().await;
+            } else {
+                // If configuration is verified, proceed to enable the Discharge FET.
+                // Charge FET gating is handled by the BQ76920 and charger task; leave it enabled here.
+                let _ = bq.enable_discharging().await;
+            }
         }
         Err(BQ769x0Error::ConfigVerificationFailed {
             register,
@@ -242,6 +253,11 @@ pub async fn bq76920_task(
         // Note: The CC_EN (Coulomb Counter Enable) flag in SYS_CTRL2 is set by default
         // in `BatteryConfig::default()` and verified by `try_apply_config`.
         // Therefore, an explicit check and write for CC_EN in this loop is no longer necessary.
+
+        if TEST_FORCE_BQ_FETS_OFF {
+            // Ensure cell balancing FETs are also off during diagnostics.
+            let _ = bq.set_cell_balancing(0).await;
+        }
 
         info!("--- Reading BQ76920 Data ---");
 
@@ -381,10 +397,16 @@ pub async fn bq76920_task(
                 let is_discharge_currently_on =
                     core_meas.mos_status.0.contains(SysCtrl2Flags::DSG_ON);
 
-                if should_enable_discharge && !is_discharge_currently_on {
-                    let _ = bq.enable_discharging().await;
-                } else if !should_enable_discharge && is_discharge_currently_on {
-                    let _ = bq.disable_discharging().await;
+                if TEST_FORCE_BQ_FETS_OFF {
+                    if is_discharge_currently_on {
+                        let _ = bq.disable_discharging().await;
+                    }
+                } else {
+                    if should_enable_discharge && !is_discharge_currently_on {
+                        let _ = bq.enable_discharging().await;
+                    } else if !should_enable_discharge && is_discharge_currently_on {
+                        let _ = bq.disable_discharging().await;
+                    }
                 }
 
                 let mut should_enable_charging = !ov_fault && !scd_fault && !ocd_fault && !uv_fault;
@@ -395,10 +417,15 @@ pub async fn bq76920_task(
                     should_enable_charging = false;
                 }
 
-                if should_enable_charging {
-                    let _ = bq.enable_charging().await;
-                } else {
+                if TEST_FORCE_BQ_FETS_OFF {
                     let _ = bq.disable_charging().await;
+                    info!("TEST: Forcing BQ76920 CHG/DSG OFF (runtime)");
+                } else {
+                    if should_enable_charging {
+                        let _ = bq.enable_charging().await;
+                    } else {
+                        let _ = bq.disable_charging().await;
+                    }
                 }
 
                 // Publish BQ76920 alert information (derived from system status).
@@ -439,13 +466,21 @@ pub async fn bq76920_task(
         // --- Battery Balancing Logic (executed approximately once per hour) ---
         if balance_timer_counter == 0 || balance_timer_counter >= 3600 {
             // 3600 seconds = 1 hour
-            info!("Executing hourly battery balancing logic.");
-            execute_smart_battery_balancing(
-                &mut bq,
-                &latest_core_measurements,
-                &mut active_balancing_cell,
-            )
-            .await;
+            if !TEST_FORCE_BQ_FETS_OFF {
+                info!("Executing hourly battery balancing logic.");
+                execute_smart_battery_balancing(
+                    &mut bq,
+                    &latest_core_measurements,
+                    &mut active_balancing_cell,
+                )
+                .await;
+            } else {
+                // During diagnostics, keep all balancing off.
+                if active_balancing_cell.is_some() {
+                    let _ = bq.set_cell_balancing(0).await;
+                    active_balancing_cell = None;
+                }
+            }
             balance_timer_counter = 0; // Reset counter after execution
         }
         // --- End Battery Balancing Logic ---

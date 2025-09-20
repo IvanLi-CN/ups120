@@ -7,8 +7,6 @@ target = "thumbv6m-none-eabi"  # Make `cargo build` at repo root build the MCU c
 runner = "probe-rs run --chip STM32L051C8Tx --probe 0d28:0204:2BDC77EE006DCE9B589D7AD8F22BD989"
 
 rustflags = [
-  "-C", "link-arg=-Tlink.x",
-  "-C", "link-arg=-Tdefmt.x",
   "-C", "link-arg=--nmagic",
 ]
 
