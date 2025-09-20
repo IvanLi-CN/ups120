@@ -34,6 +34,8 @@ const SNAP_BQ_EVERY_SEC: u32 = 1; // one-line snapshot interval (seconds)
 // Test knob: force both CHG/DSG FETs off for charger-path diagnostics.
 // Default false for normal operation; set true only for lab diagnostics.
 const TEST_FORCE_BQ_FETS_OFF: bool = false;
+// Interlock deadtime when switching balancing target cells (safety)
+const BALANCE_SWITCH_DEADTIME_MS: u64 = 40;
 
 // Smart cell balancing logic based on charging status and voltage thresholds
 async fn execute_smart_battery_balancing<'a>(
@@ -121,6 +123,17 @@ async fn execute_smart_battery_balancing<'a>(
         if let Some(cell_idx) = candidate {
             let mask = 1u16 << cell_idx;
             if *active_cell != Some(cell_idx) {
+                if let Some(prev) = *active_cell {
+                    // Ensure single-cell-only: turn all off, wait deadtime, then enable new cell
+                    let _ = bq.set_cell_balancing(0).await;
+                    info!(
+                        "Balancing switch deadtime {}ms ({} -> {} )",
+                        BALANCE_SWITCH_DEADTIME_MS,
+                        prev + 1,
+                        cell_idx + 1
+                    );
+                    Timer::after(Duration::from_millis(BALANCE_SWITCH_DEADTIME_MS)).await;
+                }
                 info!(
                     "Starting balancing on cell {} ({} mV, spread {} mV)",
                     cell_idx + 1,

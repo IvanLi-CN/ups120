@@ -108,13 +108,13 @@ controls, and telemetry loops that underpin bring-up.
   `AllMeasurements` snapshot without every task polling individual peripherals.
 **Balancing and Charging Coupling (Normative)**
 
-- Balancing shall be evaluated and performed only while an external adapter is present and the charger is available.
-- While balancing is required or active, the charger shall be held in constant-voltage (CV) mode to maintain the configured VBAT setpoint. If the charger terminates, firmware shall immediately re-enter CV until balancing completion or a safety constraint preempts charging.
-- If the adapter is lost (VBUS invalid) at any time, firmware shall immediately stop balancing, assert PSTOP and CE to disable charging, and inhibit charge restarts for at least 5 s (debounce) after adapter reappearance.
-- Balancing completion is reached when both conditions hold for at least `T_hold` (≥ 60 s):
-  - All cells in the balancing candidate set are ≤ `BALANCE_STOP_THRESHOLD_MV` (default 3300 mV);
-  - Pack cell spread is < `BALANCE_DELTA_THRESHOLD_MV` (default 5 mV).
-- The BQ76920 hardware supports one cell balanced at a time; the firmware shall respect this limitation.
+- Charging-phase gating: Balancing shall be evaluated and may run only while an external adapter is present and the charger is available (i.e., in the charging phase).
+- Start condition: Pack cell spread (max − min) shall be ≥ 10 mV to consider balancing required.
+- Single-cell only: At any time, at most one cell may be actively balanced. When changing the target cell, firmware shall first disable all balancing FETs, wait a deadtime ≥ 40 ms, then enable the new cell.
+- Selection rule: Choose one globally highest-voltage cell that exceeds at least one immediate neighbor by > 1 mV (for end cells, compare the single neighbor; for middle cells, either left or right neighbor suffices).
+- Stop condition: Stop balancing when all adjacent cell-to-cell differences are ≤ 1 mV across the pack.
+- Charger coupling: While balancing is required or active, the charger shall be held in constant-voltage (CV) mode to maintain the configured VBAT setpoint. If the charger terminates, firmware shall immediately re-enter CV until balancing completion or a safety constraint preempts charging.
+- Adapter loss: If the adapter is lost (VBUS invalid) at any time, firmware shall immediately stop balancing, assert PSTOP and CE to disable charging, and inhibit charge restarts for at least 5 s (debounce) after adapter reappearance.
 
 **LED Status – Single LED (Normative)**
 
