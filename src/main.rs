@@ -1,52 +1,49 @@
 #![no_std]
 #![no_main]
-// #![feature(type_alias_impl_trait)] // Required for embassy tasks
 
 extern crate alloc; // Required for global allocator
 
-// use defmt::*; // Removed unused import
+mod bq76920_task;
+mod charger_task;
+mod data_types;
+mod ina226_task;
+mod led_status_task;
+mod otg_task;
+mod shared;
+mod usb;
+
+use defmt::*;
 use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
 use embassy_executor::Spawner;
-use embassy_stm32::{
+use embassy_rp::{
     bind_interrupts,
-    gpio::{Input, Level, Output, OutputOpenDrain, Pull, Speed},
+    gpio::{Input, Level, Output, Pull},
     i2c::{self, I2c},
-    peripherals, // Keep peripherals here
-    time::Hertz,
-    usb::Driver, // Remove InterruptHandler as it's not directly used here
+    peripherals,
+    usb::{Driver, InterruptHandler},
 };
-// Import NtcParameters if it's to be configured here
-use bq769x0_async_rs::data_types::NtcParameters;
-
-bind_interrupts!(
-    struct Irqs {
-        USB_LP => embassy_stm32::usb::InterruptHandler<peripherals::USB>;
-        I2C1_EV => i2c::EventInterruptHandler<peripherals::I2C1>;
-        I2C1_ER => i2c::ErrorInterruptHandler<peripherals::I2C1>;
-    }
-);
 use embassy_time::{Duration, Timer};
 use {defmt_rtt as _, panic_probe as _};
 
-// 声明共享模块
-// mod bq25730_task; // Commented out - replaced with SC8815
-mod bq76920_task;
-mod data_types;
-// mod ina226_task; // Commented out - not using INA226 for now
-mod charger_task; // Added charger task (SC8815)
-mod led_status_task; // Added LED status indication task
-mod shared;
-mod usb; // Keep this for our local usb module
+// Import BQ76920 related types
+use bq769x0_async_rs::data_types::NtcParameters;
 
 // For sharing I2C bus
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex;
 
 // Global allocator
-use embedded_alloc::LlffHeap as Heap; // Import Heap from embedded_alloc
+use embedded_alloc::LlffHeap as Heap;
 
 #[global_allocator]
 static HEAP: Heap = Heap::empty();
+
+// Bind interrupts for I2C and USB
+bind_interrupts!(struct Irqs {
+    I2C0_IRQ => i2c::InterruptHandler<peripherals::I2C0>;
+    I2C1_IRQ => i2c::InterruptHandler<peripherals::I2C1>;
+    USBCTRL_IRQ => InterruptHandler<peripherals::USB>;
+});
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
@@ -61,154 +58,254 @@ async fn main(spawner: Spawner) {
         }
     }
 
-    // 初始化消息队列并获取生产者和消费者
-    let (
-        measurements_publisher,        // Publisher for AllMeasurements
-        _measurements_channel,         // Channel for AllMeasurements, if needed to create more subs
-        sc8815_alerts_publisher,       // Publisher for SC8815 Alerts
-        sc8815_alerts_channel,         // Channel for SC8815 Alerts
-        bq76920_alerts_publisher,      // Publisher for BQ76920 Alerts
-        bq76920_alerts_channel,        // Channel for BQ76920 Alerts, used to create subscriber
-        sc8815_measurements_publisher, // Publisher for SC8815 Measurements
-        sc8815_measurements_channel,   // Channel for SC8815 Measurements, used to create subscriber
-        bq76920_measurements_publisher,
-        bq76920_measurements_channel, // Channel for BQ76920 Measurements, used to create subscriber
-    ) = shared::init_pubsubs();
+    let p = embassy_rp::init(Default::default());
+    info!("UPS120 RP2040 Firmware Starting...");
 
-    let config = embassy_stm32::Config::default();
-    let p = embassy_stm32::init(config);
-
-    let usb_driver = Driver::new(p.USB, Irqs, p.PA12, p.PA11);
-    spawner
-        .spawn(usb::usb_task(
-            usb_driver,
-            measurements_publisher, // This is MeasurementsPublisher<'static, 5>
-            sc8815_measurements_channel.subscriber().unwrap(), // Create SC8815 measurements subscriber
-            bq76920_measurements_channel.subscriber().unwrap(), // Create BQ76920 measurements subscriber
-            sc8815_alerts_channel.subscriber().unwrap(),        // Create SC8815 alerts subscriber
-            bq76920_alerts_channel.subscriber().unwrap(),       // Create BQ76920 alerts subscriber
-        ))
-        .unwrap();
-
-    // Configure I2C1 (PB6 SCL, PB7 SDA) with DMA
+    // Configure I2C0 (GP0 SDA, GP1 SCL) for device communication
+    // External 4.7kΩ pull-up resistors added for reliable operation
     let mut i2c_config = i2c::Config::default();
-    i2c_config.scl_pullup = true;
-    i2c_config.sda_pullup = true;
+    i2c_config.frequency = 100_000; // 100kHz with external pull-ups for optimal performance
 
     // Create a static Mutex to share the I2C bus between multiple drivers
     static I2C_BUS_MUTEX_CELL: static_cell::StaticCell<
-        Mutex<CriticalSectionRawMutex, I2c<'static, embassy_stm32::mode::Async>>,
+        Mutex<CriticalSectionRawMutex, I2c<'static, peripherals::I2C0, i2c::Async>>,
     > = static_cell::StaticCell::new();
-    let i2c_instance = embassy_stm32::i2c::I2c::new(
-        p.I2C1,
-        p.PA15, // Assuming PA15 is SCL, PB7 is SDA. Please verify.
-        p.PB7,
-        Irqs,
-        p.DMA1_CH3, // DMA for TX
-        p.DMA1_CH4, // DMA for RX
-        Hertz(100_000),
-        i2c_config,
+
+    // Create I2C instance
+    // Note: If communication is unstable, add external 4.7kΩ pull-up resistors
+    let i2c_instance = I2c::new_async(
+        p.I2C0, p.PIN_1, // SCL (GP1)
+        p.PIN_0, // SDA (GP0)
+        Irqs, i2c_config,
     );
 
     // Initialize the static Mutex with the I2C instance
     let i2c_bus_mutex = I2C_BUS_MUTEX_CELL.init(Mutex::new(unsafe {
         core::mem::transmute::<
-            embassy_stm32::i2c::I2c<'_, embassy_stm32::mode::Async>,
-            embassy_stm32::i2c::I2c<'static, embassy_stm32::mode::Async>,
+            I2c<'_, peripherals::I2C0, i2c::Async>,
+            I2c<'static, peripherals::I2C0, i2c::Async>,
         >(i2c_instance)
     }));
 
-    // BQ76920 I2C address (7-bit)
-    let bq76920_address = 0x08;
-    // SC8815 I2C address (7-bit)
-    let sc8815_address = 0x74; // Default SC8815 address
+    // Device I2C addresses (7-bit)
+    let _bq76920_address = 0x08;
+    let _sc8815_address = 0x74;
 
-    // Configure PSTOP GPIO pin for SC8815 (PA0)
-    // PSTOP high = charging disabled, PSTOP low = charging enabled
-    let pstop_pin = Output::new(p.PA0, Level::High, Speed::Low); // Start with charging disabled
+    // Configure I2C1 (GP2 SDA, GP3 SCL) for OTG device communication
+    let mut i2c1_config = i2c::Config::default();
+    i2c1_config.frequency = 100_000; // 100kHz
 
-    // Configure LED status pin (PA5) - Open drain, active low
-    let led_pin = OutputOpenDrain::new(p.PA5, Level::High, Speed::Low); // Start with LED off (high level)
+    // Create a static Mutex to share the I2C1 bus for OTG
+    static I2C1_BUS_MUTEX_CELL: static_cell::StaticCell<
+        Mutex<CriticalSectionRawMutex, I2c<'static, peripherals::I2C1, i2c::Async>>,
+    > = static_cell::StaticCell::new();
 
-    // Configure PB9 as input with pull-up for BQ76920 discharge control
-    // When PB9 is connected to GND, discharge is enabled; otherwise disabled
-    let pb9_discharge_control = Input::new(p.PB9, Pull::Up);
+    // Create I2C1 instance for OTG
+    let i2c1_instance = I2c::new_async(
+        p.I2C1,
+        p.PIN_3, // SCL (GP3)
+        p.PIN_2, // SDA (GP2)
+        Irqs,
+        i2c1_config,
+    );
 
-    // Configure PA1 as input with pull-up for charging control
-    // When PA1 is connected to GND (low level), charging is allowed; otherwise disabled
-    let pa1_charge_control = Input::new(p.PA1, Pull::Up);
+    // Initialize the static Mutex with the I2C1 instance
+    let i2c1_bus_mutex = I2C1_BUS_MUTEX_CELL.init(Mutex::new(unsafe {
+        core::mem::transmute::<
+            I2c<'_, peripherals::I2C1, i2c::Async>,
+            I2c<'static, peripherals::I2C1, i2c::Async>,
+        >(i2c1_instance)
+    }));
 
-    // Spawn device tasks
-    spawner
-        .spawn(charger_task::charger_task(
-            I2cDevice::new(i2c_bus_mutex), // Create a new I2cDevice for the task using the static mutex
-            sc8815_address,
-            pstop_pin, // PSTOP control pin
-            sc8815_alerts_publisher,
-            sc8815_measurements_publisher, // This is Sc8815MeasurementsPublisher
-            bq76920_measurements_channel.subscriber().unwrap(), // Create BQ76920 measurements subscriber for charger_task
-        ))
-        .unwrap();
+    // Configure GPIO pins for RP2040 (updated pin assignments)
+    // PSTOP control pin for charging SC8815 (GP4) - High = charging disabled, Low = charging enabled
+    let pstop_pin = Output::new(p.PIN_4, Level::High);
 
-    // Commented out BQ25730 and INA226 tasks - replaced with SC8815
-    // spawner
-    //     .spawn(bq25730_task::bq25730_task(
-    //         I2cDevice::new(i2c_bus_mutex),
-    //         bq25730_address,
-    //         bq25730_alerts_publisher,
-    //         bq25730_measurements_publisher,
-    //         bq76920_measurements_channel.subscriber().unwrap(),
-    //     ))
-    //     .unwrap();
+    // PSTOP control pin for OTG SC8815 (GP7) - High = OTG disabled, Low = OTG enabled
+    let otg_pstop_pin = Output::new(p.PIN_7, Level::High);
 
-    // spawner
-    //     .spawn(ina226_task::ina226_task(
-    //         I2cDevice::new(i2c_bus_mutex),
-    //         ina226_address,
-    //         ina226_measurements_publisher,
-    //     ))
-    //     .unwrap();
+    // LED status pin (GP25 - onboard LED)
+    let led_pin = Output::new(p.PIN_25, Level::Low);
 
-    let bq76920_i2c_bus = I2cDevice::new(i2c_bus_mutex); // Create a new I2cDevice for the task using the static mutex
+    // Discharge control input (GP5) - Low = discharge enabled
+    let _discharge_control = Input::new(p.PIN_5, Pull::Up);
 
-    // Define BQ76920 specific configurations needed for its driver initialization
-    let bq76920_sense_resistor_m_ohm: u32 = 3; // Example: 3 mΩ
-    // TODO: Determine the actual source of NtcParameters if external thermistors are used.
-    let bq76920_ntc_params: Option<NtcParameters> = None;
-    // Example for fixed NTC:
-    // let bq76920_ntc_params = Some(NtcParameters {
-    // b_value: 3950.0,
-    // ref_temp_k: 298,
-    // ref_resistance_ohm: 10000,
-    // });
+    // Charge control input (GP6) - Low = charge allowed
+    let _charge_control = Input::new(p.PIN_6, Pull::Up);
 
-    spawner
-        .spawn(bq76920_task::bq76920_task(
-            bq76920_i2c_bus,
-            bq76920_address,
-            bq76920_sense_resistor_m_ohm, // Pass sense resistor value
-            bq76920_ntc_params,           // Pass NTC parameters
-            pb9_discharge_control,        // Pass PB9 discharge control pin
-            pa1_charge_control,           // Pass PA1 charge control pin
-            bq76920_alerts_publisher,
-            bq76920_measurements_publisher, // Pass the BQ76920 measurements publisher
-        ))
-        .unwrap();
+    info!("Hardware initialization complete");
+    info!("I2C0 bus configured on GP0(SDA)/GP1(SCL) for main devices");
+    info!("I2C1 bus configured on GP2(SDA)/GP3(SCL) for OTG device");
+    info!("GPIO pins configured:");
+    info!("  - GP4: PSTOP control (charging)");
+    info!("  - GP5: Discharge control input");
+    info!("  - GP6: Charge control input");
+    info!("  - GP7: PSTOP control (OTG)");
+    info!("  - GP25: Status LED");
 
-    // Spawn LED status indication task
+    // Test I2C bus availability
+    let _i2c_device = I2cDevice::new(i2c_bus_mutex);
+    info!("I2C device created successfully");
+
+    // Initialize PubSub system
+    let (
+        measurements_publisher,
+        _measurements_channel,
+        sc8815_alerts_publisher,
+        sc8815_alerts_channel,
+        bq76920_alerts_publisher,
+        bq76920_alerts_channel,
+        sc8815_measurements_publisher,
+        sc8815_measurements_channel,
+        bq76920_measurements_publisher,
+        bq76920_measurements_channel,
+        ina226_measurements_publisher,
+        ina226_measurements_channel,
+        otg_status_publisher,
+        otg_status_channel,
+    ) = shared::init_pubsubs();
+
+    info!("PubSub system initialized");
+
+    // Create subscribers for LED task
+    let sc8815_alerts_subscriber = sc8815_alerts_channel.subscriber().unwrap();
+    let sc8815_measurements_subscriber = sc8815_measurements_channel.subscriber().unwrap();
+    let bq76920_alerts_subscriber = bq76920_alerts_channel.subscriber().unwrap();
+    let otg_status_subscriber_for_led = otg_status_channel.subscriber().unwrap();
+
+    // Spawn LED status task
     spawner
         .spawn(led_status_task::led_status_task(
             led_pin,
-            sc8815_alerts_channel.subscriber().unwrap(), // Create SC8815 alerts subscriber for LED task
-            sc8815_measurements_channel.subscriber().unwrap(), // Create SC8815 measurements subscriber for LED task
-            bq76920_alerts_channel.subscriber().unwrap(), // Create BQ76920 alerts subscriber for LED task
+            sc8815_alerts_subscriber,
+            sc8815_measurements_subscriber,
+            bq76920_alerts_subscriber,
+            otg_status_subscriber_for_led,
         ))
         .unwrap();
 
-    // The main loop is no longer needed here as device logic is in separate tasks
-    // This task can now just idle or perform other high-level coordination if needed.
+    info!("LED status task spawned");
 
+    // Create BQ76920 I2C device
+    let bq76920_i2c_device = I2cDevice::new(i2c_bus_mutex);
+
+    // BQ76920 configuration parameters
+    let bq76920_address = 0x08; // 7-bit I2C address
+    let sense_resistor_m_ohm = 3; // 3mΩ sense resistor (corrected to match actual hardware)
+    let ntc_params: Option<NtcParameters> = None; // No NTC parameters for now
+
+    // Spawn BQ76920 task
+    spawner
+        .spawn(bq76920_task::bq76920_task(
+            bq76920_i2c_device,
+            bq76920_address,
+            sense_resistor_m_ohm,
+            ntc_params,
+            _discharge_control,
+            _charge_control,
+            bq76920_alerts_publisher,
+            bq76920_measurements_publisher,
+        ))
+        .unwrap();
+
+    info!("BQ76920 task spawned");
+
+    // Create SC8815 I2C device
+    let sc8815_i2c_device = I2cDevice::new(i2c_bus_mutex);
+
+    // SC8815 configuration parameters
+    let sc8815_address = 0x74; // 7-bit I2C address
+
+    // Create BQ76920 measurements subscriber for charger task
+    let bq76920_measurements_subscriber_for_charger =
+        bq76920_measurements_channel.subscriber().unwrap();
+
+    // Spawn charger task
+    spawner
+        .spawn(charger_task::charger_task(
+            sc8815_i2c_device,
+            sc8815_address,
+            pstop_pin,
+            sc8815_alerts_publisher,
+            sc8815_measurements_publisher,
+            bq76920_measurements_subscriber_for_charger,
+        ))
+        .unwrap();
+
+    info!("Charger task spawned");
+
+    // Create INA226 I2C device
+    let ina226_i2c_device = I2cDevice::new(i2c_bus_mutex);
+
+    // INA226 configuration parameters
+    let ina226_address = 0x40; // 7-bit I2C address (default for INA226)
+
+    // Spawn INA226 task
+    spawner
+        .spawn(ina226_task::ina226_task(
+            ina226_i2c_device,
+            ina226_address,
+            ina226_measurements_publisher,
+        ))
+        .unwrap();
+
+    info!("INA226 task spawned");
+
+    // Create OTG I2C device
+    let otg_i2c_device = I2cDevice::new(i2c1_bus_mutex);
+
+    // OTG configuration
+    let otg_config = crate::data_types::OtgConfiguration::default();
+    let otg_address = 0x74; // SC8815 default address
+
+    // Create INA226 measurements subscriber for OTG task
+    let ina226_measurements_subscriber_for_otg = ina226_measurements_channel.subscriber().unwrap();
+
+    // Spawn OTG task
+    spawner
+        .spawn(otg_task::otg_task(
+            otg_i2c_device,
+            otg_address,
+            otg_config,
+            ina226_measurements_subscriber_for_otg,
+            otg_status_publisher,
+            otg_pstop_pin,
+        ))
+        .unwrap();
+
+    info!("OTG task spawned");
+
+    // Create USB driver
+    let usb_driver = Driver::new(p.USB, Irqs);
+
+    // Create subscribers for USB task
+    let ina226_measurements_subscriber_for_usb = ina226_measurements_channel.subscriber().unwrap();
+    let sc8815_measurements_subscriber_for_usb = sc8815_measurements_channel.subscriber().unwrap();
+    let bq76920_measurements_subscriber_for_usb =
+        bq76920_measurements_channel.subscriber().unwrap();
+    let sc8815_alerts_subscriber_for_usb = sc8815_alerts_channel.subscriber().unwrap();
+    let bq76920_alerts_subscriber_for_usb = bq76920_alerts_channel.subscriber().unwrap();
+    let otg_status_subscriber_for_usb = otg_status_channel.subscriber().unwrap();
+
+    // Spawn USB task
+    spawner
+        .spawn(usb::usb_task(
+            usb_driver,
+            measurements_publisher,
+            ina226_measurements_subscriber_for_usb,
+            sc8815_measurements_subscriber_for_usb,
+            bq76920_measurements_subscriber_for_usb,
+            sc8815_alerts_subscriber_for_usb,
+            bq76920_alerts_subscriber_for_usb,
+            otg_status_subscriber_for_usb,
+        ))
+        .unwrap();
+
+    info!("USB task spawned");
+
+    // Main loop - just keep the system running
     loop {
-        Timer::after(Duration::from_secs(1)).await;
+        info!("System heartbeat");
+        Timer::after(Duration::from_millis(5000)).await;
     }
 }

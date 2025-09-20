@@ -8,48 +8,39 @@ version = "0.1.0"
 # Add this to enable build.rs
 # This is needed to read environment variables at compile time
 # and make them available to the application via env! macro.
-# See https://doc.rust-lang.org/cargo/reference/build-scripts.html
-# for more details.
-# This is a common pattern in embedded Rust to inject configuration.
-# The `build.rs` script will be created in the next step.
-# It will read USB_VID, USB_PID, and WEBUSB_LANDING_URL
-# and make them available as compile-time constants.
 
 [dependencies]
-# Change stm32g0b1re to your chip name, if necessary.
-embassy-stm32 = { version = "0.2.0", path = "./embassy/embassy-stm32", features = [
+# RP2040 Embassy dependencies
+embassy-rp = { git = "https://github.com/IvanLi-CN/embassy", features = [
   "defmt",
-  "time-driver-any",
-  "stm32g431cb",
-  "memory-x",
+  "time-driver",
+  "critical-section-impl",
+  "rp2040",
   "unstable-pac",
-  "exti",
 ] }
-embassy-sync = { version = "0.7.0", path = "./embassy/embassy-sync", features = [
+embassy-sync = { git = "https://github.com/IvanLi-CN/embassy", features = [
   "defmt",
 ] }
-embassy-executor = { version = "0.7.0", path = "./embassy/embassy-executor", features = [
+embassy-executor = { git = "https://github.com/IvanLi-CN/embassy", features = [
   "arch-cortex-m",
   "executor-thread",
   "defmt",
 ] }
-embassy-time = { version = "0.4.0", path = "./embassy/embassy-time", features = [
+embassy-time = { git = "https://github.com/IvanLi-CN/embassy", features = [
   "defmt",
   "defmt-timestamp-uptime",
-  "tick-hz-32_768",
 ] }
-embassy-usb = { version = "0.4.0", path = "./embassy/embassy-usb", default-features = false, features = [
+embassy-usb = { git = "https://github.com/IvanLi-CN/embassy", default-features = false, features = [
   "defmt",
 ] }
-embassy-futures = { version = "0.1.0", path = "./embassy/embassy-futures" }
-embassy-embedded-hal = { version = "0.3.0", path = "./embassy/embassy-embedded-hal" }
+embassy-futures = { git = "https://github.com/IvanLi-CN/embassy" }
+embassy-embedded-hal = { git = "https://github.com/IvanLi-CN/embassy" }
 
 defmt = "1.0.1"
 defmt-rtt = "1.0.0"
 
 cortex-m = { version = "0.7.7", features = [
   "inline-asm",
-  "critical-section-single-core",
 ] }
 cortex-m-rt = "0.7.5"
 embedded-hal = "1.0.0"
@@ -63,6 +54,7 @@ embedded-alloc = "0.6.0"
 embedded-io-async = { version = "0.6.1" }
 binrw = { version = "0.15", default-features = false }
 
+# Local sub-modules
 bq769x0-async-rs = { version = "*", path = "./bq76920", features = [
   "async",
   "defmt",
@@ -78,6 +70,7 @@ ina226 = { version = "0.3.0", features = ["async"] }
 name = "ups120"
 path = "src/main.rs"
 test = false
+
 [profile.dev]
 codegen-units = 1
 debug = 2
@@ -89,12 +82,12 @@ overflow-checks = true  # <-
 # cargo build/run --release
 [profile.release]
 codegen-units = 1
-debug = 0
-strip = "symbols"
+debug = 2                # Enable debug info to preserve defmt symbols
+strip = "none"           # Don't strip symbols to preserve defmt
 debug-assertions = false # <-
 incremental = false
-lto = 'fat'
-opt-level = 3            # <-
+lto = 'thin'             # Changed from 'fat' to 'thin' to preserve defmt symbols
+opt-level = 2            # Reduced from 3 to 2 to preserve defmt symbols
 overflow-checks = false  # <-
 
 # cargo test --release
@@ -106,4 +99,3 @@ incremental = false
 lto = 'fat'
 opt-level = 3            # <-
 overflow-checks = false  # <-
-

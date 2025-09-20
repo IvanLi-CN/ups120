@@ -1,2 +1,10 @@
-imports_granularity = "Crate"
-group_imports = "StdExternalCrate"
+# Stable rustfmt configuration
+# Note: imports_granularity and group_imports require nightly Rust
+# imports_granularity = "Crate"
+# group_imports = "StdExternalCrate"
+
+# Stable formatting options
+edition = "2021"
+max_width = 100
+hard_tabs = false
+tab_spaces = 4

@@ -1,5 +1,7 @@
 {
-  "name": "ups120",
+  "name": "ups120-rp2040",
+  "version": "1.0.0",
+  "description": "UPS120 RP2040 firmware with battery management, charging control, and USB communication",
   "private": true,
   "devDependencies": {
     "@commitlint/cli": "^19.8.1",
@@ -7,6 +9,22 @@
     "commitlint-plugin-function-rules": "^4.0.2"
   },
   "scripts": {
-    "commitlint": "commitlint --edit"
-  }
+    "commitlint": "commitlint --edit",
+    "install-hooks": "lefthook install",
+    "uninstall-hooks": "lefthook uninstall"
+  },
+  "keywords": [
+    "ups",
+    "battery-management",
+    "rp2040",
+    "embassy",
+    "rust",
+    "embedded",
+    "bq76920",
+    "sc8815",
+    "ina226",
+    "usb"
+  ],
+  "author": "Ivan Li",
+  "license": "MIT"
 }

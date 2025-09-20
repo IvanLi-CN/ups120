@@ -1,0 +1,39 @@
+# Global owners
+* @ivanli2048
+
+# Rust source code
+src/ @ivanli2048
+Cargo.toml @ivanli2048
+Cargo.lock @ivanli2048
+
+# Submodules
+bq76920/ @ivanli2048
+sc8815/ @ivanli2048
+
+# Documentation
+README.md @ivanli2048
+docs/ @ivanli2048
+*.md @ivanli2048
+
+# CI/CD and automation
+.github/ @ivanli2048
+.cargo/ @ivanli2048
+Makefile @ivanli2048
+build.rs @ivanli2048
+
+# Development tools
+lefthook.yml @ivanli2048
+commitlint.config.cjs @ivanli2048
+package.json @ivanli2048
+.gitignore @ivanli2048
+.gitmodules @ivanli2048
+
+# Hardware configuration
+memory.x @ivanli2048
+.cargo/config.toml @ivanli2048
+
+# Code quality tools
+rustfmt.toml @ivanli2048
+.markdownlint.json @ivanli2048
+.markdown-link-check.json @ivanli2048
+.cspell.json @ivanli2048
