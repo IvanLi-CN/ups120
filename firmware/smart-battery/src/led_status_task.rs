@@ -67,6 +67,7 @@ pub async fn led_status_task(
     let mut full_enter_acc_ms: u32 = 0;
     let mut full_exit_acc_ms: u32 = 0;
     let mut is_full_latched = false;
+    let mut overlay_prev: Option<bool> = None;
 
     // 保存最新的SC8815数据
     let mut latest_sc8815_alerts: Option<Sc8815Alerts> = None;
@@ -212,6 +213,14 @@ pub async fn led_status_task(
                     if in_notch1 || in_notch2 {
                         on = false;
                     }
+                }
+                // 仅在叠加状态改变时记录一条日志，避免刷屏
+                if overlay_prev
+                    .map(|v| v != latest_balancing.require_cv)
+                    .unwrap_or(true)
+                {
+                    info!("led_chg overlay={}", latest_balancing.require_cv);
+                    overlay_prev = Some(latest_balancing.require_cv);
                 }
                 if on {
                     led.set_low();

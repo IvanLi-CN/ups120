@@ -235,31 +235,37 @@ pub async fn sc8815_task(
                 charge_confirmed = false;
                 confirm_streak = 0;
                 drop_streak = 0;
-            } else if pack_voltage_mv >= PACK_CHARGE_STOP_THRESHOLD_MV && !latest_bal_req.require_cv
-            {
-                info!(
-                    "policy_stop {}>= {} mV",
-                    pack_voltage_mv, PACK_CHARGE_STOP_THRESHOLD_MV
-                );
-                if sc8815_session.is_some() {
-                    if let Some(sess) = sc8815_session.take() {
-                        let (ce_back, pstop_back, i2c_back) = sess.end().await;
-                        ce_pin_slot = Some(ce_back);
-                        pstop_pin_slot = Some(pstop_back);
-                        parked_i2c_device = Some(i2c_back);
-                    }
+            } else if pack_voltage_mv >= PACK_CHARGE_STOP_THRESHOLD_MV {
+                if latest_bal_req.require_cv {
+                    info!(
+                        "suppress_stop_cv_hold {}>= {} mV",
+                        pack_voltage_mv, PACK_CHARGE_STOP_THRESHOLD_MV
+                    );
                 } else {
-                    if let Some(pin) = pstop_pin_slot.as_mut() {
-                        pin.set_high();
+                    info!(
+                        "policy_stop {}>= {} mV",
+                        pack_voltage_mv, PACK_CHARGE_STOP_THRESHOLD_MV
+                    );
+                    if sc8815_session.is_some() {
+                        if let Some(sess) = sc8815_session.take() {
+                            let (ce_back, pstop_back, i2c_back) = sess.end().await;
+                            ce_pin_slot = Some(ce_back);
+                            pstop_pin_slot = Some(pstop_back);
+                            parked_i2c_device = Some(i2c_back);
+                        }
+                    } else {
+                        if let Some(pin) = pstop_pin_slot.as_mut() {
+                            pin.set_high();
+                        }
+                        if let Some(pin) = ce_pin_slot.as_mut() {
+                            pin.set_high();
+                        }
                     }
-                    if let Some(pin) = ce_pin_slot.as_mut() {
-                        pin.set_high();
-                    }
+                    charger_active = false;
+                    charge_confirmed = false;
+                    confirm_streak = 0;
+                    drop_streak = 0;
                 }
-                charger_active = false;
-                charge_confirmed = false;
-                confirm_streak = 0;
-                drop_streak = 0;
             } else if critical_fault {
                 if charger_active {
                     warn!("blocking_fault {}", pack_voltage_mv);

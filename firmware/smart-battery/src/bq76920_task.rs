@@ -255,6 +255,8 @@ pub async fn bq76920_task(
     let mut charger_expected: bool = false;
     let mut charger_confirmed: bool = false;
     let mut balance_retry_holdoff: u8 = 0; // seconds
+    let mut last_cellbal_bits: u8 = 0; // hardware BAL bits snapshot
+    let mut balancing_needed_by_delta: bool = false;
 
     loop {
         // This task focuses on reading data from the BQ76920 itself.
@@ -465,6 +467,36 @@ pub async fn bq76920_task(
             }
         }
 
+        // Snapshot hardware balancing bits (for gating and CV request)
+        // We re-read the register here; if it fails, keep last snapshot.
+        if let Ok(cellbal1_register_now) = bq.read_register(Register::CELLBAL1).await {
+            last_cellbal_bits = cellbal1_register_now;
+        }
+
+        // Compute whether balancing is needed by cell spread thresholds
+        balancing_needed_by_delta = false;
+        if let Some(meas) = latest_core_measurements.as_ref() {
+            let mut min_v = i32::MAX;
+            let mut max_v = i32::MIN;
+            for &v in meas.cell_voltages.voltages.iter() {
+                if v > 0 {
+                    if v < min_v {
+                        min_v = v;
+                    }
+                    if v > max_v {
+                        max_v = v;
+                    }
+                }
+            }
+            if max_v != i32::MIN && min_v != i32::MAX {
+                if (max_v - min_v) >= BALANCE_DELTA_THRESHOLD_MV
+                    && max_v >= BALANCE_RESUME_THRESHOLD_MV
+                {
+                    balancing_needed_by_delta = true;
+                }
+            }
+        }
+
         // Construct the BQ76920 measurements payload for the main `AllMeasurements` publisher.
         // If read_all_measurements failed, use default values.
         let bq76920_measurements_payload_for_main_pub = crate::data_types::Bq76920Measurements {
@@ -481,8 +513,21 @@ pub async fn bq76920_task(
             charger_confirmed = sc_alerts.charging_confirmed;
         }
 
+        // Immediate gating: no adapter → force stop any balancing seen in hardware
+        if !adapter_present && last_cellbal_bits != 0 {
+            info!(
+                "adapter_absent_stop_balancing hw=0x{:02X}",
+                last_cellbal_bits
+            );
+            let _ = bq.set_cell_balancing(0).await;
+            active_balancing_cell = None;
+            last_cellbal_bits = 0;
+        }
+
         // Determine if we should request CV hold from charger
-        let mut require_cv = active_balancing_cell.is_some();
+        let hw_balancing_active = last_cellbal_bits != 0;
+        let mut require_cv =
+            active_balancing_cell.is_some() || hw_balancing_active || balancing_needed_by_delta;
 
         // --- Battery Balancing Logic (executed approximately once per hour) ---
         if balance_timer_counter == 0 || balance_timer_counter >= 3600 {
@@ -492,9 +537,10 @@ pub async fn bq76920_task(
                 if !adapter_present {
                     info!("Skip balancing: adapter not present");
                     // Ensure balancing off if it was on
-                    if active_balancing_cell.is_some() {
+                    if active_balancing_cell.is_some() || last_cellbal_bits != 0 {
                         let _ = bq.set_cell_balancing(0).await;
                         active_balancing_cell = None;
+                        last_cellbal_bits = 0;
                     }
                     balance_retry_holdoff = balance_retry_holdoff.max(5);
                 } else if balance_retry_holdoff == 0 {
