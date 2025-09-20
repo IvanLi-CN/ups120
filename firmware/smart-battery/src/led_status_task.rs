@@ -200,16 +200,24 @@ fn evaluate_sc8815_status(alerts: &Sc8815Alerts, measurements: &Sc8815Measuremen
         return LedStatus::Fault;
     }
 
-    // 检查是否有充电器连接 (VBUS > 5V)
-    if adc_measurements.vbus_mv > 5000 {
-        // 有充电器连接，检查充电状态
-        if status.eoc {
-            // EOC=true 表示充电完成，没有在充电
-            return LedStatus::ChargingComplete;
-        } else {
-            // EOC=false 表示正在充电（默认情况下充电功能是开启的）
-            return LedStatus::Charging;
-        }
+    // 检查充电完成状态
+    if status.eoc && status.ac_adapter_connected {
+        return LedStatus::ChargingComplete;
+    }
+
+    // 根据确认标志判断是否正在充电
+    if alerts.charging_confirmed {
+        return LedStatus::Charging;
+    }
+
+    // 若策略希望充电但尚未检测到有效电流，保持待机显示（LED灭）
+    if alerts.expected_charging && status.ac_adapter_connected {
+        return LedStatus::Normal;
+    }
+
+    // 没有确认充电，再根据适配器检测或电压判断普通连接状态
+    if status.ac_adapter_connected || adc_measurements.vbus_mv > 5000 {
+        return LedStatus::Normal;
     }
 
     // 没有充电器连接，检查是否在放电

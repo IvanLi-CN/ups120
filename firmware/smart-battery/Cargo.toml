@@ -1,0 +1,54 @@
+[package]
+name = "smart-battery"
+version = "0.1.0"
+edition = "2024"
+authors = ["Ivan Li<ivanli2048@gmail.com>"]
+
+[dependencies]
+embassy-stm32 = { workspace = true, features = [
+  "defmt",
+  "time-driver-any",
+  "stm32l051c8",
+  "memory-x",
+  "exti",
+] }
+embassy-sync = { workspace = true, features = ["defmt"] }
+embassy-executor = { workspace = true, features = [
+  "arch-cortex-m",
+  "executor-thread",
+  "defmt",
+] }
+embassy-time = { workspace = true, features = [
+  "defmt",
+  "defmt-timestamp-uptime",
+  "tick-hz-32_768",
+] }
+sc8815 = { workspace = true, features = ["async", "defmt"] }
+defmt = { workspace = true }
+defmt-rtt = { workspace = true }
+embassy-embedded-hal = { workspace = true }
+bq769x0-async-rs = { workspace = true, features = ["async", "defmt"] }
+static_cell = { workspace = true }
+portable-atomic = { workspace = true, features = ["critical-section"] }
+## binrw not required in firmware (avoid pulling alloc)
+
+cortex-m = { workspace = true, features = [
+  "critical-section-single-core",
+] }
+cortex-m-rt = { workspace = true }
+panic-probe = { workspace = true }
+## no dynamic allocation required in firmware
+
+[[bin]]
+name = "smart-battery"
+path = "src/main.rs"
+test = false
+
+[profile.dev]
+## Profiles are managed at workspace root
+
+[profile.release]
+## Profiles are managed at workspace root
+
+[profile.bench]
+## Profiles are managed at workspace root

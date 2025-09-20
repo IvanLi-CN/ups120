@@ -73,12 +73,18 @@ impl Default for Sc8815Measurements {
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub struct Sc8815Alerts {
     pub device_status: SC8815Status,
+    /// Firmware currently requests the charger to be active (CE low, PSTOP low).
+    pub expected_charging: bool,
+    /// Filtered SC8815 telemetry confirms measurable charge current.
+    pub charging_confirmed: bool,
 }
 
 impl Default for Sc8815Alerts {
     fn default() -> Self {
         Self {
             device_status: SC8815Status::default(),
+            expected_charging: false,
+            charging_confirmed: false,
         }
     }
 }
@@ -232,7 +238,7 @@ impl<const N: usize> AllMeasurements<N> {
 }
 
 /// Payload structure for USB communication, containing flattened data from AllMeasurements.
-#[derive(Debug, Copy, Clone, PartialEq, binrw::BinWrite, defmt::Format)] // Removed binrw::BinRead
+#[derive(Debug, Copy, Clone, PartialEq, defmt::Format)]
 pub struct AllMeasurementsUsbPayload {
     // Fields from SC8815 ADC measurements
     pub sc8815_adc_vbus_mv: u16, // VBUS voltage in mV
