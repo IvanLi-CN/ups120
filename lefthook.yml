@@ -7,7 +7,10 @@ pre-commit:
       stage_fixed: true
     clippy:
       glob: "*.{rs}"
-      run: cargo clippy
+      run: cargo clippy -- -D warnings
+    check:
+      glob: "*.{rs}"
+      run: cargo check
 
 commit-msg:
   commands:

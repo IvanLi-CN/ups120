@@ -1,17 +1,26 @@
+use std::env;
+use std::fs::File;
+use std::io::Write;
+use std::path::PathBuf;
+
 fn main() {
-    // Set default values if environment variables are not set
-    let usb_vid = std::env::var("USB_VID").unwrap_or_else(|_| "0x1209".to_string());
-    let usb_pid = std::env::var("USB_PID").unwrap_or_else(|_| "0x0002".to_string());
-    let webusb_landing_url = std::env::var("WEBUSB_LANDING_URL")
-        .unwrap_or_else(|_| "http://localhost:25057".to_string());
+    // Put `memory.x` in our output directory and ensure it's
+    // on the linker search path.
+    let out = &PathBuf::from(env::var_os("OUT_DIR").unwrap());
+    File::create(out.join("memory.x"))
+        .unwrap()
+        .write_all(include_bytes!("memory.x"))
+        .unwrap();
+    println!("cargo:rustc-link-search={}", out.display());
 
-    // Print cargo:rustc-env directives to make these available at compile time
-    println!("cargo:rustc-env=USB_VID={}", usb_vid);
-    println!("cargo:rustc-env=USB_PID={}", usb_pid);
-    println!("cargo:rustc-env=WEBUSB_LANDING_URL={}", webusb_landing_url);
+    // By default, Cargo will re-run a build script whenever
+    // any file in the project changes. By specifying `memory.x`
+    // here, we ensure the build script is only re-run when
+    // `memory.x` is changed.
+    println!("cargo:rerun-if-changed=memory.x");
 
-    // Rerun if any of these environment variables change
-    println!("cargo:rerun-if-env-changed=USB_VID");
-    println!("cargo:rerun-if-env-changed=USB_PID");
-    println!("cargo:rerun-if-env-changed=WEBUSB_LANDING_URL");
+    println!("cargo:rustc-link-arg-bins=--nmagic");
+    println!("cargo:rustc-link-arg-bins=-Tlink.x");
+    println!("cargo:rustc-link-arg-bins=-Tlink-rp.x");
+    println!("cargo:rustc-link-arg-bins=-Tdefmt.x");
 }
