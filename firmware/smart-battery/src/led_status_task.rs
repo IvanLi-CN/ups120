@@ -1,38 +1,50 @@
-//! LED状态指示任务
+//! LED状态指示任务（单灯规范）
 //!
-//! 管理PA5引脚上的LED，根据系统状态显示不同的闪烁模式：
-//! - 存在任何故障时，LED 以 4Hz频率闪烁
-//! - 充电时，0.5 Hz 频率闪烁
-//! - 放电时，10100000 节奏闪烁（1亮0不亮，每位 0.25 秒）
-//! - 充满时，111011110 节奏闪烁
+//! 优先级：Fault > Charging(+Bal overlay) > Full(hysteresis) > Idle。
 //!
-//! 按优先级从高到低执行，同一时间只显示一个匹配的情况。
+//! - Fault：4 Hz 闪烁（125ms 亮 / 125ms 灭）。
+//! - Charging（基线）：1 Hz 闪烁（500ms 亮 / 500ms 灭）。
+//! - Balancing 叠加：在 Charging 的亮窗内插入两个“40ms 灭”缺口，间隔 160ms；不改变基线节拍。
+//! - Full：依据 VBAT 与 IBAT 的迟滞规则判定；显示为常亮。
+//! - Idle：熄灭。
 
 use defmt::*;
 use embassy_stm32::gpio::OutputOpenDrain;
 use embassy_time::{Duration, Timer};
 
-use crate::data_types::{Bq76920Alerts, Sc8815Alerts, Sc8815Measurements};
+use crate::data_types::{BalancingCvRequest, Bq76920Alerts, Sc8815Alerts, Sc8815Measurements};
 use crate::shared::{
-    Bq76920AlertsSubscriber, Sc8815AlertsSubscriber, Sc8815MeasurementsSubscriber,
+    BalancingCvRequestSubscriber, Bq76920AlertsSubscriber, Sc8815AlertsSubscriber,
+    Sc8815MeasurementsSubscriber,
 };
 
 use bq769x0_async_rs::registers::SysStatFlags;
 
-/// LED状态枚举
 #[derive(Debug, Clone, Copy, PartialEq, defmt::Format)]
-pub enum LedStatus {
-    /// 故障状态 - 4Hz闪烁
+enum LedMode {
     Fault,
-    /// 充电状态 - 0.5Hz闪烁
     Charging,
-    /// 放电状态 - 10100000节奏闪烁
-    Discharging,
-    /// 充满状态 - 111011110节奏闪烁
-    ChargingComplete,
-    /// 正常状态 - LED关闭
-    Normal,
+    Full,
+    Idle,
 }
+
+// 常量参数（若需按机型调整，可迁移到配置模块）
+const PACK_CHARGE_STOP_THRESHOLD_MV: i32 = 18_500;
+const PACK_CHARGE_START_THRESHOLD_MV: i32 = 17_000;
+// 终止电流阈值（LED判定用）。如需精调，可据实测调整。
+const ITERM_MA: u16 = 100;
+const ITERM_EXIT_MULTIPLIER_X10: u16 = 12; // 1.2x
+
+// 进入满电的迟滞时间（45–90 s取中位）与退出时间
+const FULL_ENTER_SECS: u32 = 60;
+const FULL_EXIT_SECS: u32 = 10;
+
+// 充电基线节拍与均衡叠加缺口定义
+const CHG_PERIOD_MS: u32 = 1000;
+const CHG_ON_MS: u32 = 500;
+const NOTCH_WIDTH_MS: u32 = 40;
+const NOTCH1_START_MS: u32 = 100;
+const NOTCH_GAP_MS: u32 = 160; // 缺口间距
 
 /// LED状态指示任务
 #[embassy_executor::task]
@@ -41,6 +53,7 @@ pub async fn led_status_task(
     mut sc8815_alerts_subscriber: Sc8815AlertsSubscriber<'static>,
     mut sc8815_measurements_subscriber: Sc8815MeasurementsSubscriber<'static>,
     mut bq76920_alerts_subscriber: Bq76920AlertsSubscriber<'static>,
+    mut balancing_cv_subscriber: BalancingCvRequestSubscriber<'static>,
 ) {
     info!("LED status task started");
 
@@ -48,19 +61,26 @@ pub async fn led_status_task(
     let mut led = led_pin;
     led.set_high(); // 初始状态LED关闭（高电平）
 
-    let mut current_status = LedStatus::Normal;
-    let mut pattern_index = 0;
-    let mut last_update = embassy_time::Instant::now();
+    let mut mode = LedMode::Idle;
+    let mut last_toggle = embassy_time::Instant::now(); // 给 Fault 用
+    let mut chg_cycle_start = embassy_time::Instant::now();
+    let mut full_enter_acc_ms: u32 = 0;
+    let mut full_exit_acc_ms: u32 = 0;
+    let mut is_full_latched = false;
 
     // 保存最新的SC8815数据
     let mut latest_sc8815_alerts: Option<Sc8815Alerts> = None;
     let mut latest_sc8815_measurements: Option<Sc8815Measurements> = None;
 
-    loop {
-        // 检查是否有新的状态更新
-        let mut new_status = LedStatus::Normal;
+    // 最新状态缓存
+    let mut latest_balancing: BalancingCvRequest = BalancingCvRequest::default();
 
-        // 检查SC8815告警状态（非阻塞）
+    loop {
+        // 非阻塞抓取消息
+        if let Some(msg) = balancing_cv_subscriber.try_next_message_pure() {
+            latest_balancing = msg;
+        }
+
         if let Some(sc8815_result) = sc8815_alerts_subscriber.try_next_message() {
             match sc8815_result {
                 embassy_sync::pubsub::WaitResult::Message(alerts) => {
@@ -72,7 +92,6 @@ pub async fn led_status_task(
             }
         }
 
-        // 检查SC8815测量数据（非阻塞）
         if let Some(sc8815_measurements_result) = sc8815_measurements_subscriber.try_next_message()
         {
             match sc8815_measurements_result {
@@ -85,21 +104,13 @@ pub async fn led_status_task(
             }
         }
 
-        // 如果有SC8815数据，评估状态
-        if let (Some(alerts), Some(measurements)) =
-            (&latest_sc8815_alerts, &latest_sc8815_measurements)
-        {
-            new_status = evaluate_sc8815_status(alerts, measurements);
-        }
-
-        // 检查BQ76920告警状态（非阻塞）
+        // 先检查 BQ 故障（最高优先级，立即生效）
+        let mut any_fault = false;
         if let Some(bq76920_result) = bq76920_alerts_subscriber.try_next_message() {
             match bq76920_result {
                 embassy_sync::pubsub::WaitResult::Message(alerts) => {
-                    let bq_status = evaluate_bq76920_status(&alerts);
-                    // BQ76920故障优先级更高
-                    if matches!(bq_status, LedStatus::Fault) {
-                        new_status = bq_status;
+                    if evaluate_bq_fault(&alerts) {
+                        any_fault = true;
                     }
                 }
                 embassy_sync::pubsub::WaitResult::Lagged(_) => {
@@ -108,55 +119,115 @@ pub async fn led_status_task(
             }
         }
 
-        // 如果状态改变，重置模式索引
-        if new_status != current_status {
-            current_status = new_status;
-            pattern_index = 0;
-            last_update = embassy_time::Instant::now();
-            info!("LED status changed to: {:?}", current_status);
+        let now = embassy_time::Instant::now();
+
+        if any_fault {
+            // 故障：4Hz 闪烁，抢占显示
+            if now.duration_since(last_toggle) >= Duration::from_millis(125) {
+                led.toggle();
+                last_toggle = now;
+            }
+            // 处于故障时不更新其它状态的迟滞累计
+            Timer::after(Duration::from_millis(10)).await;
+            continue;
         }
 
-        // 根据当前状态执行LED控制
-        let now = embassy_time::Instant::now();
-        match current_status {
-            LedStatus::Fault => {
-                // 4Hz闪烁 (250ms周期，125ms亮，125ms灭)
-                if now.duration_since(last_update) >= Duration::from_millis(125) {
-                    led.toggle();
-                    last_update = now;
+        // 评估“充电/满电/空闲”与迟滞
+        let (mut is_charging_policy, mut ac_present, mut ibat_ma, mut vbat_mv) =
+            (false, false, 0u16, 0u16);
+        if let (Some(alerts), Some(meas)) = (&latest_sc8815_alerts, &latest_sc8815_measurements) {
+            is_charging_policy = alerts.expected_charging || alerts.charging_confirmed;
+            ac_present = alerts.device_status.ac_adapter_connected;
+            ibat_ma = meas.adc_measurements.ibat_ma;
+            vbat_mv = meas.adc_measurements.vbat_mv;
+        }
+
+        // 维护满电迟滞锁存（只在适配器存在且无故障时考虑）
+        if ac_present {
+            let enter_ok = (vbat_mv as i32) >= PACK_CHARGE_STOP_THRESHOLD_MV && ibat_ma <= ITERM_MA;
+            let exit_by_current =
+                ibat_ma >= ((ITERM_MA as u32 * ITERM_EXIT_MULTIPLIER_X10 as u32 + 9) / 10) as u16; // >=1.2x
+            let exit_by_voltage = (vbat_mv as i32) < PACK_CHARGE_START_THRESHOLD_MV; // 宽松“离开浮充带”
+
+            if !is_full_latched {
+                if enter_ok {
+                    full_enter_acc_ms = (full_enter_acc_ms + 10).min((FULL_ENTER_SECS + 1) * 1000);
+                } else {
+                    full_enter_acc_ms = 0;
+                }
+                if full_enter_acc_ms >= FULL_ENTER_SECS * 1000 {
+                    is_full_latched = true;
+                    full_exit_acc_ms = 0;
+                    info!("led_full_latched");
+                }
+            } else {
+                // 满电已锁存，监测退出条件累计
+                if exit_by_current || exit_by_voltage || !is_charging_policy {
+                    full_exit_acc_ms = (full_exit_acc_ms + 10).min((FULL_EXIT_SECS + 1) * 1000);
+                } else {
+                    full_exit_acc_ms = 0;
+                }
+                if full_exit_acc_ms >= FULL_EXIT_SECS * 1000 {
+                    is_full_latched = false;
+                    full_enter_acc_ms = 0;
+                    info!("led_full_released");
                 }
             }
-            LedStatus::Charging => {
-                // 0.5Hz闪烁 (2000ms周期，1000ms亮，1000ms灭)
-                if now.duration_since(last_update) >= Duration::from_millis(1000) {
-                    led.toggle();
-                    last_update = now;
+        } else {
+            // 适配器不在时，清空满电状态
+            is_full_latched = false;
+            full_enter_acc_ms = 0;
+            full_exit_acc_ms = 0;
+        }
+
+        // 模式选择（不含故障）：Charging 优先于 Full，再到 Idle
+        let desired_mode = if is_charging_policy {
+            LedMode::Charging
+        } else if is_full_latched {
+            LedMode::Full
+        } else {
+            LedMode::Idle
+        };
+        if desired_mode != mode {
+            mode = desired_mode;
+            if matches!(mode, LedMode::Charging) {
+                chg_cycle_start = now;
+            }
+        }
+
+        // 输出控制
+        match mode {
+            LedMode::Charging => {
+                let elapsed_ms = now.duration_since(chg_cycle_start).as_millis() as u32;
+                let phase = elapsed_ms % CHG_PERIOD_MS;
+                let in_on = phase < CHG_ON_MS;
+                let mut on = in_on;
+                if in_on && latest_balancing.require_cv {
+                    // 插入两个 40ms 灭缺口： [100,140) 与 [300,340)
+                    let notch2_start = NOTCH1_START_MS + NOTCH_GAP_MS + NOTCH_WIDTH_MS; // 100 + 160 + 40 = 300
+                    let in_notch1 =
+                        phase >= NOTCH1_START_MS && phase < (NOTCH1_START_MS + NOTCH_WIDTH_MS);
+                    let in_notch2 =
+                        phase >= notch2_start && phase < (notch2_start + NOTCH_WIDTH_MS);
+                    if in_notch1 || in_notch2 {
+                        on = false;
+                    }
+                }
+                if on {
+                    led.set_low();
+                } else {
+                    led.set_high();
                 }
             }
-            LedStatus::Discharging => {
-                // 10100000节奏闪烁，每位250ms
-                execute_pattern(
-                    &mut led,
-                    &mut pattern_index,
-                    &mut last_update,
-                    &[true, false, true, false, false, false, false, false],
-                    Duration::from_millis(250),
-                );
+            LedMode::Full => {
+                // 常亮（开漏低）
+                led.set_low();
             }
-            LedStatus::ChargingComplete => {
-                // 111011110节奏闪烁，每位250ms
-                execute_pattern(
-                    &mut led,
-                    &mut pattern_index,
-                    &mut last_update,
-                    &[true, true, true, false, true, true, true, true, false],
-                    Duration::from_millis(250),
-                );
-            }
-            LedStatus::Normal => {
-                // LED关闭
+            LedMode::Idle => {
+                // 熄灭
                 led.set_high();
             }
+            LedMode::Fault => ::core::unreachable!(),
         }
 
         // 短暂延时避免CPU占用过高
@@ -164,82 +235,10 @@ pub async fn led_status_task(
     }
 }
 
-/// 执行特定的闪烁模式
-fn execute_pattern(
-    led: &mut OutputOpenDrain<'static>,
-    pattern_index: &mut usize,
-    last_update: &mut embassy_time::Instant,
-    pattern: &[bool],
-    bit_duration: Duration,
-) {
-    let now = embassy_time::Instant::now();
-
-    if now.duration_since(*last_update) >= bit_duration {
-        if *pattern_index < pattern.len() {
-            if pattern[*pattern_index] {
-                led.set_low(); // LED亮（低使能）
-            } else {
-                led.set_high(); // LED灭
-            }
-            *pattern_index += 1;
-        } else {
-            // 模式结束，重新开始
-            *pattern_index = 0;
-        }
-        *last_update = now;
-    }
-}
-
-/// 评估SC8815状态
-fn evaluate_sc8815_status(alerts: &Sc8815Alerts, measurements: &Sc8815Measurements) -> LedStatus {
-    let status = &alerts.device_status;
-    let adc_measurements = &measurements.adc_measurements;
-
-    // 检查故障状态（最高优先级）
-    if status.otp_fault || status.vbus_short_fault {
-        return LedStatus::Fault;
-    }
-
-    // 检查充电完成状态
-    if status.eoc && status.ac_adapter_connected {
-        return LedStatus::ChargingComplete;
-    }
-
-    // 根据确认标志判断是否正在充电
-    if alerts.charging_confirmed {
-        return LedStatus::Charging;
-    }
-
-    // 若策略希望充电但尚未检测到有效电流，保持待机显示（LED灭）
-    if alerts.expected_charging && status.ac_adapter_connected {
-        return LedStatus::Normal;
-    }
-
-    // 没有确认充电，再根据适配器检测或电压判断普通连接状态
-    if status.ac_adapter_connected || adc_measurements.vbus_mv > 5000 {
-        return LedStatus::Normal;
-    }
-
-    // 没有充电器连接，检查是否在放电
-    // TODO: 添加放电状态检测逻辑
-    // 目前放电功能暂未实现，所以暂时不检测
-
-    LedStatus::Normal
-}
-
-/// 评估BQ76920状态
-fn evaluate_bq76920_status(alerts: &Bq76920Alerts) -> LedStatus {
+fn evaluate_bq_fault(alerts: &Bq76920Alerts) -> bool {
     let sys_stat = alerts.system_status.0;
-
-    // 检查各种故障状态（最高优先级）
-    if sys_stat.contains(SysStatFlags::OV) ||      // 过压
-       sys_stat.contains(SysStatFlags::UV) ||      // 欠压
-       sys_stat.contains(SysStatFlags::SCD) ||     // 短路放电
-       sys_stat.contains(SysStatFlags::OCD)
-    {
-        // 过流放电
-        return LedStatus::Fault;
-    }
-
-    LedStatus::Normal
+    sys_stat.contains(SysStatFlags::OV)
+        || sys_stat.contains(SysStatFlags::UV)
+        || sys_stat.contains(SysStatFlags::SCD)
+        || sys_stat.contains(SysStatFlags::OCD)
 }

@@ -3,6 +3,7 @@
 
 mod bq76920_task;
 mod data_types;
+mod led_status_task;
 mod sc8815_task;
 mod shared;
 
@@ -12,7 +13,7 @@ use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
 use embassy_executor::Spawner;
 use embassy_stm32::{
     bind_interrupts,
-    gpio::{Level, Output, Speed},
+    gpio::{Level, Output, OutputOpenDrain, Speed},
     i2c::{self, Config as I2cConfig, I2c},
     peripherals::I2C2,
     time::Hertz,
@@ -164,6 +165,30 @@ async fn main(_spawner: Spawner) {
             sc8815_meas_pub,
             bq76920_meas_sub,
             balancing_cv_sub,
+        ))
+        .ok();
+
+    // 启动 LED 状态任务
+    let led_pin = OutputOpenDrain::new(p.PA5, Level::High, Speed::Low);
+    let led_sc_alerts_sub = _sc8815_alerts_chan
+        .subscriber()
+        .expect("Allocate SC8815 alerts subscriber for LED task");
+    let led_sc_meas_sub = _sc8815_meas_chan
+        .subscriber()
+        .expect("Allocate SC8815 measurements subscriber for LED task");
+    let led_bq_alerts_sub = _bq76920_alerts_chan
+        .subscriber()
+        .expect("Allocate BQ76920 alerts subscriber for LED task");
+    let led_bal_cv_sub = balancing_cv_chan
+        .subscriber()
+        .expect("Allocate BalancingCv subscriber for LED task");
+    _spawner
+        .spawn(led_status_task::led_status_task(
+            led_pin,
+            led_sc_alerts_sub,
+            led_sc_meas_sub,
+            led_bq_alerts_sub,
+            led_bal_cv_sub,
         ))
         .ok();
 
