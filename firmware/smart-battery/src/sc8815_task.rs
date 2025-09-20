@@ -24,7 +24,9 @@ const MIN_EFFECTIVE_IBAT_MA: u16 = 100;
 const IBAT_RELEASE_MARGIN_MA: u16 = 20;
 const CHARGE_CONFIRMATION_SAMPLES: u8 = 3;
 
+// Logging/diagnostics verbosity for SC8815 task
 const ENABLE_SC8815_DIAG: bool = true;
+const ENABLE_SC8815_SNAP: bool = true; // one-line snapshot each second
 
 // Local alias for the concrete I2C device type used by this task.
 type I2cDev = I2cDevice<'static, CriticalSectionRawMutex, I2c<'static, embassy_stm32::mode::Async>>;
@@ -48,7 +50,7 @@ impl ScSession {
         Timer::after(Duration::from_millis(100)).await;
 
         let mut sc = SC8815::new(i2c, address);
-        info!("sc_session_init");
+        info!("SC sess:init");
         if let Err(e) = sc.init().await {
             error!("sc_init_err {:?}", e);
             let i2c_back = sc.release();
@@ -109,33 +111,43 @@ impl ScSession {
         if ENABLE_SC8815_DIAG {
             use sc8815::registers::Register as R;
             if let Ok(vbat_set) = sc.read_register(R::VbatSet).await {
-                info!("diag_sc VbatSet=0x{:02X}", vbat_set);
+                info!("SC cfg: VbatSet=0x{:02X}", vbat_set);
             }
             if let Ok(ratio) = sc.read_register(R::Ratio).await {
-                info!("diag_sc Ratio=0x{:02X}", ratio);
+                info!("SC cfg: Ratio=0x{:02X}", ratio);
             }
             if let Ok((vbat_hi, vbat_lo)) = sc.read_consecutive_registers(R::VbatFbValue).await {
-                info!("diag_sc VBAT_FB hi=0x{:02X} lo=0x{:02X}", vbat_hi, vbat_lo);
+                info!("SC adc: VBAT_FB hi=0x{:02X} lo=0x{:02X}", vbat_hi, vbat_lo);
             }
             if let Ok(vinreg) = sc.read_register(R::VinregSet).await {
-                info!("diag_sc VinregSet=0x{:02X}", vinreg);
+                info!("SC cfg: VinregSet=0x{:02X}", vinreg);
             }
             if let Ok(ibus_lim) = sc.read_register(R::IbusLimSet).await {
-                info!("diag_sc IbusLimSet=0x{:02X}", ibus_lim);
+                info!("SC cfg: IbusLimSet=0x{:02X}", ibus_lim);
             }
             if let Ok(ibat_lim) = sc.read_register(R::IbatLimSet).await {
-                info!("diag_sc IbatLimSet=0x{:02X}", ibat_lim);
+                info!("SC cfg: IbatLimSet=0x{:02X}", ibat_lim);
             }
             if let Ok(ctrl1) = sc.read_register(R::Ctrl1Set).await {
-                info!("diag_sc Ctrl1Set=0x{:02X}", ctrl1);
+                info!("SC cfg: Ctrl1Set=0x{:02X}", ctrl1);
             }
             if let Ok(ctrl3) = sc.read_register(R::Ctrl3Set).await {
-                info!("diag_sc Ctrl3Set=0x{:02X}", ctrl3);
+                info!("SC cfg: Ctrl3Set=0x{:02X}", ctrl3);
             }
             if let Ok(status) = sc.read_register(R::Status).await {
-                info!("diag_sc Status=0x{:02X}", status);
+                info!("SC stat: Status=0x{:02X}", status);
             }
         }
+
+        // Print human-decoded configuration summary based on our desired DeviceConfiguration
+        info!(
+            "SC cfg: mode=CHG vinreg={}mV rs1={}mOhm rs2={}mOhm ilim: ibus={}mA ibat={}mA",
+            device_config.power.vinreg_voltage_mv,
+            device_config.current_limits.rs1_mohm,
+            device_config.current_limits.rs2_mohm,
+            device_config.current_limits.ibus_limit_ma,
+            device_config.current_limits.ibat_limit_ma
+        );
 
         Ok(Self {
             sc,
@@ -243,7 +255,7 @@ pub async fn sc8815_task(
                     );
                 } else {
                     info!(
-                        "policy_stop {}>= {} mV",
+                        "POL stop: Vpack {}>= {} mV",
                         pack_voltage_mv, PACK_CHARGE_STOP_THRESHOLD_MV
                     );
                     if sc8815_session.is_some() {
@@ -294,7 +306,7 @@ pub async fn sc8815_task(
                 && adapter_holdoff_secs == 0
             {
                 info!(
-                    "policy_start {}< {} mV",
+                    "POL start: Vpack {}< {} mV",
                     pack_voltage_mv, PACK_CHARGE_START_THRESHOLD_MV
                 );
                 if sc8815_session.is_none() {
@@ -326,7 +338,7 @@ pub async fn sc8815_task(
                 if let Some(sess) = sc8815_session.as_mut() {
                     sess.enable_power_stage();
                 }
-                info!("gates CE=LOW PSTOP=LOW (power stage enabled)");
+                info!("SC gates: CE=LOW PSTOP=LOW (power stage enabled)");
                 charger_active = true;
             }
         }
@@ -337,7 +349,7 @@ pub async fn sc8815_task(
                 Some(sess) => match sess.sc.get_device_status().await {
                     Ok(status) => {
                         info!(
-                            "sc_stat {} {} {} {}",
+                            "SC stat: ac={} usb={} otp={} vshort={}",
                             status.ac_adapter_connected,
                             status.usb_load_detected,
                             status.otp_fault,
@@ -366,7 +378,10 @@ pub async fn sc8815_task(
                         }
 
                         if status.otp_fault || status.vbus_short_fault {
-                            warn!("sc_fault");
+                            warn!(
+                                "SC fault: otp={} vshort={}",
+                                status.otp_fault, status.vbus_short_fault
+                            );
                             if let Some(sess) = sc8815_session.take() {
                                 let (ce_back, pstop_back, i2c_back) = sess.end().await;
                                 ce_pin_slot = Some(ce_back);
@@ -414,13 +429,15 @@ pub async fn sc8815_task(
             match sc8815_session.as_mut() {
                 Some(sess) => match sess.sc.get_adc_measurements().await {
                     Ok(measurements) => {
-                        info!(
-                            "VBUS={}mV VBAT={}mV IBUS={}mA IBAT={}mA",
-                            measurements.vbus_mv,
-                            measurements.vbat_mv,
-                            measurements.ibus_ma,
-                            measurements.ibat_ma
-                        );
+                        if ENABLE_SC8815_SNAP {
+                            info!(
+                                "SC snap: VBUS={}mV VBAT={}mV IBUS={}mA IBAT={}mA",
+                                measurements.vbus_mv,
+                                measurements.vbat_mv,
+                                measurements.ibus_ma,
+                                measurements.ibat_ma
+                            );
+                        }
 
                         if charger_active {
                             let ibat = measurements.ibat_ma;
@@ -440,7 +457,7 @@ pub async fn sc8815_task(
 
                             if !charge_confirmed && confirm_streak >= CHARGE_CONFIRMATION_SAMPLES {
                                 charge_confirmed = true;
-                                info!("sc_charge_confirmed {}", ibat);
+                                info!("SC charge_confirmed ibat={}mA", ibat);
                             }
 
                             if charge_confirmed && drop_streak >= CHARGE_CONFIRMATION_SAMPLES {

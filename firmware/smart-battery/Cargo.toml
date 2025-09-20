@@ -30,6 +30,7 @@ embassy-embedded-hal = { workspace = true }
 bq769x0-async-rs = { workspace = true, features = ["async", "defmt"] }
 static_cell = { workspace = true }
 portable-atomic = { workspace = true, features = ["critical-section"] }
+heapless = { workspace = true }
 ## binrw not required in firmware (avoid pulling alloc)
 
 cortex-m = { workspace = true, features = [

@@ -25,6 +25,10 @@ const BALANCE_RESUME_THRESHOLD_MV: i32 = 3_305;
 const BALANCE_STOP_THRESHOLD_MV: i32 = 3_300;
 const BALANCE_DELTA_THRESHOLD_MV: i32 = 5;
 
+// Logging verbosity toggles for BQ76920 task
+const VERBOSE_BQ_LOG: bool = false; // set true for full register-by-register dumps
+const SNAP_BQ_EVERY_SEC: u32 = 1; // one-line snapshot interval (seconds)
+
 // Test knob: force both CHG/DSG FETs off for charger-path diagnostics.
 // Default false for normal operation; set true only for lab diagnostics.
 const TEST_FORCE_BQ_FETS_OFF: bool = false;
@@ -255,8 +259,10 @@ pub async fn bq76920_task(
     let mut charger_expected: bool = false;
     let mut charger_confirmed: bool = false;
     let mut balance_retry_holdoff: u8 = 0; // seconds
-    let mut last_cellbal_bits: u8 = 0; // hardware BAL bits snapshot
+    let mut last_cellbal_bits: u8 = 0; // hardware BAL bits snapshot (for change logging)
     let mut balancing_needed_by_delta: bool = false;
+    let mut snap_tick: u32 = 0;
+    let mut adapter_lost_logged: bool = false;
 
     loop {
         // This task focuses on reading data from the BQ76920 itself.
@@ -271,7 +277,9 @@ pub async fn bq76920_task(
             let _ = bq.set_cell_balancing(0).await;
         }
 
-        info!("--- Reading BQ76920 Data ---");
+        if VERBOSE_BQ_LOG {
+            info!("BQ read: begin");
+        }
 
         // Read ADC calibration values (not used in current logging but kept for potential future use)
         let (_adc_gain_uv_per_lsb, _adc_offset_mv) = match bq.read_adc_calibration().await {
@@ -285,11 +293,13 @@ pub async fn bq76920_task(
 
         // Read and display cell balancing status
         let cellbal1_register = bq.read_register(Register::CELLBAL1).await.unwrap_or(0);
-        info!("Cell Balancing Status:");
-        info!(
-            "  CELLBAL1 register: 0b{:08b} (0x{:02X})",
-            cellbal1_register, cellbal1_register
-        );
+        if VERBOSE_BQ_LOG {
+            info!("Cell Balancing Status:");
+            info!(
+                "  CELLBAL1 register: 0b{:08b} (0x{:02X})",
+                cellbal1_register, cellbal1_register
+            );
+        }
 
         // Display which cells are enabled for balancing
         let mut balancing_cells = [0u8; 5];
@@ -301,13 +311,13 @@ pub async fn bq76920_task(
             }
         }
 
-        if balancing_count == 0 {
-            info!("  No cells are currently balancing");
-        } else {
-            info!(
-                "  Cells currently balancing: {:?}",
-                &balancing_cells[..balancing_count]
-            );
+        if cellbal1_register != last_cellbal_bits {
+            if balancing_count == 0 {
+                info!("BQ bal: none");
+            } else {
+                info!("BQ bal: cells={:?}", &balancing_cells[..balancing_count]);
+            }
+            last_cellbal_bits = cellbal1_register;
         }
 
         // Read all measurements from BQ76920. These are now in physical units.
@@ -315,82 +325,109 @@ pub async fn bq76920_task(
             Ok(core_meas) => {
                 latest_core_measurements = Some(core_meas);
 
-                // Log detailed BQ76920 measurements
-                info!("Cell Voltages:");
-                for i in 0..5 {
-                    let voltage_mv = core_meas.cell_voltages.voltages[i];
-                    info!("  Cell {}: {} mV", i + 1, voltage_mv);
+                // Detailed BQ76920 measurements (optional verbose)
+                if VERBOSE_BQ_LOG {
+                    info!("Cell Voltages:");
+                    for i in 0..5 {
+                        let voltage_mv = core_meas.cell_voltages.voltages[i];
+                        info!("  Cell {}: {} mV", i + 1, voltage_mv);
+                    }
+                    info!("Pack Voltage: {} mV", core_meas.total_voltage_mv);
+                    info!("Current: {} mA", core_meas.current_ma);
+                    info!("Temperatures (0.01°C):");
+                    info!(
+                        "  TS1: {} ({}°C)",
+                        core_meas.temperatures.ts1,
+                        core_meas.temperatures.ts1 as f32 / 100.0
+                    );
+                    if let Some(ts2) = core_meas.temperatures.ts2 {
+                        info!("  TS2: {} ({}°C)", ts2, ts2 as f32 / 100.0);
+                    }
+                    if let Some(ts3) = core_meas.temperatures.ts3 {
+                        info!("  TS3: {} ({}°C)", ts3, ts3 as f32 / 100.0);
+                    }
+                    info!(
+                        "System Status (SYS_STAT register: 0x{:02X})",
+                        core_meas.system_status.0.bits()
+                    );
+                    info!(
+                        "MOS Status: CHG_ON={} DSG_ON={} CC_EN={} CC_ONESHOT={} DELAY_DIS={}",
+                        core_meas.mos_status.0.contains(SysCtrl2Flags::CHG_ON),
+                        core_meas.mos_status.0.contains(SysCtrl2Flags::DSG_ON),
+                        core_meas.mos_status.0.contains(SysCtrl2Flags::CC_EN),
+                        core_meas.mos_status.0.contains(SysCtrl2Flags::CC_ONESHOT),
+                        core_meas.mos_status.0.contains(SysCtrl2Flags::DELAY_DIS)
+                    );
                 }
 
-                info!("Pack Voltage: {} mV", core_meas.total_voltage_mv);
-                info!("Current: {} mA", core_meas.current_ma);
-
-                // Log temperatures
-                info!("Temperatures (0.01°C):");
-                info!(
-                    "  TS1: {} ({}°C)",
-                    core_meas.temperatures.ts1,
-                    core_meas.temperatures.ts1 as f32 / 100.0
-                );
-                if let Some(ts2) = core_meas.temperatures.ts2 {
-                    info!("  TS2: {} ({}°C)", ts2, ts2 as f32 / 100.0);
+                // One-line snapshot (always enabled for quick diagnostics)
+                if snap_tick % SNAP_BQ_EVERY_SEC == 0 {
+                    let chg_on = core_meas.mos_status.0.contains(SysCtrl2Flags::CHG_ON);
+                    let dsg_on = core_meas.mos_status.0.contains(SysCtrl2Flags::DSG_ON);
+                    let cells = core_meas.cell_voltages.voltages;
+                    // TS1 is in 0.01°C units; avoid floats in no_std
+                    let ts1_centi = core_meas.temperatures.ts1;
+                    let ts1_i = ts1_centi / 100;
+                    let mut ts1_f = ts1_centi % 100;
+                    if ts1_f < 0 {
+                        ts1_f = -ts1_f;
+                    }
+                    // Critical fault summary (mask out non-fault bits like CC_READY)
+                    let fault_mask = (SysStatFlags::UV
+                        | SysStatFlags::OV
+                        | SysStatFlags::SCD
+                        | SysStatFlags::OCD)
+                        .bits();
+                    let faults = core_meas.system_status.0.bits() & fault_mask;
+                    let bal_on = last_cellbal_bits != 0;
+                    // Build a human-readable fault list
+                    let mut faults_str: heapless::String<24> = heapless::String::new();
+                    if faults == 0 {
+                        let _ = core::fmt::Write::write_str(&mut faults_str, "none");
+                    } else {
+                        let mut first = true;
+                        let append = |s: &str, out: &mut heapless::String<24>, first: &mut bool| {
+                            if !*first {
+                                let _ = core::fmt::Write::write_str(out, "|");
+                            }
+                            let _ = core::fmt::Write::write_str(out, s);
+                            *first = false;
+                        };
+                        if (faults & SysStatFlags::UV.bits()) != 0 {
+                            append("UV", &mut faults_str, &mut first);
+                        }
+                        if (faults & SysStatFlags::OV.bits()) != 0 {
+                            append("OV", &mut faults_str, &mut first);
+                        }
+                        if (faults & SysStatFlags::OCD.bits()) != 0 {
+                            append("OCD", &mut faults_str, &mut first);
+                        }
+                        if (faults & SysStatFlags::SCD.bits()) != 0 {
+                            append("SCD", &mut faults_str, &mut first);
+                        }
+                    }
+                    info!(
+                        "BQ snap: pack={}mV curr={}mA ts1={}.{}C chg={} dsg={} faults=0x{:02X}({}) bal={} cells=[{},{},{},{},{}]mV",
+                        core_meas.total_voltage_mv,
+                        core_meas.current_ma,
+                        ts1_i,
+                        ts1_f,
+                        chg_on,
+                        dsg_on,
+                        faults,
+                        faults_str.as_str(),
+                        bal_on,
+                        cells[0],
+                        cells[1],
+                        cells[2],
+                        cells[3],
+                        cells[4]
+                    );
                 }
-                if let Some(ts3) = core_meas.temperatures.ts3 {
-                    info!("  TS3: {} ({}°C)", ts3, ts3 as f32 / 100.0);
-                }
-
-                // Log detailed system status
-                info!(
-                    "System Status (SYS_STAT register: 0x{:02X}):",
-                    core_meas.system_status.0.bits()
-                );
-                info!(
-                    "  CC Ready: {}",
-                    core_meas.system_status.0.contains(SysStatFlags::CC_READY)
-                );
-                info!(
-                    "  Overtemperature: {}",
-                    core_meas.system_status.0.contains(SysStatFlags::OVRD_ALERT)
-                );
-
-                let uv_fault = core_meas.system_status.0.contains(SysStatFlags::UV);
-                info!("  Undervoltage (UV): {}", uv_fault);
-                info!(
-                    "  Overvoltage (OV): {}",
-                    core_meas.system_status.0.contains(SysStatFlags::OV)
-                );
-                info!(
-                    "  Short Circuit Discharge (SCD): {}",
-                    core_meas.system_status.0.contains(SysStatFlags::SCD)
-                );
-                info!(
-                    "  Overcurrent Discharge (OCD): {}",
-                    core_meas.system_status.0.contains(SysStatFlags::OCD)
-                );
-
-                // Log MOS status
-                let chg_on = core_meas.mos_status.0.contains(SysCtrl2Flags::CHG_ON);
-                info!("MOS Status:");
-                info!("  Charge MOSFET (CHG_ON): {}", chg_on);
-                info!(
-                    "  Discharge MOSFET (DSG_ON): {}",
-                    core_meas.mos_status.0.contains(SysCtrl2Flags::DSG_ON)
-                );
-                info!(
-                    "  Coulomb Counter (CC_EN): {}",
-                    core_meas.mos_status.0.contains(SysCtrl2Flags::CC_EN)
-                );
-                info!(
-                    "  CC One-Shot (CC_ONESHOT): {}",
-                    core_meas.mos_status.0.contains(SysCtrl2Flags::CC_ONESHOT)
-                );
-                info!(
-                    "  Delay Disable (DELAY_DIS): {}",
-                    core_meas.mos_status.0.contains(SysCtrl2Flags::DELAY_DIS)
-                );
 
                 // Evaluate pack-level conditions
                 let pack_voltage_mv = core_meas.total_voltage_mv;
+                let uv_fault = core_meas.system_status.0.contains(SysStatFlags::UV);
                 let ov_fault = core_meas.system_status.0.contains(SysStatFlags::OV);
                 let scd_fault = core_meas.system_status.0.contains(SysStatFlags::SCD);
                 let ocd_fault = core_meas.system_status.0.contains(SysStatFlags::OCD);
@@ -400,7 +437,7 @@ pub async fn bq76920_task(
 
                 if pack_voltage_mv <= PACK_OUTPUT_CUTOFF_THRESHOLD_MV {
                     info!(
-                        "DSG off: {}<= {} mV",
+                        "BQ dsg: off reason Vpack {}<= {} mV",
                         pack_voltage_mv, PACK_OUTPUT_CUTOFF_THRESHOLD_MV
                     );
                     should_enable_discharge = false;
@@ -467,11 +504,7 @@ pub async fn bq76920_task(
             }
         }
 
-        // Snapshot hardware balancing bits (for gating and CV request)
-        // We re-read the register here; if it fails, keep last snapshot.
-        if let Ok(cellbal1_register_now) = bq.read_register(Register::CELLBAL1).await {
-            last_cellbal_bits = cellbal1_register_now;
-        }
+        // last_cellbal_bits already updated earlier on change; keep it as snapshot
 
         // Compute whether balancing is needed by cell spread thresholds
         balancing_needed_by_delta = false;
@@ -564,25 +597,32 @@ pub async fn bq76920_task(
         }
         // --- End Battery Balancing Logic ---
 
-        // If adapter lost while balancing, stop immediately
+        // If adapter lost while balancing, stop immediately (log once until recovery)
         if active_balancing_cell.is_some() && !adapter_present {
-            info!(
-                "Adapter lost during balancing: stopping cell balancing and withdrawing CV request"
-            );
+            if !adapter_lost_logged {
+                info!("BQ warn: adapter_lost during balancing → stop balancing & withdraw CV");
+                adapter_lost_logged = true;
+            }
             let _ = bq.set_cell_balancing(0).await;
             active_balancing_cell = None;
             require_cv = false;
             balance_retry_holdoff = balance_retry_holdoff.max(5);
         }
+        if adapter_present {
+            adapter_lost_logged = false; // reset latch on recovery
+        }
 
         // Publish the coupling signal each tick
         balancing_cv_publisher.publish_immediate(BalancingCvRequest { require_cv });
 
-        info!("----------------------------");
+        if VERBOSE_BQ_LOG {
+            info!("BQ read: end");
+        }
 
         // Wait for a defined interval before the next cycle of readings.
         Timer::after(Duration::from_secs(1)).await;
         balance_timer_counter += 1;
+        snap_tick = snap_tick.wrapping_add(1);
         if balance_retry_holdoff > 0 {
             balance_retry_holdoff = balance_retry_holdoff.saturating_sub(1);
         }
