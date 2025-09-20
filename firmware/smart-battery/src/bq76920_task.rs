@@ -261,8 +261,13 @@ pub async fn bq76920_task(
     let mut balance_retry_holdoff: u8 = 0; // seconds
     let mut last_cellbal_bits: u8 = 0; // hardware BAL bits snapshot (for change logging)
     let mut balancing_needed_by_delta: bool = false;
+    let mut prev_balancing_needed_by_delta: bool = false;
     let mut snap_tick: u32 = 0;
     let mut adapter_lost_logged: bool = false;
+    // Fast-evaluation triggers tracking
+    let mut prev_adapter_present: bool = false;
+    let mut prev_charger_confirmed: bool = false;
+    let mut last_eval_period_secs: u32 = 3600;
 
     loop {
         // This task focuses on reading data from the BQ76920 itself.
@@ -522,10 +527,19 @@ pub async fn bq76920_task(
                 }
             }
             if max_v != i32::MIN && min_v != i32::MAX {
-                if (max_v - min_v) >= BALANCE_DELTA_THRESHOLD_MV
-                    && max_v >= BALANCE_RESUME_THRESHOLD_MV
-                {
+                let spread = max_v - min_v;
+                if spread >= BALANCE_DELTA_THRESHOLD_MV && max_v >= BALANCE_RESUME_THRESHOLD_MV {
                     balancing_needed_by_delta = true;
+                }
+                if balancing_needed_by_delta != prev_balancing_needed_by_delta {
+                    info!(
+                        "bal_eval: spread={}mV need_by_delta={} (threshold={}mV resume_at>={}mV)",
+                        spread,
+                        balancing_needed_by_delta,
+                        BALANCE_DELTA_THRESHOLD_MV,
+                        BALANCE_RESUME_THRESHOLD_MV
+                    );
+                    prev_balancing_needed_by_delta = balancing_needed_by_delta;
                 }
             }
         }
@@ -546,6 +560,17 @@ pub async fn bq76920_task(
             charger_confirmed = sc_alerts.charging_confirmed;
         }
 
+        // Determine current evaluation period based on AC + charging state
+        let charging_phase = adapter_present && (charger_expected || charger_confirmed);
+        let eval_period_secs: u32 = if charging_phase { 60 } else { 3600 };
+        if eval_period_secs != last_eval_period_secs {
+            info!(
+                "bal_eval: schedule period={}s (ac={} charging_phase={})",
+                eval_period_secs, adapter_present, charging_phase
+            );
+            last_eval_period_secs = eval_period_secs;
+        }
+
         // Immediate gating: no adapter → force stop any balancing seen in hardware
         if !adapter_present && last_cellbal_bits != 0 {
             info!(
@@ -562,11 +587,24 @@ pub async fn bq76920_task(
         let mut require_cv =
             active_balancing_cell.is_some() || hw_balancing_active || balancing_needed_by_delta;
 
-        // --- Battery Balancing Logic (executed approximately once per hour) ---
-        if balance_timer_counter == 0 || balance_timer_counter >= 3600 {
+        // Rising-edge based fast-evaluation triggers
+        let adapter_rising = adapter_present && !prev_adapter_present;
+        let charge_rising = charger_confirmed && !prev_charger_confirmed;
+
+        // --- Battery Balancing Logic (periodic + fast triggers) ---
+        let periodic_due = balance_timer_counter == 0 || balance_timer_counter >= eval_period_secs;
+        let fast_due = adapter_rising || charge_rising;
+        if periodic_due || fast_due {
             // 3600 seconds = 1 hour
             if !TEST_FORCE_BQ_FETS_OFF {
-                info!("Executing hourly battery balancing logic.");
+                if fast_due {
+                    info!(
+                        "Executing fast balancing eval (adapter_rise={} charge_rise={})",
+                        adapter_rising, charge_rising
+                    );
+                } else {
+                    info!("Executing periodic battery balancing eval.");
+                }
                 if !adapter_present {
                     info!("Skip balancing: adapter not present");
                     // Ensure balancing off if it was on
@@ -626,5 +664,9 @@ pub async fn bq76920_task(
         if balance_retry_holdoff > 0 {
             balance_retry_holdoff = balance_retry_holdoff.saturating_sub(1);
         }
+
+        // Update edge tracking
+        prev_adapter_present = adapter_present;
+        prev_charger_confirmed = charger_confirmed;
     }
 }
