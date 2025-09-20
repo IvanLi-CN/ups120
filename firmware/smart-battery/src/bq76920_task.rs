@@ -584,8 +584,11 @@ pub async fn bq76920_task(
 
         // Determine if we should request CV hold from charger
         let hw_balancing_active = last_cellbal_bits != 0;
+        // Charger should hold CV when balancing is required or active.
         let mut require_cv =
             active_balancing_cell.is_some() || hw_balancing_active || balancing_needed_by_delta;
+        // LED overlay仅在“硬件正在均衡”时显示（避免仅因"require_cv"而产生抖动观感）。
+        let overlay_led = active_balancing_cell.is_some() || hw_balancing_active;
 
         // Rising-edge based fast-evaluation triggers
         let adapter_rising = adapter_present && !prev_adapter_present;
@@ -651,7 +654,10 @@ pub async fn bq76920_task(
         }
 
         // Publish the coupling signal each tick
-        balancing_cv_publisher.publish_immediate(BalancingCvRequest { require_cv });
+        balancing_cv_publisher.publish_immediate(BalancingCvRequest {
+            require_cv,
+            overlay: overlay_led,
+        });
 
         if VERBOSE_BQ_LOG {
             info!("BQ read: end");
@@ -661,8 +667,21 @@ pub async fn bq76920_task(
         Timer::after(Duration::from_secs(1)).await;
         balance_timer_counter += 1;
         snap_tick = snap_tick.wrapping_add(1);
+        let prev_holdoff = balance_retry_holdoff;
         if balance_retry_holdoff > 0 {
             balance_retry_holdoff = balance_retry_holdoff.saturating_sub(1);
+        }
+        // 当抑制计时刚好归零时，立刻执行一次快速评估，避免再等到下一周期
+        if prev_holdoff > 0 && balance_retry_holdoff == 0 {
+            if adapter_present && !TEST_FORCE_BQ_FETS_OFF {
+                info!("Balancing holdoff expired → immediate eval");
+                execute_smart_battery_balancing(
+                    &mut bq,
+                    &latest_core_measurements,
+                    &mut active_balancing_cell,
+                )
+                .await;
+            }
         }
 
         // Update edge tracking

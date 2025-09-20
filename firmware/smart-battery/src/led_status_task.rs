@@ -203,7 +203,7 @@ pub async fn led_status_task(
                 let phase = elapsed_ms % CHG_PERIOD_MS;
                 let in_on = phase < CHG_ON_MS;
                 let mut on = in_on;
-                if in_on && latest_balancing.require_cv {
+                if in_on && latest_balancing.overlay {
                     // 插入两个 40ms 灭缺口： [100,140) 与 [300,340)
                     let notch2_start = NOTCH1_START_MS + NOTCH_GAP_MS + NOTCH_WIDTH_MS; // 100 + 160 + 40 = 300
                     let in_notch1 =
@@ -216,11 +216,11 @@ pub async fn led_status_task(
                 }
                 // 仅在叠加状态改变时记录一条日志，避免刷屏
                 if overlay_prev
-                    .map(|v| v != latest_balancing.require_cv)
+                    .map(|v| v != latest_balancing.overlay)
                     .unwrap_or(true)
                 {
-                    info!("led_chg overlay={}", latest_balancing.require_cv);
-                    overlay_prev = Some(latest_balancing.require_cv);
+                    info!("led_chg overlay={}", latest_balancing.overlay);
+                    overlay_prev = Some(latest_balancing.overlay);
                 }
                 if on {
                     led.set_low();

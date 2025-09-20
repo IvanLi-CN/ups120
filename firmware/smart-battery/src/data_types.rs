@@ -96,12 +96,18 @@ impl Default for Sc8815Alerts {
 /// it is no longer required.
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub struct BalancingCvRequest {
+    /// Request charger to maintain CV (used by charger task)
     pub require_cv: bool,
+    /// Whether LED should display balancing overlay (true only when HW balancing active)
+    pub overlay: bool,
 }
 
 impl Default for BalancingCvRequest {
     fn default() -> Self {
-        Self { require_cv: false }
+        Self {
+            require_cv: false,
+            overlay: false,
+        }
     }
 }
 
