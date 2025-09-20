@@ -216,6 +216,10 @@ pub async fn sc8815_task(
     // Severe imbalance pause (Δ>=100 mV) clear when Δ<50 mV
     let mut imbalance_pause_active: bool = false;
 
+    // Log de-noising latches
+    let mut pol_start_latched: bool = false; // only log POL start on rising condition
+    let mut last_pause_report: Option<(bool, bool)> = None; // (ov_pause_active, imbalance_pause_active)
+
     loop {
         if let Some(measurements) = bq76920_measurements_subscriber.try_next_message_pure() {
             latest_bq_measurements = Some(measurements);
@@ -367,15 +371,18 @@ pub async fn sc8815_task(
                     drop_streak = 0;
                 }
 
-                // Charge start conditions
-                if pack_voltage_mv < PACK_CHARGE_START_THRESHOLD_MV
+                // Charge start conditions (edge-logged)
+                let pol_start_cond = pack_voltage_mv < PACK_CHARGE_START_THRESHOLD_MV
                     && !charger_active
-                    && adapter_holdoff_secs == 0
-                {
-                    info!(
-                        "POL start: Vpack {}< {} mV",
-                        pack_voltage_mv, PACK_CHARGE_START_THRESHOLD_MV
-                    );
+                    && adapter_holdoff_secs == 0;
+                if pol_start_cond {
+                    if !pol_start_latched {
+                        info!(
+                            "POL start: Vpack {}< {} mV",
+                            pack_voltage_mv, PACK_CHARGE_START_THRESHOLD_MV
+                        );
+                        pol_start_latched = true;
+                    }
                     if sc8815_session.is_none() {
                         if let Some(pin) = pstop_pin_slot.as_mut() {
                             pin.set_high();
@@ -408,19 +415,29 @@ pub async fn sc8815_task(
                         }
                         info!("SC gates: CE=LOW PSTOP=LOW (power stage enabled)");
                         charger_active = true;
+                        // leaving pause state → clear last pause report
+                        last_pause_report = None;
                     } else {
                         if let Some(sess) = sc8815_session.as_mut() {
                             sess.disable_power_stage();
                         } else if let Some(pin) = pstop_pin_slot.as_mut() {
                             pin.set_high();
                         }
-                        info!(
-                            "SC gates: CE=LOW PSTOP=HIGH (paused: {}{} )",
-                            if ov_pause_secs > 0 { "OV" } else { "" },
-                            if imbalance_pause_active { "+IMB" } else { "" }
-                        );
+                        // log pause gating only when state (OV/IMB pair) changes
+                        let pause_sig = (ov_pause_secs > 0, imbalance_pause_active);
+                        if last_pause_report != Some(pause_sig) {
+                            info!(
+                                "SC gates: CE=LOW PSTOP=HIGH (paused: {}{} )",
+                                if ov_pause_secs > 0 { "OV" } else { "" },
+                                if imbalance_pause_active { "+IMB" } else { "" }
+                            );
+                            last_pause_report = Some(pause_sig);
+                        }
                         charger_active = false;
                     }
+                } else {
+                    // reset edge latch when the start condition is not true
+                    pol_start_latched = false;
                 }
             }
         }
