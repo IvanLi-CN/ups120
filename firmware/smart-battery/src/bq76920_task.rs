@@ -418,7 +418,16 @@ pub async fn bq76920_task(
                         | SysStatFlags::OCD)
                         .bits();
                     let faults = core_meas.system_status.0.bits() & fault_mask;
-                    let bal_on = last_cellbal_bits != 0;
+                    // Derive current balancing cell number (0 if none)
+                    let mut bal_cell_num: u8 = 0;
+                    if last_cellbal_bits != 0 {
+                        for i in 0..5 {
+                            if (last_cellbal_bits & (1 << i)) != 0 {
+                                bal_cell_num = (i + 1) as u8;
+                                break;
+                            }
+                        }
+                    }
                     // Build a human-readable fault list
                     let mut faults_str: heapless::String<24> = heapless::String::new();
                     if faults == 0 {
@@ -446,7 +455,7 @@ pub async fn bq76920_task(
                         }
                     }
                     info!(
-                        "BQ snap: pack={}mV curr={}mA ts1={}.{}C chg={} dsg={} faults=0x{:02X}({}) bal={} cells=[{},{},{},{},{}]mV",
+                        "BQ snap: pack={}mV curr={}mA ts1={}.{}C chg={} dsg={} faults=0x{:02X}({}) bal_cell={} cells=[{},{},{},{},{}]mV",
                         core_meas.total_voltage_mv,
                         core_meas.current_ma,
                         ts1_i,
@@ -455,7 +464,7 @@ pub async fn bq76920_task(
                         dsg_on,
                         faults,
                         faults_str.as_str(),
-                        bal_on,
+                        bal_cell_num,
                         cells[0],
                         cells[1],
                         cells[2],
