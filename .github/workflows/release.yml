@@ -1,0 +1,134 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g., v1.0.0)'
+        required: true
+        type: string
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-release:
+    name: Build Release Artifacts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv6m-none-eabi
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build release
+        run: cargo build --target thumbv6m-none-eabi --release
+
+      - name: Install cargo-binutils
+        run: |
+          cargo install cargo-binutils
+          rustup component add llvm-tools-preview
+
+      - name: Generate binary artifacts
+        run: |
+          # Create artifacts directory
+          mkdir -p artifacts
+          
+          # Copy ELF binary
+          cp target/thumbv6m-none-eabi/release/ups120 artifacts/ups120.elf
+          
+          # Generate binary file
+          cargo objcopy --target thumbv6m-none-eabi --release --bin ups120 -- -O binary artifacts/ups120.bin
+          
+          # Generate hex file
+          cargo objcopy --target thumbv6m-none-eabi --release --bin ups120 -- -O ihex artifacts/ups120.hex
+          
+          # Generate size report
+          cargo size --target thumbv6m-none-eabi --release --bin ups120 > artifacts/size-report.txt
+          
+          # Generate memory map
+          cargo nm --target thumbv6m-none-eabi --release --bin ups120 | sort > artifacts/memory-map.txt
+
+      - name: Calculate checksums
+        run: |
+          cd artifacts
+          sha256sum * > checksums.sha256
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ups120-firmware-${{ github.ref_name }}
+          path: artifacts/
+
+  create-release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: build-release
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v5
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: ups120-firmware-${{ github.ref_name || github.event.inputs.tag }}
+          path: artifacts/
+
+      - name: Generate release notes
+        run: |
+          echo "# UPS120 RP2040 Firmware Release ${{ github.ref_name || github.event.inputs.tag }}" > release-notes.md
+          echo "" >> release-notes.md
+          echo "## 🚀 Features" >> release-notes.md
+          echo "- Battery management with BQ76920" >> release-notes.md
+          echo "- Charging control with SC8815" >> release-notes.md
+          echo "- Power monitoring with INA226" >> release-notes.md
+          echo "- USB communication with WebUSB support" >> release-notes.md
+          echo "- Real-time LED status indication" >> release-notes.md
+          echo "" >> release-notes.md
+          echo "## 📦 Artifacts" >> release-notes.md
+          echo "- \`ups120.elf\` - ELF binary for debugging" >> release-notes.md
+          echo "- \`ups120.bin\` - Raw binary for flashing" >> release-notes.md
+          echo "- \`ups120.hex\` - Intel HEX format" >> release-notes.md
+          echo "- \`size-report.txt\` - Memory usage report" >> release-notes.md
+          echo "- \`memory-map.txt\` - Symbol memory map" >> release-notes.md
+          echo "- \`checksums.sha256\` - SHA256 checksums" >> release-notes.md
+          echo "" >> release-notes.md
+          echo "## 🔧 Flashing Instructions" >> release-notes.md
+          echo "\`\`\`bash" >> release-notes.md
+          echo "# Using probe-rs" >> release-notes.md
+          echo "probe-rs run --chip RP2040 --protocol swd ups120.elf" >> release-notes.md
+          echo "" >> release-notes.md
+          echo "# Or flash binary directly" >> release-notes.md
+          echo "probe-rs download --chip RP2040 --format bin ups120.bin" >> release-notes.md
+          echo "\`\`\`" >> release-notes.md
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name || github.event.inputs.tag }}
+          name: UPS120 Firmware ${{ github.ref_name || github.event.inputs.tag }}
+          body_path: release-notes.md
+          files: |
+            artifacts/*
+          draft: false
+          prerelease: ${{ contains(github.ref_name || github.event.inputs.tag, 'alpha') || contains(github.ref_name || github.event.inputs.tag, 'beta') || contains(github.ref_name || github.event.inputs.tag, 'rc') }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
