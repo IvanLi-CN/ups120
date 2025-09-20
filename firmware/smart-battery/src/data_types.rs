@@ -77,6 +77,10 @@ pub struct Sc8815Alerts {
     pub expected_charging: bool,
     /// Filtered SC8815 telemetry confirms measurable charge current.
     pub charging_confirmed: bool,
+    /// OV pause (charger power stage gated via PSTOP for cooldown), not necessarily a live OV fault bit.
+    pub ov_pause_active: bool,
+    /// Severe imbalance pause (Δcell >= threshold); charger power stage gated until Δ falls below release threshold.
+    pub imbalance_pause_active: bool,
 }
 
 impl Default for Sc8815Alerts {
@@ -85,6 +89,8 @@ impl Default for Sc8815Alerts {
             device_status: SC8815Status::default(),
             expected_charging: false,
             charging_confirmed: false,
+            ov_pause_active: false,
+            imbalance_pause_active: false,
         }
     }
 }
@@ -100,6 +106,8 @@ pub struct BalancingCvRequest {
     pub require_cv: bool,
     /// Whether LED should display balancing overlay (true only when HW balancing active)
     pub overlay: bool,
+    /// Severe imbalance indicator (Δcell >= 100 mV)
+    pub severe_imbalance: bool,
 }
 
 impl Default for BalancingCvRequest {
@@ -107,6 +115,7 @@ impl Default for BalancingCvRequest {
         Self {
             require_cv: false,
             overlay: false,
+            severe_imbalance: false,
         }
     }
 }

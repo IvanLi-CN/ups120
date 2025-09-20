@@ -292,6 +292,8 @@ pub async fn bq76920_task(
     let mut adapter_present: bool = false;
     let mut charger_expected: bool = false;
     let mut charger_confirmed: bool = false;
+    let mut ov_pause_active: bool = false;
+    let mut imbalance_pause_active: bool = false;
     let mut balance_retry_holdoff: u8 = 0; // seconds
     let mut last_cellbal_bits: u8 = 0; // hardware BAL bits snapshot (for change logging)
     let mut balancing_needed_by_delta: bool = false;
@@ -598,11 +600,14 @@ pub async fn bq76920_task(
             adapter_present = sc_alerts.device_status.ac_adapter_connected;
             charger_expected = sc_alerts.expected_charging;
             charger_confirmed = sc_alerts.charging_confirmed;
+            ov_pause_active = sc_alerts.ov_pause_active;
+            imbalance_pause_active = sc_alerts.imbalance_pause_active;
         }
 
-        // Determine current evaluation period based on AC + charging state
-        let charging_phase = adapter_present && (charger_expected || charger_confirmed);
-        let eval_period_secs: u32 = if charging_phase { 60 } else { 3600 };
+        // Treat charge or charge-pause as charging phase for balancing cadence
+        let charging_phase =
+            charger_expected || charger_confirmed || ov_pause_active || imbalance_pause_active;
+        let eval_period_secs: u32 = 1;
         if eval_period_secs != last_eval_period_secs {
             info!(
                 "bal_eval: schedule period={}s (ac={} charging_phase={})",
@@ -611,8 +616,9 @@ pub async fn bq76920_task(
             last_eval_period_secs = eval_period_secs;
         }
 
-        // Immediate gating: no adapter → force stop any balancing seen in hardware
-        if !adapter_present && last_cellbal_bits != 0 {
+        // Immediate gating: adapter truly absent AND 非暂停环境 才强制停止均衡
+        if !adapter_present && !ov_pause_active && !imbalance_pause_active && last_cellbal_bits != 0
+        {
             info!(
                 "adapter_absent_stop_balancing hw=0x{:02X}",
                 last_cellbal_bits
@@ -630,7 +636,7 @@ pub async fn bq76920_task(
         // LED overlay仅在“硬件正在均衡”时显示（避免仅因"require_cv"而产生抖动观感）。
         let overlay_led = active_balancing_cell.is_some() || hw_balancing_active;
 
-        // Rising-edge based fast-evaluation triggers
+        // Rising-edge based fast-evaluation triggers (kept for logs; evaluation is every second)
         let adapter_rising = adapter_present && !prev_adapter_present;
         let charge_rising = charger_confirmed && !prev_charger_confirmed;
 
@@ -640,34 +646,15 @@ pub async fn bq76920_task(
         if periodic_due || fast_due {
             // 3600 seconds = 1 hour
             if !TEST_FORCE_BQ_FETS_OFF {
-                if fast_due {
-                    info!(
-                        "Executing fast balancing eval (adapter_rise={} charge_rise={})",
-                        adapter_rising, charge_rising
-                    );
-                } else {
-                    info!("Executing periodic battery balancing eval.");
-                }
-                if !adapter_present {
-                    info!("Skip balancing: adapter not present");
-                    // Ensure balancing off if it was on
-                    if active_balancing_cell.is_some() || last_cellbal_bits != 0 {
-                        let _ = bq.set_cell_balancing(0).await;
-                        active_balancing_cell = None;
-                        last_cellbal_bits = 0;
-                    }
-                    balance_retry_holdoff = balance_retry_holdoff.max(5);
-                } else if !charging_phase {
-                    info!("Skip balancing: not in charging phase");
-                } else if balance_retry_holdoff == 0 {
+                // Allow balancing during OV/imbalance pause even if adapter not present
+                let balancing_env = adapter_present || ov_pause_active || imbalance_pause_active;
+                if balancing_env && charging_phase {
                     execute_smart_battery_balancing(
                         &mut bq,
                         &latest_core_measurements,
                         &mut active_balancing_cell,
                     )
                     .await;
-                } else {
-                    info!("Balancing holdoff {}s", balance_retry_holdoff);
                 }
             } else {
                 // During diagnostics, keep all balancing off.
@@ -681,7 +668,12 @@ pub async fn bq76920_task(
         // --- End Battery Balancing Logic ---
 
         // If adapter lost while balancing, stop immediately (log once until recovery)
-        if active_balancing_cell.is_some() && !adapter_present {
+        // 在暂停环境下（OV/严重不均衡），即使 adapter 不在也不立即停均衡
+        if active_balancing_cell.is_some()
+            && !adapter_present
+            && !ov_pause_active
+            && !imbalance_pause_active
+        {
             if !adapter_lost_logged {
                 info!("BQ warn: adapter_lost during balancing → stop balancing & withdraw CV");
                 adapter_lost_logged = true;
@@ -696,9 +688,30 @@ pub async fn bq76920_task(
         }
 
         // Publish the coupling signal each tick
+        // Severe imbalance flag (Δ>=100 mV)
+        let mut severe_imbalance_flag = false;
+        if let Some(meas) = latest_core_measurements.as_ref() {
+            let mut min_v = i32::MAX;
+            let mut max_v = i32::MIN;
+            for &v in meas.cell_voltages.voltages.iter() {
+                if v > 0 {
+                    if v < min_v {
+                        min_v = v;
+                    }
+                    if v > max_v {
+                        max_v = v;
+                    }
+                }
+            }
+            if max_v != i32::MIN && min_v != i32::MAX {
+                severe_imbalance_flag = (max_v - min_v) >= 100;
+            }
+        }
+
         balancing_cv_publisher.publish_immediate(BalancingCvRequest {
             require_cv,
             overlay: overlay_led,
+            severe_imbalance: severe_imbalance_flag,
         });
 
         if VERBOSE_BQ_LOG {

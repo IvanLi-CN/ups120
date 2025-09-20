@@ -105,7 +105,7 @@ pub async fn led_status_task(
             }
         }
 
-        // 先检查 BQ 故障（最高优先级，立即生效）
+        // 先检查 BQ/SC 故障（最高优先级，立即生效）
         let mut any_fault = false;
         if let Some(bq76920_result) = bq76920_alerts_subscriber.try_next_message() {
             match bq76920_result {
@@ -117,6 +117,11 @@ pub async fn led_status_task(
                 embassy_sync::pubsub::WaitResult::Lagged(_) => {
                     // 忽略滞后消息，继续处理
                 }
+            }
+        }
+        if let Some(a) = latest_sc8815_alerts.as_ref() {
+            if a.device_status.otp_fault || a.device_status.vbus_short_fault {
+                any_fault = true;
             }
         }
 
@@ -133,11 +138,14 @@ pub async fn led_status_task(
             continue;
         }
 
-        // 评估“充电/满电/空闲”与迟滞
-        let (mut is_charging_policy, mut ac_present, mut ibat_ma, mut vbat_mv) =
+        // 评估“充电/暂停/满电/空闲”与迟滞
+        let (mut is_charge_or_pause, mut ac_present, mut ibat_ma, mut vbat_mv) =
             (false, false, 0u16, 0u16);
         if let (Some(alerts), Some(meas)) = (&latest_sc8815_alerts, &latest_sc8815_measurements) {
-            is_charging_policy = alerts.expected_charging || alerts.charging_confirmed;
+            is_charge_or_pause = alerts.expected_charging
+                || alerts.charging_confirmed
+                || alerts.ov_pause_active
+                || alerts.imbalance_pause_active;
             ac_present = alerts.device_status.ac_adapter_connected;
             ibat_ma = meas.adc_measurements.ibat_ma;
             vbat_mv = meas.adc_measurements.vbat_mv;
@@ -163,7 +171,7 @@ pub async fn led_status_task(
                 }
             } else {
                 // 满电已锁存，监测退出条件累计
-                if exit_by_current || exit_by_voltage || !is_charging_policy {
+                if exit_by_current || exit_by_voltage || !is_charge_or_pause {
                     full_exit_acc_ms = (full_exit_acc_ms + 10).min((FULL_EXIT_SECS + 1) * 1000);
                 } else {
                     full_exit_acc_ms = 0;
@@ -182,7 +190,7 @@ pub async fn led_status_task(
         }
 
         // 模式选择（不含故障）：Charging 优先于 Full，再到 Idle
-        let desired_mode = if is_charging_policy {
+        let desired_mode = if is_charge_or_pause {
             LedMode::Charging
         } else if is_full_latched {
             LedMode::Full
@@ -203,9 +211,9 @@ pub async fn led_status_task(
                 let phase = elapsed_ms % CHG_PERIOD_MS;
                 let in_on = phase < CHG_ON_MS;
                 let mut on = in_on;
+                // 缺口仅代表“硬件均衡实际进行中”：两缺口（100/140、300/340）
                 if in_on && latest_balancing.overlay {
-                    // 插入两个 40ms 灭缺口： [100,140) 与 [300,340)
-                    let notch2_start = NOTCH1_START_MS + NOTCH_GAP_MS + NOTCH_WIDTH_MS; // 100 + 160 + 40 = 300
+                    let notch2_start = NOTCH1_START_MS + NOTCH_GAP_MS + NOTCH_WIDTH_MS; // 300
                     let in_notch1 =
                         phase >= NOTCH1_START_MS && phase < (NOTCH1_START_MS + NOTCH_WIDTH_MS);
                     let in_notch2 =

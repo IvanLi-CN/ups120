@@ -87,14 +87,15 @@ controls, and telemetry loops that underpin bring-up.
   `OVRD_ALERT` flag latches back in. The alert bit is still logged, but it no
   longer vetoes the charge path.
 - **Charger loop**: The SC8815 owner task wakes every second, consumes the most
-  recent BQ76920 measurement frame, and enables the charger path based on pack
-  voltage thresholds (17.0 V start, 18.5 V stop, 12.5 V cutoff). When charging
-  is not permitted, CE remains high and PSTOP is asserted to hard-disable the
-  power stage. To enter charging, the task asserts PSTOP high, drives CE low,
-  waits 100 ms, then releases PSTOP. During operation, any over-voltage stop,
-  protection veto, or loss of telemetry shall re-assert CE/PSTOP immediately.
-  OTP or VBUS/VBAT short flags trigger an immediate safety response (PSTOP/CE
-  high) and keep the loop active for inspection.
+  recent BQ76920 measurement frame,并按以下规范管理“会话创建/功率级放行/暂停”：
+  - 会话创建（仅两条，必须同时满足）：
+    1) `Vpack < 17.0 V`；2) BQ76920 无故障（OV/UV/OCD/SCD 均为假）。”spread“不是故障，不参与会话创建判定。
+  - 功率级放行（PSTOP 低）与暂停（PSTOP 高）：
+    - 正常充电：无暂停条件时，放行功率级（PSTOP 低）。
+    - 过压（OV，电池故障）：立即暂停，仅拉高 PSTOP，保持会话不结束；进入 180 s 冷却计时，计时结束且仍满足“会话创建两条”时再放行。
+    - 严重不均衡（Δcell ≥ 100 mV，非故障）：立即暂停，仅拉高 PSTOP，保持会话不结束；当 `Δcell < 50 mV` 立刻解除暂停并放行（无时间迟滞）。
+    - 其它电池或充电故障（如 UV/OCD/SCD、OTP、VBUS/VBAT 短路等）：立即暂停并结束会话（CE/PSTOP 置高），待故障消除后按会话创建规则重来。
+  - 进入充电时序：会话创建成功后，先断开功率级（PSTOP 高）、拉低 CE、延时 100 ms、再释放 PSTOP 以放行功率级。
 
   Charging is considered active when the SC8815 is enabled and battery charge
   current `IBAT` exceeds 100 mA for three consecutive samples; it is considered
@@ -108,22 +109,33 @@ controls, and telemetry loops that underpin bring-up.
   `AllMeasurements` snapshot without every task polling individual peripherals.
 **Balancing and Charging Coupling (Normative)**
 
-- Charging-phase gating: Balancing shall be evaluated and may run only while an external adapter is present and the charger is available (i.e., in the charging phase).
-- Start condition: Pack cell spread (max − min) shall be ≥ 10 mV to consider balancing required.
+- Evaluation cadence: Balancing SHALL be evaluated once per second (1 Hz).
+- Charging/Paused gating: Balancing MAY run only while the system is either
+  charging (`expected_charging || charging_confirmed`) or in a charging pause
+  (OV cooldown or severe-imbalance pause).
+- Start condition: Pack cell spread (max − min) ≥ 10 mV.
 - Single-cell only: At any time, at most one cell may be actively balanced. When changing the target cell, firmware shall first disable all balancing FETs, wait a deadtime ≥ 40 ms, then enable the new cell.
 - Selection rule: Choose one globally highest-voltage cell that exceeds at least one immediate neighbor by > 1 mV (for end cells, compare the single neighbor; for middle cells, either left or right neighbor suffices).
 - Stop condition: Stop balancing when all adjacent cell-to-cell differences are ≤ 1 mV across the pack.
-- Charger coupling: While balancing is required or active, the charger shall be held in constant-voltage (CV) mode to maintain the configured VBAT setpoint. If the charger terminates, firmware shall immediately re-enter CV until balancing completion or a safety constraint preempts charging.
-- Adapter loss: If the adapter is lost (VBUS invalid) at any time, firmware shall immediately stop balancing, assert PSTOP and CE to disable charging, and inhibit charge restarts for at least 5 s (debounce) after adapter reappearance.
+- Charger coupling: While balancing is required or active, the charger SHOULD maintain CV (as
+  implemented by the charger task’s policy).
+- Adapter loss: If the adapter is lost and the system is not in a charging-pause context, balancing
+  shall stop but continue to be evaluated at 1 Hz; if the system is in a charging-pause context
+  (OV cooldown or severe-imbalance pause), balancing MAY continue.
 
 **LED Status – Single LED (Normative)**
 
 Only one monochrome LED is available. Patterns below are mandatory and mutually prioritized.
 
 - Priority order (high → low): Fault > Charging (with balancing overlay) > Full (with hysteresis) > Idle.
-- Fault: 8 Hz flashing, on 60 ms / off 65 ms.
-- Charging baseline: 1 Hz flashing, on 500 ms / off 500 ms.
-- Balancing overlay (applies only during the charging “on” window): insert two 40 ms off notches separated by 160 ms. The baseline 1 Hz cadence is preserved.
+- Fault (only when a real chip fault bit is set):
+  - Battery faults: BQ76920 OV/UV/OCD/SCD = true.
+  - Charger faults: SC8815 OTP or VBUS/VBAT short = true.
+  - Pattern: 4 Hz flashing (125 ms on / 125 ms off).
+- Charging baseline: 1 Hz flashing (500/500).
+- Overlay (drawn only during the Charging on-window, and only to indicate “hardware balancing is running”):
+  - If and only if bal_cell≠0, insert two 40 ms off notches at 100–140 ms and 300–340 ms.
+  - Severe imbalance (Δ≥100 mV, non-fault; including paused state) does not add any overlay; it remains at the Charging baseline unless a chip fault makes it Fault.
 - Full (with hysteresis): solid on. If the adapter is present during maintenance/float, briefly turn off for 40 ms every 8 s.
 - Idle/Standby: off.
 

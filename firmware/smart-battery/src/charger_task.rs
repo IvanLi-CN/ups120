@@ -185,6 +185,8 @@ pub async fn charger_task(
                 device_status: status,
                 expected_charging: false,
                 charging_confirmed: false,
+                ov_pause_active: false,
+                imbalance_pause_active: false,
             };
             sc8815_alerts_publisher.publish_immediate(alerts);
         }
