@@ -89,6 +89,22 @@ impl Default for Sc8815Alerts {
     }
 }
 
+/// Balancing → Charger coupling signal
+///
+/// When `require_cv` is true, the charger task shall maintain CV charging
+/// (keep session active and avoid termination) until the balancer indicates
+/// it is no longer required.
+#[derive(Debug, Copy, Clone, PartialEq)]
+pub struct BalancingCvRequest {
+    pub require_cv: bool,
+}
+
+impl Default for BalancingCvRequest {
+    fn default() -> Self {
+        Self { require_cv: false }
+    }
+}
+
 /// 聚合所有设备的测量数据
 #[derive(Debug, Copy, Clone, PartialEq)]
 

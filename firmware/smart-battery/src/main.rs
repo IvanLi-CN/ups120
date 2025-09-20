@@ -72,6 +72,8 @@ async fn main(_spawner: Spawner) {
         _sc8815_meas_chan,
         bq76920_meas_pub,
         _bq76920_meas_chan,
+        balancing_cv_pub,
+        balancing_cv_chan,
     ) = shared::init_pubsubs();
 
     // Gate other tasks on successful BQ76920 initialization using fixed I2C address.
@@ -104,6 +106,9 @@ async fn main(_spawner: Spawner) {
                 );
                 // Spawn the continuous BQ76920 task now that init succeeded.
                 let i2c_dev_runtime = I2cDevice::new(i2c_bus);
+                let sc8815_alerts_sub = _sc8815_alerts_chan
+                    .subscriber()
+                    .expect("Allocate SC8815 alerts subscriber for BQ task");
                 _spawner
                     .spawn(bq76920_task::bq76920_task(
                         i2c_dev_runtime,
@@ -112,6 +117,8 @@ async fn main(_spawner: Spawner) {
                         None, // no NTC parameters provided
                         bq76920_alerts_pub,
                         bq76920_meas_pub,
+                        sc8815_alerts_sub,
+                        balancing_cv_pub,
                     ))
                     .ok();
                 break BQ76920_I2C_ADDR;
@@ -143,6 +150,9 @@ async fn main(_spawner: Spawner) {
 
     // Spawn SC8815 charger management task now that the protection IC is live.
     let i2c_dev_for_sc = I2cDevice::new(i2c_bus);
+    let balancing_cv_sub = balancing_cv_chan
+        .subscriber()
+        .expect("Allocate BalancingCv subscriber for charger task");
     _spawner
         .spawn(sc8815_task::sc8815_task(
             ce,
@@ -153,6 +163,7 @@ async fn main(_spawner: Spawner) {
             sc8815_alerts_pub,
             sc8815_meas_pub,
             bq76920_meas_sub,
+            balancing_cv_sub,
         ))
         .ok();
 

@@ -13,7 +13,11 @@ use bq769x0_async_rs::{
 };
 
 // Import necessary data types
-use crate::shared::{Bq76920AlertsPublisher, Bq76920MeasurementsPublisher};
+use crate::data_types::BalancingCvRequest;
+use crate::shared::{
+    BalancingCvRequestPublisher, Bq76920AlertsPublisher, Bq76920MeasurementsPublisher,
+    Sc8815AlertsSubscriber,
+};
 
 const PACK_CHARGE_STOP_THRESHOLD_MV: i32 = 18_500;
 const PACK_OUTPUT_CUTOFF_THRESHOLD_MV: i32 = 12_500;
@@ -157,6 +161,8 @@ pub async fn bq76920_task(
     ntc_params: Option<NtcParameters>, // Added: NTC parameters
     bq76920_alerts_publisher: Bq76920AlertsPublisher<'static>,
     bq76920_measurements_publisher: Bq76920MeasurementsPublisher<'static, 5>,
+    mut sc8815_alerts_subscriber: Sc8815AlertsSubscriber<'static>,
+    balancing_cv_publisher: BalancingCvRequestPublisher<'static>,
 ) {
     info!("TEST_FORCE_BQ_FETS_OFF={}", TEST_FORCE_BQ_FETS_OFF);
     // Initialize the BQ769x0 driver instance with CRC enabled and for 5 cells.
@@ -245,6 +251,10 @@ pub async fn bq76920_task(
     // Main loop for continuous data acquisition and publishing.
     let mut balance_timer_counter: u32 = 0; // Counter for battery balancing frequency
     let mut active_balancing_cell: Option<usize> = None;
+    let mut adapter_present: bool = false;
+    let mut charger_expected: bool = false;
+    let mut charger_confirmed: bool = false;
+    let mut balance_retry_holdoff: u8 = 0; // seconds
 
     loop {
         // This task focuses on reading data from the BQ76920 itself.
@@ -410,8 +420,9 @@ pub async fn bq76920_task(
                 }
 
                 let mut should_enable_charging = !ov_fault && !scd_fault && !ocd_fault && !uv_fault;
+                let require_cv_now = active_balancing_cell.is_some();
 
-                if pack_voltage_mv >= PACK_CHARGE_STOP_THRESHOLD_MV
+                if (pack_voltage_mv >= PACK_CHARGE_STOP_THRESHOLD_MV && !require_cv_now)
                     || pack_voltage_mv <= PACK_OUTPUT_CUTOFF_THRESHOLD_MV
                 {
                     should_enable_charging = false;
@@ -463,17 +474,39 @@ pub async fn bq76920_task(
         // Publish the collected BQ76920 measurements (which are now wrapped in the main project's type).
         bq76920_measurements_publisher.publish_immediate(bq76920_measurements_payload_for_main_pub);
 
+        // Pull latest charger/adapter alerts
+        if let Some(sc_alerts) = sc8815_alerts_subscriber.try_next_message_pure() {
+            adapter_present = sc_alerts.device_status.ac_adapter_connected;
+            charger_expected = sc_alerts.expected_charging;
+            charger_confirmed = sc_alerts.charging_confirmed;
+        }
+
+        // Determine if we should request CV hold from charger
+        let mut require_cv = active_balancing_cell.is_some();
+
         // --- Battery Balancing Logic (executed approximately once per hour) ---
         if balance_timer_counter == 0 || balance_timer_counter >= 3600 {
             // 3600 seconds = 1 hour
             if !TEST_FORCE_BQ_FETS_OFF {
                 info!("Executing hourly battery balancing logic.");
-                execute_smart_battery_balancing(
-                    &mut bq,
-                    &latest_core_measurements,
-                    &mut active_balancing_cell,
-                )
-                .await;
+                if !adapter_present {
+                    info!("Skip balancing: adapter not present");
+                    // Ensure balancing off if it was on
+                    if active_balancing_cell.is_some() {
+                        let _ = bq.set_cell_balancing(0).await;
+                        active_balancing_cell = None;
+                    }
+                    balance_retry_holdoff = balance_retry_holdoff.max(5);
+                } else if balance_retry_holdoff == 0 {
+                    execute_smart_battery_balancing(
+                        &mut bq,
+                        &latest_core_measurements,
+                        &mut active_balancing_cell,
+                    )
+                    .await;
+                } else {
+                    info!("Balancing holdoff {}s", balance_retry_holdoff);
+                }
             } else {
                 // During diagnostics, keep all balancing off.
                 if active_balancing_cell.is_some() {
@@ -485,10 +518,27 @@ pub async fn bq76920_task(
         }
         // --- End Battery Balancing Logic ---
 
+        // If adapter lost while balancing, stop immediately
+        if active_balancing_cell.is_some() && !adapter_present {
+            info!(
+                "Adapter lost during balancing: stopping cell balancing and withdrawing CV request"
+            );
+            let _ = bq.set_cell_balancing(0).await;
+            active_balancing_cell = None;
+            require_cv = false;
+            balance_retry_holdoff = balance_retry_holdoff.max(5);
+        }
+
+        // Publish the coupling signal each tick
+        balancing_cv_publisher.publish_immediate(BalancingCvRequest { require_cv });
+
         info!("----------------------------");
 
         // Wait for a defined interval before the next cycle of readings.
         Timer::after(Duration::from_secs(1)).await;
         balance_timer_counter += 1;
+        if balance_retry_holdoff > 0 {
+            balance_retry_holdoff = balance_retry_holdoff.saturating_sub(1);
+        }
     }
 }

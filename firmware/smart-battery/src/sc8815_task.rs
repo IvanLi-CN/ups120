@@ -8,9 +8,11 @@ use sc8815::{
     DeadTime, DeviceConfiguration, OperatingMode, SC8815, SC8815Status, SwitchingFrequency,
 };
 
+use crate::data_types::BalancingCvRequest;
 use crate::data_types::{Sc8815Alerts, Sc8815Measurements};
 use crate::shared::{
-    Bq76920MeasurementsSubscriber, Sc8815AlertsPublisher, Sc8815MeasurementsPublisher,
+    BalancingCvRequestSubscriber, Bq76920MeasurementsSubscriber, Sc8815AlertsPublisher,
+    Sc8815MeasurementsPublisher,
 };
 
 pub const SC8815_DEFAULT_ADDRESS: u8 = sc8815::registers::constants::DEFAULT_ADDRESS;
@@ -172,6 +174,7 @@ pub async fn sc8815_task(
     sc8815_alerts_publisher: Sc8815AlertsPublisher<'static>,
     sc8815_measurements_publisher: Sc8815MeasurementsPublisher<'static>,
     mut bq76920_measurements_subscriber: Bq76920MeasurementsSubscriber<'static, 5>,
+    mut balancing_cv_sub: BalancingCvRequestSubscriber<'static>,
 ) {
     // Ensure charger is disabled until we explicitly start a session.
     ce_pin.set_high();
@@ -189,10 +192,17 @@ pub async fn sc8815_task(
     let mut confirm_streak: u8 = 0;
     let mut drop_streak: u8 = 0;
     let mut latest_bq_measurements = None;
+    let mut latest_bal_req: BalancingCvRequest = BalancingCvRequest::default();
+    let mut adapter_present: bool = false;
+    let mut adapter_holdoff_secs: u8 = 0; // debounce before allowing restart
 
     loop {
         if let Some(measurements) = bq76920_measurements_subscriber.try_next_message_pure() {
             latest_bq_measurements = Some(measurements);
+        }
+
+        if let Some(msg) = balancing_cv_sub.try_next_message_pure() {
+            latest_bal_req = msg;
         }
 
         if let Some(bq_meas) = latest_bq_measurements.as_ref() {
@@ -225,7 +235,8 @@ pub async fn sc8815_task(
                 charge_confirmed = false;
                 confirm_streak = 0;
                 drop_streak = 0;
-            } else if pack_voltage_mv >= PACK_CHARGE_STOP_THRESHOLD_MV {
+            } else if pack_voltage_mv >= PACK_CHARGE_STOP_THRESHOLD_MV && !latest_bal_req.require_cv
+            {
                 info!(
                     "policy_stop {}>= {} mV",
                     pack_voltage_mv, PACK_CHARGE_STOP_THRESHOLD_MV
@@ -272,7 +283,10 @@ pub async fn sc8815_task(
                 charge_confirmed = false;
                 confirm_streak = 0;
                 drop_streak = 0;
-            } else if pack_voltage_mv < PACK_CHARGE_START_THRESHOLD_MV && !charger_active {
+            } else if pack_voltage_mv < PACK_CHARGE_START_THRESHOLD_MV
+                && !charger_active
+                && adapter_holdoff_secs == 0
+            {
                 info!(
                     "policy_start {}< {} mV",
                     pack_voltage_mv, PACK_CHARGE_START_THRESHOLD_MV
@@ -323,6 +337,27 @@ pub async fn sc8815_task(
                             status.otp_fault,
                             status.vbus_short_fault
                         );
+
+                        // Track adapter presence
+                        if !status.ac_adapter_connected {
+                            adapter_present = false;
+                            if let Some(sess) = sc8815_session.take() {
+                                let (ce_back, pstop_back, i2c_back) = sess.end().await;
+                                ce_pin_slot = Some(ce_back);
+                                pstop_pin_slot = Some(pstop_back);
+                                parked_i2c_device = Some(i2c_back);
+                            }
+                            charger_active = false;
+                            charge_confirmed = false;
+                            confirm_streak = 0;
+                            drop_streak = 0;
+                            adapter_holdoff_secs = adapter_holdoff_secs.max(5);
+                            latest_status_for_alerts = Some(status);
+                            // Skip further work in this tick when adapter just lost
+                            continue;
+                        } else {
+                            adapter_present = true;
+                        }
 
                         if status.otp_fault || status.vbus_short_fault {
                             warn!("sc_fault");
@@ -439,6 +474,9 @@ pub async fn sc8815_task(
             }
         }
 
+        if adapter_holdoff_secs > 0 {
+            adapter_holdoff_secs = adapter_holdoff_secs.saturating_sub(1);
+        }
         Timer::after(Duration::from_secs(1)).await;
     }
 }

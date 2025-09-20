@@ -1,7 +1,8 @@
 //! 共享数据模块，包含消息队列和数据结构定义。
 
 use crate::data_types::{
-    AllMeasurements, Bq76920Alerts, Bq76920Measurements, Sc8815Alerts, Sc8815Measurements,
+    AllMeasurements, BalancingCvRequest, Bq76920Alerts, Bq76920Measurements, Sc8815Alerts,
+    Sc8815Measurements,
 };
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::pubsub::{PubSubChannel, Publisher, Subscriber};
@@ -77,6 +78,19 @@ static SC8815_MEASUREMENTS_PUBSUB: StaticCell<
         Sc8815Measurements,
         SC8815_MEASUREMENTS_PUBSUB_DEPTH,
         SC8815_MEASUREMENTS_PUBSUB_READERS,
+        1,
+    >,
+> = StaticCell::new();
+
+// Balancing→Charger coupling PubSub
+const BALANCING_CV_PUBSUB_DEPTH: usize = 4; // 消息队列深度
+const BALANCING_CV_PUBSUB_READERS: usize = 2; // 消费者数量 (sc8815_task + maybe led)
+static BALANCING_CV_PUBSUB: StaticCell<
+    PubSubChannel<
+        CriticalSectionRawMutex,
+        BalancingCvRequest,
+        BALANCING_CV_PUBSUB_DEPTH,
+        BALANCING_CV_PUBSUB_READERS,
         1,
     >,
 > = StaticCell::new();
@@ -163,6 +177,23 @@ pub type Bq76920MeasurementsSubscriber<'a, const N: usize> = Subscriber<
     1,
 >;
 
+pub type BalancingCvRequestPublisher<'a> = Publisher<
+    'a,
+    CriticalSectionRawMutex,
+    BalancingCvRequest,
+    BALANCING_CV_PUBSUB_DEPTH,
+    BALANCING_CV_PUBSUB_READERS,
+    1,
+>;
+pub type BalancingCvRequestSubscriber<'a> = Subscriber<
+    'a,
+    CriticalSectionRawMutex,
+    BalancingCvRequest,
+    BALANCING_CV_PUBSUB_DEPTH,
+    BALANCING_CV_PUBSUB_READERS,
+    1,
+>;
+
 // Removed INA226 types as we're replacing with SC8815
 
 // Removed Bq25730RuntimeConfigPublisher and Bq25730RuntimeConfigSubscriber type aliases
@@ -204,6 +235,13 @@ pub type Bq76920MeasurementsChannelType<const N: usize> = PubSubChannel<
     BQ76920_MEASUREMENTS_PUBSUB_READERS,
     1,
 >;
+pub type BalancingCvRequestChannelType = PubSubChannel<
+    CriticalSectionRawMutex,
+    BalancingCvRequest,
+    BALANCING_CV_PUBSUB_DEPTH,
+    BALANCING_CV_PUBSUB_READERS,
+    1,
+>;
 // Removed INA226 channel type as we're replacing with SC8815
 // Removed Bq25730RuntimeConfigChannelType type alias.
 // Bq76920RuntimeConfigChannelType type alias was removed.
@@ -223,6 +261,8 @@ pub type PubSubSetup<'a, const N: usize> = (
     &'a Sc8815MeasurementsChannelType,
     Bq76920MeasurementsPublisher<'a, N>,
     &'a Bq76920MeasurementsChannelType<N>,
+    BalancingCvRequestPublisher<'a>,
+    &'a BalancingCvRequestChannelType,
 );
 
 // 初始化 PubSubChannel 实例的函数
@@ -237,6 +277,8 @@ pub fn init_pubsubs() -> PubSubSetup<'static, 5> {
         BQ76920_MEASUREMENTS_PUBSUB.init(PubSubChannel::new());
     let sc8815_measurements_pubsub: &'static Sc8815MeasurementsChannelType =
         SC8815_MEASUREMENTS_PUBSUB.init(PubSubChannel::new());
+    let balancing_cv_pubsub: &'static BalancingCvRequestChannelType =
+        BALANCING_CV_PUBSUB.init(PubSubChannel::new());
 
     (
         measurements_pubsub.publisher().unwrap(),
@@ -249,5 +291,7 @@ pub fn init_pubsubs() -> PubSubSetup<'static, 5> {
         sc8815_measurements_pubsub,
         bq76920_measurements_pubsub.publisher().unwrap(),
         bq76920_measurements_pubsub,
+        balancing_cv_pubsub.publisher().unwrap(),
+        balancing_cv_pubsub,
     )
 }
