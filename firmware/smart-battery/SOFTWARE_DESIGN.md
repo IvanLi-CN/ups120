@@ -86,36 +86,52 @@ controls, and telemetry loops that underpin bring-up.
   whenever voltage and protection limits are satisfied, even if the
   `OVRD_ALERT` flag latches back in. The alert bit is still logged, but it no
   longer vetoes the charge path.
-- **Charger loop**: The SC8815 owner task wakes every second, pulls the most
-  recent BQ76920 measurement frame from its subscriber queue, and decides whether
-  the charger path should be enabled (17.0 V start, 18.5 V stop, 12.5 V cutoff).
-  The resulting decision is tracked as *charge expected* — i.e. CE is driven low
-  and PSTOP released only while the policy wants energy flowing. When no
-  charging or SC8815 telemetry is required, CE remains high so the charger is
-  electrically idle and no I²C transactions are attempted. To configure or
-  energize the charger, the task reasserts PSTOP high, drops CE low, waits
-  100 ms, and only then releases PSTOP to energize the stage. During this window
-  CE stays low to keep the SC8815 responsive for status/ADC reads; any
-  over-voltage stop, permission withdrawal, or absence of telemetry demand
-  raises CE/PSTOP again. OTP or VBUS/VBAT short flags trigger an immediate safety
-  response—raising PSTOP/CE and leaving the loop active for inspection.
-- **Charging confirmation**: Each SC8815 ADC frame is filtered to decide whether
-  real charge current is flowing. A running confirmation counter asserts
-  *charging confirmed* whenever `IBAT` stays above 100 mA for three consecutive
-  samples, and deasserts after three samples below an 80 mA hysteresis band.
-  The pub/sub alert payload exposes both `expected` and `confirmed` flags so UI
-  elements (LED task, USB reporting, diagnostics) can distinguish “policy wants
-  charging” from “measurable current is present” and warn on mismatches instead
-  of guessing from noisy instantaneous readings.
+- **Charger loop**: The SC8815 owner task wakes every second, consumes the most
+  recent BQ76920 measurement frame, and enables the charger path based on pack
+  voltage thresholds (17.0 V start, 18.5 V stop, 12.5 V cutoff). When charging
+  is not permitted, CE remains high and PSTOP is asserted to hard-disable the
+  power stage. To enter charging, the task asserts PSTOP high, drives CE low,
+  waits 100 ms, then releases PSTOP. During operation, any over-voltage stop,
+  protection veto, or loss of telemetry shall re-assert CE/PSTOP immediately.
+  OTP or VBUS/VBAT short flags trigger an immediate safety response (PSTOP/CE
+  high) and keep the loop active for inspection.
+
+  Charging is considered active when the SC8815 is enabled and battery charge
+  current `IBAT` exceeds 100 mA for three consecutive samples; it is considered
+  inactive after three consecutive samples ≤ 80 mA. These thresholds are used
+  solely for control and indication logic and do not introduce additional UI
+  states.
 - **Telemetry plumbing**: Measurement publishers returned by `shared::init_pubsubs`
   keep per-device channels decoupled. The BQ76920 producer updates its queue at
   1 Hz, the SC8815 task pushes charger telemetry on the same cadence, and any
   consumer (USB bridge, logging task, etc.) can subscribe to combine them into an
   `AllMeasurements` snapshot without every task polling individual peripherals.
-- **Balancing policy**: The BQ76920’s autonomous cell balancing is limited to one
-  cell at a time. The firmware withdraws a cell from balancing once it falls
-  below 3.300 V and applies a 5 mV hysteresis band before allowing that cell to
-  re-enter, preventing chatter.
+**Balancing and Charging Coupling (Normative)**
+
+- Balancing shall be evaluated and performed only while an external adapter is present and the charger is available.
+- While balancing is required or active, the charger shall be held in constant-voltage (CV) mode to maintain the configured VBAT setpoint. If the charger terminates, firmware shall immediately re-enter CV until balancing completion or a safety constraint preempts charging.
+- If the adapter is lost (VBUS invalid) at any time, firmware shall immediately stop balancing, assert PSTOP and CE to disable charging, and inhibit charge restarts for at least 5 s (debounce) after adapter reappearance.
+- Balancing completion is reached when both conditions hold for at least `T_hold` (≥ 60 s):
+  - All cells in the balancing candidate set are ≤ `BALANCE_STOP_THRESHOLD_MV` (default 3300 mV);
+  - Pack cell spread is < `BALANCE_DELTA_THRESHOLD_MV` (default 5 mV).
+- The BQ76920 hardware supports one cell balanced at a time; the firmware shall respect this limitation.
+
+**LED Status – Single LED (Normative)**
+
+Only one monochrome LED is available. Patterns below are mandatory and mutually prioritized.
+
+- Priority order (high → low): Fault > Charging (with balancing overlay) > Full (with hysteresis) > Idle.
+- Fault: 8 Hz flashing, on 60 ms / off 65 ms.
+- Charging baseline: 1 Hz flashing, on 500 ms / off 500 ms.
+- Balancing overlay (applies only during the charging “on” window): insert two 40 ms off notches separated by 160 ms. The baseline 1 Hz cadence is preserved.
+- Full (with hysteresis): solid on. If the adapter is present during maintenance/float, briefly turn off for 40 ms every 8 s.
+- Idle/Standby: off.
+
+Full detection (parameters):
+
+- Enter full when `VBAT ≥ PACK_CHARGE_STOP_THRESHOLD_MV` and `IBAT ≤ I_term` continuously for 45–90 s.
+- Exit full when `VBAT` leaves the float band, or `IBAT ≥ 1.2 × I_term` continuously for ≥ 10 s, or any fault occurs.
+- Debounce: 800 ms on all state edges.
 
 ## Future Enhancements
 
