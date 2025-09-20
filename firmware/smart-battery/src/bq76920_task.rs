@@ -145,6 +145,18 @@ async fn execute_smart_battery_balancing<'a>(
                 error!("Failed to enable cell balancing: {:?}", e);
             } else {
                 *active_cell = Some(cell_idx);
+                // Read-back verification
+                match bq.read_register(Register::CELLBAL1).await {
+                    Ok(bits) => {
+                        if (bits as u16 & mask) == 0 {
+                            warn!(
+                                "BAL verify mismatch: wrote 0x{:04X} but CELLBAL1=0x{:02X}",
+                                mask, bits
+                            );
+                        }
+                    }
+                    Err(e) => warn!("BAL verify read failed: {:?}", e),
+                }
             }
         } else {
             // No eligible local peak at global max; disable for now
@@ -153,6 +165,18 @@ async fn execute_smart_battery_balancing<'a>(
             }
             let _ = bq.set_cell_balancing(0).await;
             *active_cell = None;
+            // Verify bits cleared
+            match bq.read_register(Register::CELLBAL1).await {
+                Ok(bits) => {
+                    if bits != 0 {
+                        warn!(
+                            "BAL verify mismatch: expected 0 but CELLBAL1=0x{:02X}",
+                            bits
+                        );
+                    }
+                }
+                Err(e) => warn!("BAL verify read failed: {:?}", e),
+            }
         }
     } else {
         if active_cell.is_some() {
