@@ -154,3 +154,145 @@ Full detection (parameters):
 - Add explicit recovery routines (e.g., staggered retries or manual clear hooks)
   once the protection IC reports a cleared fault, keeping the safety-first
   posture that now gates charger bring-up.
+
+---
+
+## Control-Flow Diagrams
+
+Policy note: Balancing now strictly requires AC presence. When the adapter is absent, any active balancing is immediately cleared, and CV-hold requests are withdrawn.
+
+### Tasks, PubSub, and Data Flow
+
+```mermaid
+flowchart LR
+  MAIN[main]
+  BQ[bq76920_task]
+  SC[sc8815_task]
+  GS[global_state_task]
+  LED[led_status_task]
+
+  SCA[Sc8815Alerts]
+  SCM[Sc8815Measurements]
+  BQA[Bq76920Alerts]
+  BQM[Bq76920Measurements]
+  BAL[BalancingCvRequest]
+  GSTATE[BatteryGlobalState]
+
+  MAIN --> BQ
+  MAIN --> SC
+  MAIN --> GS
+  MAIN --> LED
+
+  SC --> SCA
+  SC --> SCM
+  BQ --> BQA
+  BQ --> BQM
+  BQ --> BAL
+  GS --> GSTATE
+
+  GS --- SCA
+  GS --- SCM
+  GS --- BQA
+  GS --- BAL
+  LED --- GSTATE
+  BQ --- SCA
+  SC --- BQM
+```
+
+### BQ76920 Task – Balancing (Strict AC Gating)
+
+```mermaid
+flowchart TD
+  A0([Start]) --> A1[Read SC alerts]
+  A1 --> A2{Adapter present}
+  A2 -- No --> A2N[Stop balancing if any] --> A2P[Publish require cv false and overlay false] --> A99([End])
+  A2 -- Yes --> A3{Evaluation due}
+  A3 -- No --> A7[Prepare publish fields]
+  A3 -- Yes --> A4{Charging phase}
+  A4 -- No --> A7
+  A4 -- Yes --> A5[Read BQ data and compute delta]
+  A5 --> A6{Delta large and local peak}
+  A6 -- Yes --> A6Y[Set cell balancing] --> A7
+  A6 -- No --> A6N[Clear cell balancing] --> A7
+  A7 --> A8[Publish balancing request] --> A99
+```
+
+### SC8815 Task – Charger Session Lifecycle (Session Begin to Session End)
+
+```mermaid
+flowchart TD
+  S0([Session begin]) --> S1[Init SC8815 and start ADC]
+  S1 --> IF{Init ok}
+  IF -- No  --> END_INIT([Session end init fail])
+  IF -- Yes --> A[Active]
+
+  A --> PF[Fault pause]
+  PF --> A
+  A --> PI[Imbalance pause]
+  PI --> A
+
+  A --> END_CUT([Session end cutoff])
+  A --> END_SCF([Session end sc fault])
+  A --> END_STOP([Session end stop])
+
+```
+
+### SC8815 Task – Tick Loop
+
+```mermaid
+flowchart TD
+  TEND([Tick end])
+  T0([Tick start]) --> IN[Read inputs]
+  IN --> ADP{Adapter present}
+  ADP -- No --> END_REQ([Request session end])
+  ADP -- Yes --> SCF{SC fault}
+  SCF -- Yes --> END_REQ
+  SCF -- No  --> CUT{Pack cutoff le 12.5V}
+  CUT -- Yes --> END_REQ
+  CUT -- No  --> BQF{BQ critical fault}
+  BQF -- Yes --> GATE[Gate PSTOP]
+  BQF -- No  --> IMB{Spread ge 100 mV}
+  IMB -- Yes --> GATE
+  IMB -- No  --> RES{Timer zero and faults cleared}
+  RES -- Yes --> UNG[Un gate PSTOP] --> TEND
+  RES -- No  --> CHK{Stop candidate Vpack ge 18.5V}
+  CHK -- Yes --> BAL{Balancing not complete}
+  BAL -- Yes --> CVH[Continue charging CV hold] --> TEND
+  BAL -- No  --> END_REQ
+  CHK -- No --> KEEP[Maintain PSTOP state] --> TEND
+
+  GATE --> TEND
+```
+
+### Global State Aggregation
+
+```mermaid
+flowchart TD
+  G0([Start]) --> G1[Read inputs]
+  G1 --> G2[Compute ac present and charger fault]
+  G2 --> G3[Compute charging active and charging paused]
+  G3 --> G4{AC present}
+  G4 -- Yes --> G4Y[Update full latch timers]
+  G4 -- No --> G4N[Clear full latch]
+  G4Y --> G5[Compute preparing flag]
+  G4N --> G5
+  G5 --> G6[balancing active from overlay]
+  G6 --> G7{State changed}
+  G7 -- Yes --> G8[Publish global state] --> GE([End])
+  G7 -- No --> G9[No publish] --> GE
+```
+
+### LED State Machine
+
+```mermaid
+flowchart TD
+  L0([Start]) --> L1{Fault}
+  L1 -- Yes --> Lf[Blink 4Hz] --> Lend([End])
+  L1 -- No --> L2{Charging}
+  L2 -- Yes --> Lc[Blink 1Hz add notches when balancing] --> Lend
+  L2 -- No --> L3{Preparing}
+  L3 -- Yes --> Lp[Two pulses per second] --> Lend
+  L3 -- No --> L4{Full}
+  L4 -- Yes --> Lfull[Solid on] --> Lend
+  L4 -- No --> Lidle[Off] --> Lend
+```

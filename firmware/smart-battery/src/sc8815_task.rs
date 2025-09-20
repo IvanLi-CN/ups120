@@ -295,42 +295,19 @@ pub async fn sc8815_task(
                 if charger_active {
                     warn!("blocking_fault {}", pack_voltage_mv);
                 }
-                if ov_fault {
-                    // OV: gate power stage via PSTOP, keep session for fast recovery
-                    if let Some(sess) = sc8815_session.as_mut() {
-                        sess.disable_power_stage();
-                    } else if let Some(pin) = pstop_pin_slot.as_mut() {
-                        pin.set_high();
-                    }
-                    charger_active = false;
-                    charge_confirmed = false;
-                    confirm_streak = 0;
-                    drop_streak = 0;
-                    if ov_pause_secs == 0 {
-                        ov_pause_secs = 180;
-                        warn!("ov_pause_start 180s");
-                    }
-                } else {
-                    // Other faults: end session safely
-                    if sc8815_session.is_some() {
-                        if let Some(sess) = sc8815_session.take() {
-                            let (ce_back, pstop_back, i2c_back) = sess.end().await;
-                            ce_pin_slot = Some(ce_back);
-                            pstop_pin_slot = Some(pstop_back);
-                            parked_i2c_device = Some(i2c_back);
-                        }
-                    } else {
-                        if let Some(pin) = pstop_pin_slot.as_mut() {
-                            pin.set_high();
-                        }
-                        if let Some(pin) = ce_pin_slot.as_mut() {
-                            pin.set_high();
-                        }
-                    }
-                    charger_active = false;
-                    charge_confirmed = false;
-                    confirm_streak = 0;
-                    drop_streak = 0;
+                // For ANY BQ critical fault (OV/UV/SCD/OCD), gate power stage and keep session for timed recovery
+                if let Some(sess) = sc8815_session.as_mut() {
+                    sess.disable_power_stage();
+                } else if let Some(pin) = pstop_pin_slot.as_mut() {
+                    pin.set_high();
+                }
+                charger_active = false;
+                charge_confirmed = false;
+                confirm_streak = 0;
+                drop_streak = 0;
+                if ov_pause_secs == 0 {
+                    ov_pause_secs = 180;
+                    warn!("crit_pause_start 180s");
                 }
             } else {
                 // Maintain severe-imbalance pause state using spread; start by BalancingCvRequest.severe_imbalance
@@ -403,6 +380,11 @@ pub async fn sc8815_task(
                                 charge_confirmed = false;
                                 confirm_streak = 0;
                                 drop_streak = 0;
+                                // Backoff to avoid rapid re-init thrash when init fails
+                                if adapter_holdoff_secs < 5 {
+                                    adapter_holdoff_secs = 5;
+                                }
+                                warn!("sc_begin_failed_backoff_5s");
                                 continue;
                             }
                         }

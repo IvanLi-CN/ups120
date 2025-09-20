@@ -4,6 +4,7 @@ use crate::data_types::{
     AllMeasurements, BalancingCvRequest, Bq76920Alerts, Bq76920Measurements, Sc8815Alerts,
     Sc8815Measurements,
 };
+use crate::global_state::BatteryGlobalState;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::pubsub::{PubSubChannel, Publisher, Subscriber};
 use static_cell::StaticCell;
@@ -91,6 +92,19 @@ static BALANCING_CV_PUBSUB: StaticCell<
         BalancingCvRequest,
         BALANCING_CV_PUBSUB_DEPTH,
         BALANCING_CV_PUBSUB_READERS,
+        1,
+    >,
+> = StaticCell::new();
+
+// Global battery state PubSub
+const GLOBAL_STATE_PUBSUB_DEPTH: usize = 8;
+const GLOBAL_STATE_PUBSUB_READERS: usize = 3; // led_status_task + main logger + spare
+static GLOBAL_STATE_PUBSUB: StaticCell<
+    PubSubChannel<
+        CriticalSectionRawMutex,
+        BatteryGlobalState,
+        GLOBAL_STATE_PUBSUB_DEPTH,
+        GLOBAL_STATE_PUBSUB_READERS,
         1,
     >,
 > = StaticCell::new();
@@ -194,6 +208,23 @@ pub type BalancingCvRequestSubscriber<'a> = Subscriber<
     1,
 >;
 
+pub type GlobalStatePublisher<'a> = Publisher<
+    'a,
+    CriticalSectionRawMutex,
+    BatteryGlobalState,
+    GLOBAL_STATE_PUBSUB_DEPTH,
+    GLOBAL_STATE_PUBSUB_READERS,
+    1,
+>;
+pub type GlobalStateSubscriber<'a> = Subscriber<
+    'a,
+    CriticalSectionRawMutex,
+    BatteryGlobalState,
+    GLOBAL_STATE_PUBSUB_DEPTH,
+    GLOBAL_STATE_PUBSUB_READERS,
+    1,
+>;
+
 // Removed INA226 types as we're replacing with SC8815
 
 // Removed Bq25730RuntimeConfigPublisher and Bq25730RuntimeConfigSubscriber type aliases
@@ -242,6 +273,13 @@ pub type BalancingCvRequestChannelType = PubSubChannel<
     BALANCING_CV_PUBSUB_READERS,
     1,
 >;
+pub type GlobalStateChannelType = PubSubChannel<
+    CriticalSectionRawMutex,
+    BatteryGlobalState,
+    GLOBAL_STATE_PUBSUB_DEPTH,
+    GLOBAL_STATE_PUBSUB_READERS,
+    1,
+>;
 // Removed INA226 channel type as we're replacing with SC8815
 // Removed Bq25730RuntimeConfigChannelType type alias.
 // Bq76920RuntimeConfigChannelType type alias was removed.
@@ -263,6 +301,8 @@ pub type PubSubSetup<'a, const N: usize> = (
     &'a Bq76920MeasurementsChannelType<N>,
     BalancingCvRequestPublisher<'a>,
     &'a BalancingCvRequestChannelType,
+    GlobalStatePublisher<'a>,
+    &'a GlobalStateChannelType,
 );
 
 // 初始化 PubSubChannel 实例的函数
@@ -279,6 +319,8 @@ pub fn init_pubsubs() -> PubSubSetup<'static, 5> {
         SC8815_MEASUREMENTS_PUBSUB.init(PubSubChannel::new());
     let balancing_cv_pubsub: &'static BalancingCvRequestChannelType =
         BALANCING_CV_PUBSUB.init(PubSubChannel::new());
+    let global_state_pubsub: &'static GlobalStateChannelType =
+        GLOBAL_STATE_PUBSUB.init(PubSubChannel::new());
 
     (
         measurements_pubsub.publisher().unwrap(),
@@ -293,5 +335,7 @@ pub fn init_pubsubs() -> PubSubSetup<'static, 5> {
         bq76920_measurements_pubsub,
         balancing_cv_pubsub.publisher().unwrap(),
         balancing_cv_pubsub,
+        global_state_pubsub.publisher().unwrap(),
+        global_state_pubsub,
     )
 }

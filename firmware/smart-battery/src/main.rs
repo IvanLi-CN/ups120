@@ -3,6 +3,7 @@
 
 mod bq76920_task;
 mod data_types;
+mod global_state;
 mod led_status_task;
 mod sc8815_task;
 mod shared;
@@ -75,6 +76,8 @@ async fn main(_spawner: Spawner) {
         _bq76920_meas_chan,
         balancing_cv_pub,
         balancing_cv_chan,
+        global_state_pub,
+        global_state_chan,
     ) = shared::init_pubsubs();
 
     // Gate other tasks on successful BQ76920 initialization using fixed I2C address.
@@ -168,32 +171,82 @@ async fn main(_spawner: Spawner) {
         ))
         .ok();
 
-    // 启动 LED 状态任务
-    let led_pin = OutputOpenDrain::new(p.PA5, Level::High, Speed::Low);
-    let led_sc_alerts_sub = _sc8815_alerts_chan
+    // 启动 Global State 聚合任务
+    let gs_sc_alerts_sub = _sc8815_alerts_chan
         .subscriber()
-        .expect("Allocate SC8815 alerts subscriber for LED task");
-    let led_sc_meas_sub = _sc8815_meas_chan
+        .expect("Allocate SC8815 alerts subscriber for GS task");
+    let gs_sc_meas_sub = _sc8815_meas_chan
         .subscriber()
-        .expect("Allocate SC8815 measurements subscriber for LED task");
-    let led_bq_alerts_sub = _bq76920_alerts_chan
+        .expect("Allocate SC8815 measurements subscriber for GS task");
+    let gs_bq_alerts_sub = _bq76920_alerts_chan
         .subscriber()
-        .expect("Allocate BQ76920 alerts subscriber for LED task");
-    let led_bal_cv_sub = balancing_cv_chan
+        .expect("Allocate BQ76920 alerts subscriber for GS task");
+    let gs_bal_cv_sub = balancing_cv_chan
         .subscriber()
-        .expect("Allocate BalancingCv subscriber for LED task");
+        .expect("Allocate BalancingCv subscriber for GS task");
     _spawner
-        .spawn(led_status_task::led_status_task(
-            led_pin,
-            led_sc_alerts_sub,
-            led_sc_meas_sub,
-            led_bq_alerts_sub,
-            led_bal_cv_sub,
+        .spawn(global_state::global_state_task(
+            gs_sc_alerts_sub,
+            gs_sc_meas_sub,
+            gs_bq_alerts_sub,
+            gs_bal_cv_sub,
+            global_state_pub,
         ))
         .ok();
 
-    // Keep the main task alive while worker tasks run.
+    // 启动 LED 状态任务
+    let led_pin = OutputOpenDrain::new(p.PA5, Level::High, Speed::Low);
+    let led_global_state_sub = global_state_chan
+        .subscriber()
+        .expect("Allocate GlobalState subscriber for LED task");
+    _spawner
+        .spawn(led_status_task::led_status_task(
+            led_pin,
+            led_global_state_sub,
+        ))
+        .ok();
+
+    // Main loop: subscribe global-state and log immediate changes + 1s snapshots.
+    let mut gs_sub_for_log = global_state_chan
+        .subscriber()
+        .expect("Allocate GlobalState subscriber for main logger");
+    let mut last_seen: Option<crate::global_state::BatteryGlobalState> = None;
+    let mut last_snap = embassy_time::Instant::now();
     loop {
-        Timer::after(Duration::from_secs(60)).await;
+        if let Some(s) = gs_sub_for_log.try_next_message_pure() {
+            if last_seen.map(|v| v != s).unwrap_or(true) {
+                info!(
+                    "state_changed ac={} chg={} paused={} prep={} full={} bal={} batt_fault={} chg_fault={}",
+                    s.ac_present,
+                    s.charging,
+                    s.charging_paused,
+                    s.preparing,
+                    s.full,
+                    s.balancing_active,
+                    s.fault_battery,
+                    s.fault_charger
+                );
+                last_seen = Some(s);
+            }
+        }
+        let now = embassy_time::Instant::now();
+        if now.duration_since(last_snap) >= Duration::from_secs(1) {
+            match last_seen {
+                Some(s) => info!(
+                    "state_snap ac={} chg={} paused={} prep={} full={} bal={} batt_fault={} chg_fault={}",
+                    s.ac_present,
+                    s.charging,
+                    s.charging_paused,
+                    s.preparing,
+                    s.full,
+                    s.balancing_active,
+                    s.fault_battery,
+                    s.fault_charger
+                ),
+                None => info!("state_snap (no data yet)"),
+            }
+            last_snap = now;
+        }
+        Timer::after(Duration::from_millis(10)).await;
     }
 }

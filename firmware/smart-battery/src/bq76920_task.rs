@@ -532,10 +532,47 @@ pub async fn bq76920_task(
                     }
                 }
 
-                let mut should_enable_charging = !ov_fault && !scd_fault && !ocd_fault && !uv_fault;
-                let require_cv_now = active_balancing_cell.is_some();
+                // Compute whether balancing is needed by pack spread threshold (start condition)
+                balancing_needed_by_delta = false;
+                if let Some(meas) = latest_core_measurements.as_ref() {
+                    let mut min_v = i32::MAX;
+                    let mut max_v = i32::MIN;
+                    for &v in meas.cell_voltages.voltages.iter() {
+                        if v > 0 {
+                            if v < min_v {
+                                min_v = v;
+                            }
+                            if v > max_v {
+                                max_v = v;
+                            }
+                        }
+                    }
+                    if max_v != i32::MIN && min_v != i32::MAX {
+                        let spread = max_v - min_v;
+                        if spread >= BALANCE_START_SPREAD_MV {
+                            balancing_needed_by_delta = true;
+                        }
+                        if balancing_needed_by_delta != prev_balancing_needed_by_delta {
+                            info!(
+                                "bal_eval: spread={}mV need_by_delta={} (start_threshold={}mV)",
+                                spread, balancing_needed_by_delta, BALANCE_START_SPREAD_MV
+                            );
+                            prev_balancing_needed_by_delta = balancing_needed_by_delta;
+                        }
+                    }
+                }
 
-                if (pack_voltage_mv >= PACK_CHARGE_STOP_THRESHOLD_MV && !require_cv_now)
+                // Preview whether CV hold is required (balancing not complete)
+                // Use current active cell, any HW balancing bits, or spread-based need (computed below).
+                let hw_balancing_bits_active = last_cellbal_bits != 0;
+                let require_cv_preview = adapter_present
+                    && (active_balancing_cell.is_some()
+                        || hw_balancing_bits_active
+                        || balancing_needed_by_delta);
+
+                let mut should_enable_charging = !ov_fault && !scd_fault && !ocd_fault && !uv_fault;
+
+                if (pack_voltage_mv >= PACK_CHARGE_STOP_THRESHOLD_MV && !require_cv_preview)
                     || pack_voltage_mv <= PACK_OUTPUT_CUTOFF_THRESHOLD_MV
                 {
                     should_enable_charging = false;
@@ -580,35 +617,7 @@ pub async fn bq76920_task(
 
         // last_cellbal_bits already updated earlier on change; keep it as snapshot
 
-        // Compute whether balancing is needed by pack spread threshold (start condition)
-        balancing_needed_by_delta = false;
-        if let Some(meas) = latest_core_measurements.as_ref() {
-            let mut min_v = i32::MAX;
-            let mut max_v = i32::MIN;
-            for &v in meas.cell_voltages.voltages.iter() {
-                if v > 0 {
-                    if v < min_v {
-                        min_v = v;
-                    }
-                    if v > max_v {
-                        max_v = v;
-                    }
-                }
-            }
-            if max_v != i32::MIN && min_v != i32::MAX {
-                let spread = max_v - min_v;
-                if spread >= BALANCE_START_SPREAD_MV {
-                    balancing_needed_by_delta = true;
-                }
-                if balancing_needed_by_delta != prev_balancing_needed_by_delta {
-                    info!(
-                        "bal_eval: spread={}mV need_by_delta={} (start_threshold={}mV)",
-                        spread, balancing_needed_by_delta, BALANCE_START_SPREAD_MV
-                    );
-                    prev_balancing_needed_by_delta = balancing_needed_by_delta;
-                }
-            }
-        }
+        // (spread re-evaluated earlier within the OK-measurements branch)
 
         // Construct the BQ76920 measurements payload for the main `AllMeasurements` publisher.
         // If read_all_measurements failed, use default values.
@@ -628,7 +637,8 @@ pub async fn bq76920_task(
             imbalance_pause_active = sc_alerts.imbalance_pause_active;
         }
 
-        // Treat charge or charge-pause as charging phase for balancing cadence
+        // Treat charge or charge-pause as charging cadence, evaluated only together with AC presence below.
+        // Note: we keep pause flags here for cadence, but AC presence will hard-gate balancing.
         let charging_phase =
             charger_expected || charger_confirmed || ov_pause_active || imbalance_pause_active;
         let eval_period_secs: u32 = 1;
@@ -640,11 +650,10 @@ pub async fn bq76920_task(
             last_eval_period_secs = eval_period_secs;
         }
 
-        // Immediate gating: adapter truly absent AND 非暂停环境 才强制停止均衡
-        if !adapter_present && !ov_pause_active && !imbalance_pause_active && last_cellbal_bits != 0
-        {
+        // Strict policy: if adapter is absent, balancing must not be active under any circumstance.
+        if !adapter_present && last_cellbal_bits != 0 {
             info!(
-                "adapter_absent_stop_balancing hw=0x{:02X}",
+                "adapter_absent_stop_balancing(strict) hw=0x{:02X}",
                 last_cellbal_bits
             );
             let _ = bq.set_cell_balancing(0).await;
@@ -654,9 +663,11 @@ pub async fn bq76920_task(
 
         // Determine if we should request CV hold from charger
         let hw_balancing_active = last_cellbal_bits != 0;
-        // Charger should hold CV when balancing is required or active.
-        let mut require_cv =
-            active_balancing_cell.is_some() || hw_balancing_active || balancing_needed_by_delta;
+        // Charger should hold CV when balancing is required or active, but only when AC is present.
+        let mut require_cv = adapter_present
+            && (active_balancing_cell.is_some()
+                || hw_balancing_active
+                || balancing_needed_by_delta);
         // LED overlay仅在“硬件正在均衡”时显示（避免仅因"require_cv"而产生抖动观感）。
         let overlay_led = active_balancing_cell.is_some() || hw_balancing_active;
 
@@ -670,8 +681,8 @@ pub async fn bq76920_task(
         if periodic_due || fast_due {
             // 3600 seconds = 1 hour
             if !TEST_FORCE_BQ_FETS_OFF {
-                // Allow balancing during OV/imbalance pause even if adapter not present
-                let balancing_env = adapter_present || ov_pause_active || imbalance_pause_active;
+                // Strict policy: balancing only allowed when adapter is present.
+                let balancing_env = adapter_present;
                 if balancing_env && charging_phase {
                     execute_smart_battery_balancing(
                         &mut bq,
