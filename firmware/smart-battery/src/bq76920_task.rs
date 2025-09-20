@@ -21,9 +21,11 @@ use crate::shared::{
 
 const PACK_CHARGE_STOP_THRESHOLD_MV: i32 = 18_500;
 const PACK_OUTPUT_CUTOFF_THRESHOLD_MV: i32 = 12_500;
-const BALANCE_RESUME_THRESHOLD_MV: i32 = 3_305;
-const BALANCE_STOP_THRESHOLD_MV: i32 = 3_300;
-const BALANCE_DELTA_THRESHOLD_MV: i32 = 5;
+// New balancing policy thresholds
+// Start balancing during charging when pack spread (max-min) exceeds 10 mV.
+const BALANCE_START_SPREAD_MV: i32 = 10;
+// A local peak must exceed at least one adjacent cell by >1 mV to be eligible.
+const LOCAL_PEAK_MARGIN_MV: i32 = 1;
 
 // Logging verbosity toggles for BQ76920 task
 const VERBOSE_BQ_LOG: bool = false; // set true for full register-by-register dumps
@@ -44,81 +46,100 @@ async fn execute_smart_battery_balancing<'a>(
     active_cell: &mut Option<usize>,
 ) {
     if let Some(measurements) = latest_core_measurements {
-        let mut min_voltage = i32::MAX;
-        let mut max_voltage = 0i32;
-        let mut max_index = None;
-
-        for (idx, &voltage) in measurements.cell_voltages.voltages.iter().enumerate() {
-            if voltage <= 0 {
+        let v = measurements.cell_voltages.voltages;
+        // Compute spread and adjacent diffs
+        let mut min_v = i32::MAX;
+        let mut max_v = i32::MIN;
+        let mut max_indices: heapless::Vec<usize, 5> = heapless::Vec::new();
+        for (i, &vi) in v.iter().enumerate() {
+            if vi <= 0 {
                 continue;
             }
-            if voltage < min_voltage {
-                min_voltage = voltage;
+            if vi < min_v {
+                min_v = vi;
             }
-            if voltage > max_voltage {
-                max_voltage = voltage;
-                max_index = Some(idx);
+            if vi > max_v {
+                max_v = vi;
+                max_indices.clear();
+                let _ = max_indices.push(i);
+            } else if vi == max_v {
+                let _ = max_indices.push(i);
             }
         }
-
-        let Some(max_cell_index) = max_index else {
+        if max_v == i32::MIN || min_v == i32::MAX {
             warn!("No valid cell voltages available for balancing");
             let _ = bq.set_cell_balancing(0).await;
             *active_cell = None;
             return;
-        };
+        }
 
-        let currently_balancing = *active_cell;
-        let mut desired_balancing: Option<usize> = None;
+        let spread = max_v - min_v;
 
-        if let Some(active_idx) = currently_balancing {
-            let active_voltage = measurements.cell_voltages.voltages[active_idx];
-            if active_voltage <= BALANCE_STOP_THRESHOLD_MV {
+        // Stop condition: all adjacent diffs <= LOCAL_PEAK_MARGIN_MV
+        let mut all_adjacent_within_margin = true;
+        for i in 0..4 {
+            let d = (v[i] - v[i + 1]).abs();
+            if d > LOCAL_PEAK_MARGIN_MV {
+                all_adjacent_within_margin = false;
+                break;
+            }
+        }
+        if all_adjacent_within_margin {
+            if active_cell.is_some() {
                 info!(
-                    "Stopping balancing on cell {} ({} mV <= {} mV)",
-                    active_idx + 1,
-                    active_voltage,
-                    BALANCE_STOP_THRESHOLD_MV
+                    "Stopping balancing: all adjacent diffs <= {} mV",
+                    LOCAL_PEAK_MARGIN_MV
                 );
+            }
+            let _ = bq.set_cell_balancing(0).await;
+            *active_cell = None;
+            return;
+        }
+
+        // Choose a target: one of the max-voltage cells that is higher than at least one neighbor by > LOCAL_PEAK_MARGIN_MV
+        let mut candidate: Option<usize> = None;
+        for &i in max_indices.iter() {
+            let higher_than_left = if i > 0 {
+                v[i] - v[i - 1] > LOCAL_PEAK_MARGIN_MV
             } else {
-                desired_balancing = Some(active_idx);
-            }
-        }
-
-        if desired_balancing.is_none() {
-            if max_voltage - min_voltage >= BALANCE_DELTA_THRESHOLD_MV
-                && max_voltage >= BALANCE_RESUME_THRESHOLD_MV
+                false
+            };
+            let higher_than_right = if i < 4 {
+                v[i] - v[i + 1] > LOCAL_PEAK_MARGIN_MV
+            } else {
+                false
+            };
+            if (i == 0 && higher_than_right)
+                || (i == 4 && higher_than_left)
+                || (i > 0 && i < 4 && (higher_than_left || higher_than_right))
             {
-                desired_balancing = Some(max_cell_index);
+                candidate = Some(i);
+                break; // pick the first max that satisfies; max_v ensures it's globally max
             }
         }
 
-        match desired_balancing {
-            Some(cell_idx) => {
-                let mask = 1u16 << cell_idx;
-                if *active_cell != Some(cell_idx) {
-                    info!(
-                        "Starting balancing on cell {} ({} mV, spread {} mV)",
-                        cell_idx + 1,
-                        measurements.cell_voltages.voltages[cell_idx],
-                        max_voltage - min_voltage
-                    );
-                }
-                if let Err(e) = bq.set_cell_balancing(mask).await {
-                    error!("Failed to enable cell balancing: {:?}", e);
-                } else {
-                    *active_cell = Some(cell_idx);
-                }
+        if let Some(cell_idx) = candidate {
+            let mask = 1u16 << cell_idx;
+            if *active_cell != Some(cell_idx) {
+                info!(
+                    "Starting balancing on cell {} ({} mV, spread {} mV)",
+                    cell_idx + 1,
+                    v[cell_idx],
+                    spread
+                );
             }
-            None => {
-                if active_cell.is_some() {
-                    info!("No cells require balancing, disabling balancing FETs");
-                }
-                if let Err(e) = bq.set_cell_balancing(0).await {
-                    error!("Failed to disable cell balancing: {:?}", e);
-                }
-                *active_cell = None;
+            if let Err(e) = bq.set_cell_balancing(mask).await {
+                error!("Failed to enable cell balancing: {:?}", e);
+            } else {
+                *active_cell = Some(cell_idx);
             }
+        } else {
+            // No eligible local peak at global max; disable for now
+            if active_cell.is_some() {
+                info!("No eligible local peak at max; disabling balancing");
+            }
+            let _ = bq.set_cell_balancing(0).await;
+            *active_cell = None;
         }
     } else {
         if active_cell.is_some() {
@@ -511,7 +532,7 @@ pub async fn bq76920_task(
 
         // last_cellbal_bits already updated earlier on change; keep it as snapshot
 
-        // Compute whether balancing is needed by cell spread thresholds
+        // Compute whether balancing is needed by pack spread threshold (start condition)
         balancing_needed_by_delta = false;
         if let Some(meas) = latest_core_measurements.as_ref() {
             let mut min_v = i32::MAX;
@@ -528,16 +549,13 @@ pub async fn bq76920_task(
             }
             if max_v != i32::MIN && min_v != i32::MAX {
                 let spread = max_v - min_v;
-                if spread >= BALANCE_DELTA_THRESHOLD_MV && max_v >= BALANCE_RESUME_THRESHOLD_MV {
+                if spread >= BALANCE_START_SPREAD_MV {
                     balancing_needed_by_delta = true;
                 }
                 if balancing_needed_by_delta != prev_balancing_needed_by_delta {
                     info!(
-                        "bal_eval: spread={}mV need_by_delta={} (threshold={}mV resume_at>={}mV)",
-                        spread,
-                        balancing_needed_by_delta,
-                        BALANCE_DELTA_THRESHOLD_MV,
-                        BALANCE_RESUME_THRESHOLD_MV
+                        "bal_eval: spread={}mV need_by_delta={} (start_threshold={}mV)",
+                        spread, balancing_needed_by_delta, BALANCE_START_SPREAD_MV
                     );
                     prev_balancing_needed_by_delta = balancing_needed_by_delta;
                 }
@@ -617,6 +635,8 @@ pub async fn bq76920_task(
                         last_cellbal_bits = 0;
                     }
                     balance_retry_holdoff = balance_retry_holdoff.max(5);
+                } else if !charging_phase {
+                    info!("Skip balancing: not in charging phase");
                 } else if balance_retry_holdoff == 0 {
                     execute_smart_battery_balancing(
                         &mut bq,
