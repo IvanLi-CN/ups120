@@ -22,8 +22,16 @@ async fn main(_spawner: Spawner) {
     info!("stm32g0 demo: boot");
     let p = embassy_stm32::init(Default::default());
 
-    // Configure I2C1 PB6/PB7 with internal pull-ups similar to sc8815 example
-    let i2c_cfg = I2cConfig::default();
+    // Configure I2C1 PB6/PB7 with internal pull-ups
+    // Pull-ups are required unless you have external resistors (~4.7k) on the bus.
+    let mut i2c_cfg = I2cConfig::default();
+    i2c_cfg.scl_pullup = true;
+    i2c_cfg.sda_pullup = true;
+    // Select bus speed: 100 kHz by default; enable feature "i2c-400k" for 400 kHz
+    #[cfg(feature = "i2c-400k")]
+    let bus_hz: u32 = 400_000;
+    #[cfg(not(feature = "i2c-400k"))]
+    let bus_hz: u32 = 100_000;
     let i2c = I2c::new(
         p.I2C1,
         p.PB6,
@@ -31,7 +39,7 @@ async fn main(_spawner: Spawner) {
         Irqs,
         p.DMA1_CH1,
         p.DMA1_CH2,
-        Hertz(100_000),
+        Hertz(bus_hz),
         i2c_cfg,
     );
 

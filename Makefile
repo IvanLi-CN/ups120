@@ -35,7 +35,7 @@ sb-reset:
 
 # Driver demo: use cargo directly inside its folder (no cross-crate workspace)
 driver-demo-build:
-	@cd libs/smart-battery-driver/examples/stm32g0 && cargo build --release
+	@cd libs/smart-battery-driver/examples/stm32g0 && cargo build --release $(if $(DEMO_FEATURES),--features $(DEMO_FEATURES),)
 
 driver-demo-flash: driver-demo-build
 	@cd libs/smart-battery-driver/examples/stm32g0 && probe-rs run $(DRIVER_PROBE_FLAGS) --chip $(CHIP) target/thumbv6m-none-eabi/release/smart-battery-driver-stm32g0-demo

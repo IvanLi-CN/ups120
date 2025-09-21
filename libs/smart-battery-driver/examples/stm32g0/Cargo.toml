@@ -39,3 +39,8 @@ debug = 2
 lto = "thin"
 opt-level = "z"
 panic = "abort"
+
+[features]
+default = []
+# Build with `--features i2c-400k` to switch the I2C bus to 400 kHz
+i2c-400k = []
