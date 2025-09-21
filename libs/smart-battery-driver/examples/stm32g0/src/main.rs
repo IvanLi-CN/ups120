@@ -59,3 +59,4 @@ async fn main(_spawner: Spawner) {
         Timer::after(Duration::from_secs(2)).await;
     }
 }
+

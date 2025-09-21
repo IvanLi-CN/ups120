@@ -16,6 +16,14 @@ controls, and telemetry loops that underpin bring-up.
   bus so multiple async drivers can borrow it via `embassy-embedded-hal`
   shared-bus mutexes. Both the BQ76920 (fixed `0x08`) and SC8815 (`0x11`) ride
   this bus.
+- **I2C1 – OUTER bus (external host interface)**: Configured as 7‑bit I²C slave
+  to allow a system host (MCU/SoC) to query pack telemetry and command limited
+  charging control. I²C1 is used because it supports wake‑from‑STOP on address
+  match (WUPEN), enabling ultra‑low‑power idle while remaining responsive.
+  Pins per `.ioc`: PB6 = I2C1_SCL, PB7 = I2C1_SDA, PB5 = I2C1_SMBA (alert).
+  The slave address is `0x35` (7‑bit). Supported bus rates: 100 kHz and 400 kHz.
+  Clock stretching is permitted (≤ 150 µs) while copying a fresh telemetry
+  snapshot into the I²C TX buffer. General‑call is disabled.
 - **SMBus Alert (PB5) & Alert GPIOs**: Reserved for future SMBus/alert handling;
   interrupt lines `PB1` (BQ alert) and `PB2` (inner bus INT) are wired for EXTI
   wakeups.
@@ -198,6 +206,151 @@ flowchart LR
   BQ --- SCA
   SC --- BQM
 ```
+
+---
+
+## External Communications (I2C1 Slave)
+
+This section specifies the on‑board I²C1 slave protocol used by the pack to
+communicate with an external host. Summary (Chinese): 智能电池通过 I2C 从机模式与外部通信；
+我们使用 I2C1 对外通信，因为其支持从 STOP 状态唤醒；本文定义查询电压/电流/温度/故障及读写充电状态的一组命令与寄存器。
+
+### Link & Electrical
+
+- Address: 7‑bit `0x35` (write: 0x6A, read: 0x6B).
+- Modes: Standard‑mode (100 kHz), Fast‑mode (400 kHz).
+- Wake: STOP‑mode wake on address match enabled (I2C1.CR1.WUPEN = 1).
+- Stretching: The device may stretch SCL up to 150 µs while staging a
+  consistent snapshot for multi‑byte reads.
+- Filtering: Analog filter enabled, digital filter disabled; no general‑call;
+  no 10‑bit addressing.
+
+### Access Model
+
+- Memory‑mapped register bank with auto‑increment.
+- Transactions use a 1‑byte register pointer written by the master, followed by
+  an optional repeated‑start read of N bytes.
+- Byte order: Little‑endian for all multi‑byte quantities.
+- Units: Voltage in millivolts (mV), current in milliamps (mA, signed;
+  discharge is negative), temperature in centi‑degrees Celsius (c°C, signed).
+- Coherency: Telemetry is snapshotted into a TX buffer at 1 Hz; multi‑byte
+  reads are internally consistent. 读取侧返回 CRC（与 TI 一致，主机可选择校验，但推荐校验）。
+
+### CRC Policy – TI‑Style (Read & Write)
+
+- CRC: CRC‑8 polynomial 0x07 (x^8+x^2+x+1), initial value 0x00.
+- Writes (mandatory, interleaved per byte): For each data byte written, the
+  master must append one CRC byte computed over `[SLAVE_ADDR(W), REG_ADDR, DATA]`.
+  For block writes with auto‑increment, `REG_ADDR` is the specific address of
+  that data byte (i.e., it increments per byte). On CRC mismatch, the device
+  NACKs the CRC byte and discards the transaction.
+- Reads (device returns CRC interleaved per byte): After the master issues a
+  repeated‑start and the read address, the device returns each data byte
+  followed by one CRC byte. The first CRC is computed over `[SLAVE_ADDR(R), DATA0]`;
+  subsequent CRCs are computed over only the corresponding data byte
+  (`[DATAi]`). The master ACKs every data and CRC byte pair, and NACKs the last
+  CRC byte to end the transfer.
+
+Examples:
+
+- Write `CHG_ENABLE_REQ` (0x31) = 0x01: `START → 0x6A(W) → 0x31 → 0x01 → CRC(0x6A,0x31,0x01) → STOP`.
+- Write `CHG_CURRENT_LIMIT_MA` (0x32..0x33) = 900 (0x0384 LE):
+  `START → 0x6A → 0x32 → 0x84 → CRC(0x6A,0x32,0x84) → 0x03 → CRC(0x6A,0x33,0x03) → STOP`.
+- Read `VBAT_MV` (0x10..0x11, 2 bytes):
+  - Master: `START → 0x6A(W) → 0x10 → REPEATED START → 0x6B(R)`
+  - Device returns: `D0_L, CRC0(0x6B,D0_L), D0_H, CRC1(D0_H)`; master NACKs the
+    last CRC and STOPs.
+- Read a burst (e.g., 8 data bytes starting at 0x10): device returns 16 bytes
+  interleaved as `[D0, CRC(D0 with 0x6B), D1, CRC(D1), …, D7, CRC(D7)]`.
+
+### Register Map
+
+Base system info and sequencing (read‑only unless noted):
+
+- 0x00 `SIG0` = 0x53 ('S')
+- 0x01 `SIG1` = 0x42 ('B')
+- 0x02 `PROTO_VER` = 0x01
+- 0x03 `FW_VER_MAJOR`
+- 0x04 `FW_VER_MINOR`
+- 0x05 `FW_VER_PATCH`
+- 0x06 `DEVICE_CAPS` bitfield (RW reserved for future, default 0)
+- 0x07 `SYS_STATUS` bitfield (RO): bit0=awake, bit1=stop_capable, bit2=i2c1_ok,
+  bit3=bq_ok, bit4=charger_ok, others reserved
+- 0x0E RESERVED
+- 0x0F RESERVED
+
+Pack measurements (read‑only):
+
+- 0x10 `VBAT_MV_LO`; 0x11 `VBAT_MV_HI` (u16)
+- 0x12 `IBAT_MA_LO`; 0x13 `IBAT_MA_HI` (i16; discharge negative)
+- 0x14 `T_PACK_Cc_LO`; 0x15 `T_PACK_Cc_HI` (i16)
+- 0x16 `T_MOS_Cc_LO`; 0x17 `T_MOS_Cc_HI` (i16)
+- 0x18 `V_CELL_MAX_MV_LO`; 0x19 `V_CELL_MAX_MV_HI` (u16)
+- 0x1A `V_CELL_MIN_MV_LO`; 0x1B `V_CELL_MIN_MV_HI` (u16)
+- 0x1C `DELTA_CELL_MV_LO`; 0x1D `DELTA_CELL_MV_HI` (u16)
+- 0x1E `ADAPTER_PRESENT` (RO, 0/1)
+- 0x1F `CELLS_PRESENT` (RO, e.g., 4 or 5)
+
+Faults & status (read‑only unless noted):
+
+- 0x20 `BQ_FAULTS` bitfield: bit0=UV, bit1=OV, bit2=OCD, bit3=SCD, bit4=ALERT,
+  bit5=OT/UT, bit6=COMM_ERR, bit7=RESERVED
+- 0x21 `CHARGER_FAULTS` bitfield: bit0=OTP, bit1=VIN_UV, bit2=VIN_OV,
+  bit3=VBAT_OV, bit4=SHORT, bit5=THERM, bit6=COMM_ERR, bit7=RESERVED
+- 0x22 `SYSTEM_FAULTS` bitfield: internal safety interlocks; 0 means OK
+
+Charging control and status:
+
+- 0x30 `CHG_STATUS` (RO) bitfield: bit0=charging_active, bit1=precharge,
+  bit2=CC, bit3=CV, bit4=full, bit5=balancing, bit6=adapter_present,
+  bit7=blocked_by_fault
+- 0x31 `CHG_ENABLE_REQ` (RW): 0=disable charging; 1=enable allowed.
+- 0x32 `CHG_CURRENT_LIMIT_MA_LO`; 0x33 `_HI` (RW u16; 100…1500 mA typical).
+
+Per‑cell voltages (length depends on `CELLS_PRESENT`, RO):
+
+- 0x50/0x51 `CELL1_MV` (u16)
+- 0x52/0x53 `CELL2_MV` (u16)
+- 0x54/0x55 `CELL3_MV` (u16)
+- 0x56/0x57 `CELL4_MV` (u16)
+- 0x58/0x59 `CELL5_MV` (u16; present only on 5S)
+
+Diagnostics & reserved:
+
+- 0x7C `UPTIME_S_LO`; 0x7D `_HI` (RO u16 seconds since boot)
+- 0x7E `FRAME_FLAGS` (RO; bit0=snapshot_fresh)
+- 0x7F RESERVED
+
+### Semantics & Rules
+
+- Writes to `CHG_ENABLE_REQ` immediately gate charger control logic; the
+  firmware may force this back to 0 upon any safety fault. Hosts should treat a
+  latched 0 as “charging inhibited until fault is cleared”.
+- `CHG_CURRENT_LIMIT_MA` is a soft limit; out‑of‑range values are clamped to the
+  nearest supported setting. A value of 0 means “use firmware default”.
+- Multi‑byte writes must send the low byte first. Multi‑byte reads are
+  contiguous and auto‑increment the pointer; coherency is guaranteed by the
+  snapshot mechanism。读侧提供 CRC 供主机可选校验。
+
+### Example Transactions
+
+- Read pack voltage/current/temperature in one burst (8 data bytes → 16 bus bytes with CRC):
+  - Master: `START → 0x6A(W) → 0x10 → REPEATED START → 0x6B(R)`
+  - Device returns: `VBAT_L, CRC(VBAT_L with 0x6B), VBAT_H, CRC(VBAT_H), IBAT_L, CRC(IBAT_L), IBAT_H, CRC(IBAT_H), TPACK_L, CRC(TPACK_L), TPACK_H, CRC(TPACK_H), TMOS_L, CRC(TMOS_L), TMOS_H, CRC(TMOS_H)`; master NACKs the last CRC then `STOP`.
+- Enable charging (with CRC per‑byte):
+  - Master: `START → 0x6A(W) → 0x31 → 0x01 → CRC(0x6A,0x31,0x01) → STOP`.
+- Set current limit to 900 mA (0x0384 LE; with CRC per‑byte):
+  - Master: `START → 0x6A(W) → 0x32 → 0x84 → CRC(0x6A,0x32,0x84) → 0x03 → CRC(0x6A,0x33,0x03) → STOP`.
+
+### Implementation Notes
+
+- The I²C1 ISR wakes the MCU from STOP on address match, stages a copy of the
+  most recent telemetry snapshot into a TX buffer, and services RX writes to the
+  small control register set. The telemetry producer task updates the snapshot
+  at 1 Hz to minimize bus jitter and stretching.
+- Fault sources are aggregated from the BQ76920 protection loop and the SC8815
+  charger loop, preserving the project’s safety‑first posture: any critical
+  fault suppresses charging regardless of host requests.
 
 ### BQ76920 Task – Balancing (Strict AC Gating)
 

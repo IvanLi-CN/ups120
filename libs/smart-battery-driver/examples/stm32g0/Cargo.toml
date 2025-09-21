@@ -1,3 +1,7 @@
+[[bin]]
+name = "smart-battery-stm32g0c8u6-demo"
+path = "src/main.rs"
+
 [package]
 name = "smart-battery-stm32g0c8u6-demo"
 version = "0.1.0"
@@ -32,3 +36,4 @@ debug = 2
 lto = "thin"
 opt-level = "z"
 panic = "abort"
+

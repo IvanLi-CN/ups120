@@ -30,11 +30,11 @@ sb-reset:
 
 # Driver demo: use cargo directly inside its folder (no cross-crate workspace)
 driver-demo-build:
-	@cd libs/smart-battery-driver/examples/stm32g0c8u6-demo && cargo build --release
+	@cd libs/smart-battery-driver/examples/stm32g0 && cargo build --release
 
 driver-demo-run: driver-demo-build
-	@cd libs/smart-battery-driver/examples/stm32g0c8u6-demo && probe-rs run --chip $(CHIP) target/thumbv6m-none-eabi/release/smart-battery-stm32g0c8u6-demo
+	@cd libs/smart-battery-driver/examples/stm32g0 && probe-rs run --chip $(CHIP) target/thumbv6m-none-eabi/release/smart-battery-stm32g0c8u6-demo
 
 clean:
 	@cd firmware/smart-battery && $(MAKE) clean || true
-	@cd libs/smart-battery-driver/examples/stm32g0c8u6-demo && cargo clean || true
+	@cd libs/smart-battery-driver/examples/stm32g0 && cargo clean || true

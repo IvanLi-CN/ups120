@@ -209,7 +209,7 @@ pub async fn sc8815_task(
     let mut drop_streak: u8 = 0;
     let mut latest_bq_measurements = None;
     let mut latest_bal_req: BalancingCvRequest = BalancingCvRequest::default();
-    let mut adapter_present: bool = false;
+    let mut _adapter_present: bool = false;
     let mut adapter_holdoff_secs: u8 = 0; // debounce before allowing restart
     // OV cooldown (PSTOP gated, do not end session): 180 s
     let mut ov_pause_secs: u16 = 0;
@@ -232,7 +232,7 @@ pub async fn sc8815_task(
         if let Some(bq_meas) = latest_bq_measurements.as_ref() {
             let pack_voltage_mv = bq_meas.core_measurements.total_voltage_mv;
             let system_status_flags = bq_meas.core_measurements.system_status.0;
-            let ov_fault = system_status_flags.contains(SysStatFlags::OV);
+            let _ov_fault = system_status_flags.contains(SysStatFlags::OV);
             let critical_fault = system_status_flags.intersects(
                 SysStatFlags::OV | SysStatFlags::UV | SysStatFlags::SCD | SysStatFlags::OCD,
             );
@@ -425,7 +425,7 @@ pub async fn sc8815_task(
         }
 
         if sc8815_session.is_some() {
-            let mut latest_status_for_alerts: Option<SC8815Status> = None;
+            let mut _latest_status_for_alerts: Option<SC8815Status> = None;
             match sc8815_session.as_mut() {
                 Some(sess) => match sess.sc.get_device_status().await {
                     Ok(status) => {
@@ -439,7 +439,7 @@ pub async fn sc8815_task(
 
                         // Track adapter presence
                         if !status.ac_adapter_connected {
-                            adapter_present = false;
+                            _adapter_present = false;
                             if let Some(sess) = sc8815_session.take() {
                                 let (ce_back, pstop_back, i2c_back) = sess.end().await;
                                 ce_pin_slot = Some(ce_back);
@@ -451,11 +451,11 @@ pub async fn sc8815_task(
                             confirm_streak = 0;
                             drop_streak = 0;
                             adapter_holdoff_secs = adapter_holdoff_secs.max(5);
-                            latest_status_for_alerts = Some(status);
+                            _latest_status_for_alerts = Some(status);
                             // Skip further work in this tick when adapter just lost
                             continue;
                         } else {
-                            adapter_present = true;
+                            _adapter_present = true;
                         }
 
                         if status.otp_fault || status.vbus_short_fault {
@@ -475,7 +475,7 @@ pub async fn sc8815_task(
                             drop_streak = 0;
                             continue;
                         }
-                        latest_status_for_alerts = Some(status);
+                        _latest_status_for_alerts = Some(status);
                     }
                     Err(e) => {
                         error!("Failed to read SC8815 status: {:?}", e);
@@ -568,7 +568,7 @@ pub async fn sc8815_task(
                 }
             }
 
-            if let Some(status) = latest_status_for_alerts {
+            if let Some(status) = _latest_status_for_alerts {
                 let alerts_payload = Sc8815Alerts {
                     device_status: status,
                     expected_charging: charger_active,

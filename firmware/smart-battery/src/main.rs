@@ -7,6 +7,7 @@ mod global_state;
 mod led_status_task;
 mod sc8815_task;
 mod shared;
+mod i2c1_slave;
 
 use bq769x0_async_rs::{BatteryConfig, Bq769x0, Enabled as BqCrcEnabled, ProtectionConfig};
 use defmt::{info, warn};
@@ -71,9 +72,9 @@ async fn main(_spawner: Spawner) {
         bq76920_alerts_pub,
         _bq76920_alerts_chan,
         sc8815_meas_pub,
-        _sc8815_meas_chan,
+        sc8815_meas_chan,
         bq76920_meas_pub,
-        _bq76920_meas_chan,
+        bq76920_meas_chan,
         balancing_cv_pub,
         balancing_cv_chan,
         global_state_pub,
@@ -148,7 +149,7 @@ async fn main(_spawner: Spawner) {
     };
 
     // Create a subscriber for BQ76920 measurements to feed charger control logic.
-    let bq76920_meas_sub = _bq76920_meas_chan
+    let bq76920_meas_sub = bq76920_meas_chan
         .subscriber()
         .expect("Allocate BQ76920 measurements subscriber");
 
@@ -175,7 +176,7 @@ async fn main(_spawner: Spawner) {
     let gs_sc_alerts_sub = _sc8815_alerts_chan
         .subscriber()
         .expect("Allocate SC8815 alerts subscriber for GS task");
-    let gs_sc_meas_sub = _sc8815_meas_chan
+    let gs_sc_meas_sub = sc8815_meas_chan
         .subscriber()
         .expect("Allocate SC8815 measurements subscriber for GS task");
     let gs_bq_alerts_sub = _bq76920_alerts_chan
@@ -204,6 +205,15 @@ async fn main(_spawner: Spawner) {
             led_pin,
             led_global_state_sub,
         ))
+        .ok();
+
+    // Initialize external I2C1 slave interface and spawn snapshot mirror tasks
+    i2c1_slave::init_i2c1_slave();
+    _spawner
+        .spawn(i2c1_slave::sc_meas_mirror_task(sc8815_meas_chan))
+        .ok();
+    _spawner
+        .spawn(i2c1_slave::bq_meas_mirror_task(bq76920_meas_chan))
         .ok();
 
     // Main loop: subscribe global-state and log immediate changes + 1s snapshots.

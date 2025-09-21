@@ -5,39 +5,41 @@ edition = "2024"
 authors = ["Ivan Li<ivanli2048@gmail.com>"]
 
 [dependencies]
-embassy-stm32 = { workspace = true, features = [
+embassy-stm32 = { version = "0.2.0", path = "../../embassy/embassy-stm32", features = [
   "defmt",
   "time-driver-any",
   "stm32l051c8",
   "memory-x",
   "exti",
+  "unstable-pac",
 ] }
-embassy-sync = { workspace = true, features = ["defmt"] }
-embassy-executor = { workspace = true, features = [
+embassy-sync = { version = "0.7.0", path = "../../embassy/embassy-sync", features = ["defmt"] }
+embassy-executor = { version = "0.7.0", path = "../../embassy/embassy-executor", features = [
   "arch-cortex-m",
   "executor-thread",
   "defmt",
 ] }
-embassy-time = { workspace = true, features = [
+embassy-time = { version = "0.4.0", path = "../../embassy/embassy-time", features = [
   "defmt",
   "defmt-timestamp-uptime",
   "tick-hz-32_768",
 ] }
-sc8815 = { workspace = true, features = ["async", "defmt"] }
-defmt = { workspace = true }
-defmt-rtt = { workspace = true }
-embassy-embedded-hal = { workspace = true }
-bq769x0-async-rs = { workspace = true, features = ["async", "defmt"] }
-static_cell = { workspace = true }
-portable-atomic = { workspace = true, features = ["critical-section"] }
-heapless = { workspace = true }
+sc8815 = { path = "../../sc8815", features = ["async", "defmt"] }
+defmt = "1.0.1"
+defmt-rtt = "1.0.0"
+embassy-embedded-hal = { version = "0.3.0", path = "../../embassy/embassy-embedded-hal" }
+bq769x0-async-rs = { path = "../../bq76920", features = ["async", "defmt"] }
+static_cell = "2.1.0"
+portable-atomic = { version = "1.11.0", features = ["critical-section"] }
+heapless = { version = "0.8", default-features = false }
+critical-section = "1.1"
 ## binrw not required in firmware (avoid pulling alloc)
 
-cortex-m = { workspace = true, features = [
+cortex-m = { version = "0.7.7", features = [
   "critical-section-single-core",
 ] }
-cortex-m-rt = { workspace = true }
-panic-probe = { workspace = true }
+cortex-m-rt = "0.7.5"
+panic-probe = { version = "1.0.0", features = ["print-defmt"] }
 ## no dynamic allocation required in firmware
 
 [[bin]]
@@ -46,10 +48,21 @@ path = "src/main.rs"
 test = false
 
 [profile.dev]
-## Profiles are managed at workspace root
+codegen-units = 1
+debug = false
+debug-assertions = false
+incremental = false
+lto = 'fat'
+opt-level = 'z'
+overflow-checks = false
+panic = 'abort'
 
 [profile.release]
-## Profiles are managed at workspace root
-
-[profile.bench]
-## Profiles are managed at workspace root
+codegen-units = 1
+debug = false
+debug-assertions = false
+incremental = false
+lto = 'thin'
+opt-level = 'z'
+overflow-checks = false
+panic = 'abort'
