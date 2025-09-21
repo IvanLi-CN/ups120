@@ -1,6 +1,7 @@
 #![no_std]
 #![no_main]
 
+use defmt::{info, warn};
 use embassy_executor::Spawner;
 use embassy_stm32::{
     bind_interrupts,
@@ -10,8 +11,7 @@ use embassy_stm32::{
 };
 use embassy_time::{Timer, Duration};
 use smart_battery_driver::{SmartBattery, Enabled};
-use rtt_target::{rtt_init_print, rprintln};
-use panic_halt as _;
+use {defmt_rtt as _, panic_probe as _};
 
 bind_interrupts!(struct Irqs {
     I2C1 => i2c::EventInterruptHandler<I2C1>, i2c::ErrorInterruptHandler<I2C1>;
@@ -19,9 +19,7 @@ bind_interrupts!(struct Irqs {
 
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) {
-    // Initialize RTT printing before any logs.
-    rtt_init_print!();
-    rprintln!("stm32g0 demo: boot");
+    info!("stm32g0 demo: boot");
     let p = embassy_stm32::init(Default::default());
 
     // Configure I2C1 PB6/PB7 with internal pull-ups similar to sc8815 example
@@ -40,9 +38,9 @@ async fn main(_spawner: Spawner) {
     let mut bat: SmartBattery<_, Enabled> = SmartBattery::new(i2c);
 
     match bat.ping().await {
-        Ok(true) => rprintln!("Smart battery signature OK ('SB')"),
-        Ok(false) => rprintln!("Unexpected signature"),
-        Err(_e) => rprintln!("I2C error on ping"),
+        Ok(true) => info!("Smart battery signature OK ('SB')"),
+        Ok(false) => warn!("Unexpected signature"),
+        Err(_e) => warn!("I2C error on ping"),
     }
 
     loop {
@@ -50,8 +48,8 @@ async fn main(_spawner: Spawner) {
         let i = bat.read_ibat_ma().await;
         let t = bat.read_tpack_cc().await;
         match (v, i, t) {
-            (Ok(v), Ok(i), Ok(t)) => rprintln!("VBAT={} mV IBAT={} mA Tpack={} cC", v, i, t),
-            _ => rprintln!("read telemetry failed"),
+            (Ok(v), Ok(i), Ok(t)) => info!("VBAT={} mV IBAT={} mA Tpack={} cC", v, i, t),
+            _ => warn!("read telemetry failed"),
         }
 
         let _ = bat.set_charging_enable(true).await;
@@ -59,4 +57,3 @@ async fn main(_spawner: Spawner) {
         Timer::after(Duration::from_secs(2)).await;
     }
 }
-

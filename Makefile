@@ -41,9 +41,7 @@ driver-demo-flash: driver-demo-build
 	@cd libs/smart-battery-driver/examples/stm32g0 && probe-rs run $(DRIVER_PROBE_FLAGS) --chip $(CHIP) target/thumbv6m-none-eabi/release/smart-battery-driver-stm32g0-demo
 
 driver-demo-run: driver-demo-build
-	@cd libs/smart-battery-driver/examples/stm32g0 && \
-		probe-rs run $(DRIVER_PROBE_FLAGS) --chip $(CHIP) target/thumbv6m-none-eabi/release/smart-battery-driver-stm32g0-demo && \
-		probe-rs attach $(DRIVER_PROBE_FLAGS) --chip $(CHIP) --rtt-scan-memory target/thumbv6m-none-eabi/release/smart-battery-driver-stm32g0-demo
+	@cd libs/smart-battery-driver/examples/stm32g0 && probe-rs run $(DRIVER_PROBE_FLAGS) --chip $(CHIP) --log-format oneline target/thumbv6m-none-eabi/release/smart-battery-driver-stm32g0-demo
 
 clean:
 	@cd firmware/smart-battery && $(MAKE) clean || true
