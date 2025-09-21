@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 embassy-stm32 = { version = "0.2.0", path = "../../../../embassy/embassy-stm32", features = [
   "time-driver-any",
-  "stm32g0c1ce",
+  "stm32g031c8",
   "memory-x",
   "unstable-pac",
   "exti",

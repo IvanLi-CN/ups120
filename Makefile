@@ -1,7 +1,7 @@
 SHELL := /bin/sh
 
-# Default chip for driver demo; override with `make CHIP=STM32G0C1RE driver-demo-run`
-CHIP ?= STM32G0C1CE
+# Default chip for driver demo; override with `make CHIP=STM32G031C8 driver-demo-run`
+CHIP ?= STM32G031C8
 
 .PHONY: help sb-build sb-run sb-attach sb-reset driver-demo-build driver-demo-run clean
 
