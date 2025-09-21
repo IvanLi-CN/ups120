@@ -264,6 +264,31 @@ flowchart TD
   GATE --> TEND
 ```
 
+## Operating Thresholds & Timers
+
+- Voltage thresholds
+  - Charge start candidate: Vpack < 17.0 V
+  - Stop candidate: Vpack ≥ 18.5 V
+  - Pack cutoff: Vpack ≤ 12.5 V
+
+- Balancing thresholds
+  - Balancing start (by spread): Δ ≥ 10 mV
+  - Severe imbalance enter: Δ ≥ 100 mV
+  - Severe imbalance release: Δ < 50 mV
+
+- Pauses / holds
+  - Critical fault pause (OV/UV/OCD/SCD): 180 s
+  - Imbalance pause: no timer; released by Δ < 50 mV
+  - CV hold at stop candidate: continue charging while “Balancing not complete”
+
+- Full-state hysteresis (for global state/LED)
+  - Enter full: VBAT ≥ 18.5 V and IBAT ≤ 100 mA for 60 s
+  - Exit full: IBAT ≥ 120 mA or VBAT < 17.0 V or not charging for 10 s
+
+- Retry / cadence
+  - SC session init failure backoff: 5 s
+  - Control loop cadence: 1 s
+
 ### Global State Aggregation
 
 ```mermaid
