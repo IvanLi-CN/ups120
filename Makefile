@@ -7,7 +7,7 @@ CHIP ?= STM32G031C8
 PROBE ?=
 DRIVER_PROBE_FLAGS := $(if $(PROBE),--non-interactive --probe $(PROBE),)
 
-.PHONY: help sb-build sb-run sb-attach sb-reset driver-demo-build driver-demo-run clean
+.PHONY: help sb-build sb-run sb-attach sb-reset driver-demo-build driver-demo-run driver-demo-flash clean
 
 help:
 	@echo "Root Makefile – use per-project make targets"
@@ -37,8 +37,13 @@ sb-reset:
 driver-demo-build:
 	@cd libs/smart-battery-driver/examples/stm32g0 && cargo build --release
 
-driver-demo-run: driver-demo-build
+driver-demo-flash: driver-demo-build
 	@cd libs/smart-battery-driver/examples/stm32g0 && probe-rs run $(DRIVER_PROBE_FLAGS) --chip $(CHIP) target/thumbv6m-none-eabi/release/smart-battery-driver-stm32g0-demo
+
+driver-demo-run: driver-demo-build
+	@cd libs/smart-battery-driver/examples/stm32g0 && \
+		probe-rs run $(DRIVER_PROBE_FLAGS) --chip $(CHIP) target/thumbv6m-none-eabi/release/smart-battery-driver-stm32g0-demo && \
+		probe-rs attach $(DRIVER_PROBE_FLAGS) --chip $(CHIP) --rtt-scan-memory target/thumbv6m-none-eabi/release/smart-battery-driver-stm32g0-demo
 
 clean:
 	@cd firmware/smart-battery && $(MAKE) clean || true
