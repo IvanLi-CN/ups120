@@ -11,10 +11,22 @@
 ## Build, Test, and Development Commands
 
 - Setup (once): `rustup target add thumbv6m-none-eabi` and install `probe-rs` and `llvm-tools-preview`.
-- Workspace build (default: smart-battery): `cargo build --release`.
-- Flash & run (smart-battery): `cargo run -p smart-battery` (uses `.cargo/config.toml` runner), or from `firmware/smart-battery`: `make run` / `make attach` / `make reset`.
-- Format: `cargo fmt`. Optional lint: `cargo clippy -p smart-battery --target thumbv6m-none-eabi`.
-- Host-side tests (dependency crates): `cargo test -p bq769x0-async-rs`, `cargo test -p sc8815`.
+- Root-level operations use Makefile targets only. Do NOT run Cargo from the repository root.
+  - Build smart-battery (release): `make sb-build`
+  - Flash & run smart-battery: `make sb-run`
+  - Attach/Reset: `make sb-attach` / `make sb-reset`
+  - Driver example (STM32G0C8U6): `make driver-demo-build` / `make driver-demo-run`
+- Per-project usage: you may also `make -C firmware/smart-battery run` (or `build`, `attach`, `reset`).
+- Format: run `cargo fmt` inside the specific crate directory. Optional lint: run `cargo clippy --target thumbv6m-none-eabi` inside that crate.
+- Host-side tests for dependency crates: from that crate directory run `cargo test` (e.g., `bq76920`, `sc8815`).
+
+## Prohibited Operations (Mandatory)
+
+- Do NOT create or reintroduce a Cargo workspace at the repository root.
+- Do NOT add or rely on a root-level `.cargo/config.toml` for targets or runners.
+- Do NOT run `cargo build`, `cargo run`, or any firmware-related Cargo command from the repository root.
+- All firmware builds, flashing, and attach/reset must be invoked via Makefiles (root Makefile delegates to the project Makefiles) or by running Cargo within the specific project directory.
+- Keep projects fully independent. Cross-crate paths must be explicit within each crate’s `Cargo.toml`; never depend on root workspace injection.
 
 ## Coding Style & Naming Conventions
 
@@ -38,4 +50,4 @@
 
 ## Security & Configuration Tips
 
-- Probe address and chip type are set in `.cargo/config.toml` and `firmware/smart-battery/.cargo/config.toml`. Override locally (e.g., `PROBE_ADDR=XXXX make run`) instead of committing personal IDs.
+- Probe address and chip type are configured in the project’s own files (e.g., `firmware/smart-battery/.cargo/config.toml` or its Makefile). Override locally via environment variables (e.g., `PROBE_ADDR=XXXX make run`) instead of committing personal IDs.
