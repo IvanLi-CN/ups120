@@ -5,7 +5,6 @@ edition = "2024"
 
 [dependencies]
 embassy-stm32 = { version = "0.2.0", path = "../../../../embassy/embassy-stm32", features = [
-  "defmt",
   "time-driver-any",
   "stm32g0c1ce",
   "memory-x",
@@ -15,23 +14,21 @@ embassy-stm32 = { version = "0.2.0", path = "../../../../embassy/embassy-stm32",
 embassy-executor = { version = "0.7.0", path = "../../../../embassy/embassy-executor", features = [
   "arch-cortex-m",
   "executor-thread",
-  "defmt",
 ] }
-embassy-time = { version = "0.4.0", path = "../../../../embassy/embassy-time", features = ["defmt","defmt-timestamp-uptime","tick-hz-32_768"] }
+embassy-time = { version = "0.4.0", path = "../../../../embassy/embassy-time", features = ["defmt-timestamp-uptime","tick-hz-32_768"] }
 embassy-embedded-hal = { version = "0.3.0", path = "../../../../embassy/embassy-embedded-hal" }
-defmt = "1.0.1"
-defmt-rtt = "1.0.0"
-panic-probe = { version = "1.0.0", features=["print-defmt"] }
+rtt-target = "0.4.0"
+panic-halt = "0.2.0"
 embedded-hal = "1.0.0"
 cortex-m = { version = "0.7.7", features = ["critical-section-single-core"] }
 cortex-m-rt = "0.7.5"
-smart-battery-driver = { path = "../..", features=["defmt","async"] }
+smart-battery-driver = { path = "../..", features=["async"] }
 
 [profile.dev]
 debug = true
 
 [profile.release]
-debug = false
+debug = 2
 lto = "thin"
 opt-level = "z"
 panic = "abort"

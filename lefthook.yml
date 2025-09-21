@@ -3,7 +3,7 @@ pre-commit:
   commands:
     fmt:
       glob: "*.{rs}"
-      run: cargo fmt
+      run: bash scripts/format_staged.sh
       stage_fixed: true
     # clippy/check disabled for workspace split; run per-crate as needed.
 
