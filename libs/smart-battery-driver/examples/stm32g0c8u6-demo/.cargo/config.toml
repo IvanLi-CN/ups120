@@ -1,0 +1,15 @@
+[target.'cfg(all(target_arch = "arm", target_os = "none"))']
+runner = "probe-rs run --chip STM32G0C1CE"
+rustflags = [
+  "-C", "link-arg=-Tlink.x",
+  "-C", "link-arg=-Tdefmt.x",
+  "-C", "link-arg=--nmagic",
+]
+
+## no per-table runner section; runner specified above is sufficient
+
+[build]
+target = "thumbv6m-none-eabi"    # Cortex-M0+
+
+[env]
+DEFMT_LOG = "info"

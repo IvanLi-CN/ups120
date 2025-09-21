@@ -1,5 +1,8 @@
 SHELL := /bin/sh
 
+# Default chip for driver demo; override with `make CHIP=STM32G0C1RE driver-demo-run`
+CHIP ?= STM32G0C1CE
+
 .PHONY: help sb-build sb-run sb-attach sb-reset driver-demo-build driver-demo-run clean
 
 help:
@@ -30,9 +33,8 @@ driver-demo-build:
 	@cd libs/smart-battery-driver/examples/stm32g0c8u6-demo && cargo build --release
 
 driver-demo-run: driver-demo-build
-	@cd libs/smart-battery-driver/examples/stm32g0c8u6-demo && probe-rs run --chip STM32G0C8Ux target/thumbv6m-none-eabi/release/smart-battery-stm32g0c8u6-demo
+	@cd libs/smart-battery-driver/examples/stm32g0c8u6-demo && probe-rs run --chip $(CHIP) target/thumbv6m-none-eabi/release/smart-battery-stm32g0c8u6-demo
 
 clean:
 	@cd firmware/smart-battery && $(MAKE) clean || true
 	@cd libs/smart-battery-driver/examples/stm32g0c8u6-demo && cargo clean || true
-
