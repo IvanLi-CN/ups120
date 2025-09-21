@@ -1,9 +1,9 @@
 [[bin]]
-name = "smart-battery-stm32g0c8u6-demo"
+name = "smart-battery-driver-stm32g0-demo"
 path = "src/main.rs"
 
 [package]
-name = "smart-battery-stm32g0c8u6-demo"
+name = "smart-battery-driver-stm32g0-demo"
 version = "0.1.0"
 edition = "2024"
 
@@ -36,4 +36,3 @@ debug = 2
 lto = "thin"
 opt-level = "z"
 panic = "abort"
-
