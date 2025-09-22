@@ -31,7 +31,7 @@ embassy-embedded-hal = { path = "../../embassy/embassy-embedded-hal" }
 bq769x0-async-rs = { path = "../../bq76920", features = ["async", "defmt"] }
 static_cell = "2.1.0"
 portable-atomic = { version = "1.11.0", features = ["critical-section"] }
-heapless = { version = "0.8", default-features = false }
+heapless = { version = "0.9.1", default-features = false }
 critical-section = "1.1"
 ## binrw not required in firmware (avoid pulling alloc)
 
