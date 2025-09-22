@@ -1,5 +1,15 @@
 # Smart Battery Firmware – Protection & Charger Bring-up Design
 
+> 中文要点（外设通信/I2C 对外协议）
+>
+> - 对外通信总线：I2C1 从机，地址 0x35（7‑bit），引脚 PB6=SCL、PB7=SDA（见 smart-battery.ioc），SMBA 暂不实现。
+> - 速率：兼容 100 kHz 与 400 kHz；允许短暂 SCL 拉伸（≤150 µs）。
+> - CRC/PEC：遵循 TI/SMBus 习惯。
+>   - 写操作：主机每写 1 个数据字节，紧跟 1 个 CRC8（poly 0x07，初值 0x00），校验 [ADDR_W, REG, DATA]，CRC 错误在 CRC 字节处 NACK，整帧丢弃。
+>   - 读操作：设备按 [DATA, CRC] 交错返回；首字节 CRC 计算 [ADDR_R, DATA0]，后续仅对各自 DATAi 计算。
+> - 寄存器：1 字节地址，自增；多字节 LE；提供电压/电流/温度/故障与充电软控制（详见下文 Register Map）。
+> - 选择 I2C1 的原因：支持 STOP 唤醒，满足低功耗场景对外主机唤醒的需求。
+
 ## Scope
 
 This document captures the software architecture that now boots the STM32L051C8

@@ -4,6 +4,14 @@ use defmt::*;
 use embassy_stm32::i2c::{self, I2c};
 use embassy_stm32::mode::Blocking;
 
+// Build-id style静态标记（不影响功能，仅用于离线验证产物是否包含本文件的最新改动）
+#[used]
+static _BUILD_MARK_I2C1_SLAVE: &str = "SB.I2C1-SLAVE.BUILD-MARK/2025-09-22";
+// Extra mark to help offline ELF verification when defmt strings are not discoverable via `strings`.
+// Kept in binary as bytes and referenced inside `slave_task`.
+#[used]
+static _SLAVE_TASK_LINK_MARK: &[u8] = b"I2C1_SLAVE_TASK_LINKED_MARK/2025-09-22";
+
 use crate::shared::{Bq76920MeasurementsChannelType, Sc8815MeasurementsChannelType};
 
 // Mirror storage for future I2C1-slave responses (ISR 无关，传输层在 embassy 从机 API 中实现)
@@ -63,6 +71,7 @@ fn read_reg(addr: u8) -> u8 {
 #[embassy_executor::task]
 pub async fn slave_task(mut dev: I2c<'static, Blocking, i2c::mode::MultiMaster>) {
     info!("I2C1 slave task start (addr=0x35)");
+    let _ = core::hint::black_box(_SLAVE_TASK_LINK_MARK);
     let mut rx = [0u8; 64];
     let mut tx = [0u8; 64];
 

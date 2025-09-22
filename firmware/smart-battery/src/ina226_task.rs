@@ -11,7 +11,7 @@ use crate::shared::Ina226MeasurementsPublisher;
 
 #[embassy_executor::task]
 pub async fn ina226_task(
-    i2c_bus: I2cDevice<'static, CriticalSectionRawMutex, I2c<'static, embassy_stm32::mode::Async>>,
+    i2c_bus: I2cDevice<'static, CriticalSectionRawMutex, I2c<'static, embassy_stm32::mode::Async, embassy_stm32::i2c::mode::Master>>,
     address: u8,
     ina226_measurements_publisher: Ina226MeasurementsPublisher<'static>,
 ) {

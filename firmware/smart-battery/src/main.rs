@@ -31,6 +31,10 @@ use static_cell::StaticCell;
 const BQ76920_I2C_ADDR: u8 = 0x08;
 use {defmt_rtt as _, panic_probe as _};
 
+// Build-id style静态标记（不影响功能，仅用于离线验证产物是否包含本文件的最新改动）
+#[used]
+static _BUILD_MARK_MAIN: &str = "SB.MAIN.BUILD-MARK/2025-09-22";
+
 bind_interrupts!(struct I2c2Irqs {
     I2C2 => i2c::EventInterruptHandler<I2C2>, i2c::ErrorInterruptHandler<I2C2>;
 });
@@ -57,8 +61,11 @@ async fn main(_spawner: Spawner) {
     let pstop = Output::new(p.PA9, Level::High, Speed::Low);
     let mut exit_shipmode = Output::new(p.PA1, Level::Low, Speed::Low);
     info!("Startup: CE=HIGH (disabled), PSTOP=HIGH (power stage gated)");
+    // Embed build timestamp from build.rs to verify fresh ELF is flashed.
+    info!("FW build-ts {}", env!("SB_BUILD_TS"));
 
-    // Post-startup diagnostics: read back I2C1 config (no writes, just visibility)
+    // Post-startup diagnostics: confirm we reached this point and read back I2C1 config
+    info!("I2C1 diag: post-startup readback");
     {
         let regs = embassy_stm32::pac::I2C1;
         let cr1 = regs.cr1().read().0;
@@ -146,6 +153,16 @@ async fn main(_spawner: Spawner) {
             sc8815_alerts_sub,
             balancing_cv_pub,
         ).expect("bq token"));
+                // Late I2C1 diag once BQ is alive, to avoid early-RTT drop
+                {
+                    let regs = embassy_stm32::pac::I2C1;
+                    let cr1 = regs.cr1().read().0;
+                    let oar1 = regs.oar1().read().0;
+                    let isr = regs.isr().read().0;
+                    let timing = regs.timingr().read().0;
+                    info!("I2C1 cfg(late): CR1=0x{:x} OAR1=0x{:x} TIMINGR=0x{:x} ISR=0x{:x}", cr1, oar1, timing, isr);
+                }
+
                 break BQ76920_I2C_ADDR;
             }
             Err(e) => {
@@ -225,6 +242,7 @@ async fn main(_spawner: Spawner) {
         ).expect("led token"));
 
     // Spawn I2C1 slave + snapshot mirror tasks for the external interface
+    info!("I2C1 slave spawn issued");
     _spawner.spawn(i2c1_slave::slave_task(i2c1_dev).expect("slave token"));
     _spawner
         .spawn(i2c1_slave::sc_meas_mirror_task(sc8815_meas_chan).expect("sc-mirror token"));

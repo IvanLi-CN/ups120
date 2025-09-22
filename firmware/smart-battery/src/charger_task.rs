@@ -14,7 +14,7 @@ use crate::shared::{
 /// Embassy task for managing the SC8815 charger IC.
 #[embassy_executor::task]
 pub async fn charger_task(
-    i2c_bus: I2cDevice<'static, CriticalSectionRawMutex, I2c<'static, embassy_stm32::mode::Async>>,
+    i2c_bus: I2cDevice<'static, CriticalSectionRawMutex, I2c<'static, embassy_stm32::mode::Async, embassy_stm32::i2c::mode::Master>>,
     address: u8,
     mut pstop_pin: Output<'static>,
     sc8815_alerts_publisher: Sc8815AlertsPublisher<'static>,

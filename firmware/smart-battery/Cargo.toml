@@ -5,7 +5,7 @@ edition = "2024"
 authors = ["Ivan Li<ivanli2048@gmail.com>"]
 
 [dependencies]
-embassy-stm32 = { version = "0.2.0", path = "../../embassy/embassy-stm32", features = [
+embassy-stm32 = { path = "../../embassy/embassy-stm32", features = [
   "defmt",
   "time-driver-any",
   "stm32l051c8",
@@ -13,13 +13,13 @@ embassy-stm32 = { version = "0.2.0", path = "../../embassy/embassy-stm32", featu
   "exti",
   "unstable-pac",
 ] }
-embassy-sync = { version = "0.7.0", path = "../../embassy/embassy-sync", features = ["defmt"] }
-embassy-executor = { version = "0.7.0", path = "../../embassy/embassy-executor", features = [
+embassy-sync = { path = "../../embassy/embassy-sync", features = ["defmt"] }
+embassy-executor = { path = "../../embassy/embassy-executor", features = [
   "arch-cortex-m",
   "executor-thread",
   "defmt",
 ] }
-embassy-time = { version = "0.4.0", path = "../../embassy/embassy-time", features = [
+embassy-time = { path = "../../embassy/embassy-time", features = [
   "defmt",
   "defmt-timestamp-uptime",
   "tick-hz-32_768",
@@ -27,7 +27,7 @@ embassy-time = { version = "0.4.0", path = "../../embassy/embassy-time", feature
 sc8815 = { path = "../../sc8815", features = ["async", "defmt"] }
 defmt = "1.0.1"
 defmt-rtt = "1.0.0"
-embassy-embedded-hal = { version = "0.3.0", path = "../../embassy/embassy-embedded-hal" }
+embassy-embedded-hal = { path = "../../embassy/embassy-embedded-hal" }
 bq769x0-async-rs = { path = "../../bq76920", features = ["async", "defmt"] }
 static_cell = "2.1.0"
 portable-atomic = { version = "1.11.0", features = ["critical-section"] }
@@ -62,7 +62,7 @@ codegen-units = 1
 debug = false
 debug-assertions = false
 incremental = false
-lto = 'thin'
+lto = 'fat'
 opt-level = 'z'
 overflow-checks = false
 panic = 'abort'

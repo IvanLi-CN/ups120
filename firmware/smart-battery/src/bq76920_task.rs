@@ -40,7 +40,7 @@ const BALANCE_SWITCH_DEADTIME_MS: u64 = 40;
 // Smart cell balancing logic based on charging status and voltage thresholds
 async fn execute_smart_battery_balancing<'a>(
     bq: &'a mut Bq769x0<
-        I2cDevice<'static, CriticalSectionRawMutex, I2c<'static, embassy_stm32::mode::Async>>,
+        I2cDevice<'static, CriticalSectionRawMutex, I2c<'static, embassy_stm32::mode::Async, embassy_stm32::i2c::mode::Master>>,
         bq769x0_async_rs::Enabled,
         5,
     >,
@@ -217,7 +217,7 @@ async fn execute_smart_battery_balancing<'a>(
 ///   The const generic `5` indicates the number of cells, matching the `N` for `Bq769x0`.
 #[embassy_executor::task]
 pub async fn bq76920_task(
-    i2c_bus: I2cDevice<'static, CriticalSectionRawMutex, I2c<'static, embassy_stm32::mode::Async>>,
+    i2c_bus: I2cDevice<'static, CriticalSectionRawMutex, I2c<'static, embassy_stm32::mode::Async, embassy_stm32::i2c::mode::Master>>,
     address: u8,
     sense_resistor_m_ohm: u32, // Added: Sense resistor value in mOhms
     ntc_params: Option<NtcParameters>, // Added: NTC parameters
@@ -230,7 +230,7 @@ pub async fn bq76920_task(
     // Initialize the BQ769x0 driver instance with CRC enabled and for 5 cells.
     // sense_resistor_m_ohm and ntc_params are now passed as arguments to this task.
     let mut bq: Bq769x0<
-        I2cDevice<'static, CriticalSectionRawMutex, I2c<'static, embassy_stm32::mode::Async>>,
+        I2cDevice<'static, CriticalSectionRawMutex, I2c<'static, embassy_stm32::mode::Async, embassy_stm32::i2c::mode::Master>>,
         bq769x0_async_rs::Enabled,
         5,
     > = Bq769x0::new(i2c_bus, address, sense_resistor_m_ohm, ntc_params);
