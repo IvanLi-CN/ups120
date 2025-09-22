@@ -10,7 +10,7 @@ use embassy_stm32::{
     time::Hertz,
 };
 use embassy_time::{Timer, Duration};
-use smart_battery_driver::{SmartBattery, Enabled};
+use smart_battery_driver::{SmartBattery, Enabled, RegisterAccess};
 use {defmt_rtt as _, panic_probe as _};
 
 bind_interrupts!(struct Irqs {
@@ -20,6 +20,7 @@ bind_interrupts!(struct Irqs {
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) {
     info!("stm32g0 demo: boot");
+    info!("demo build-ts {}", env!("SB_DEMO_BUILD_TS"));
     let p = embassy_stm32::init(Default::default());
 
     // Configure I2C1 PB6/PB7 with internal pull-ups
@@ -32,6 +33,7 @@ async fn main(_spawner: Spawner) {
     let bus_hz: u32 = 400_000;
     #[cfg(not(feature = "i2c-400k"))]
     let bus_hz: u32 = 100_000;
+    i2c_cfg.frequency = Hertz(bus_hz);
     let i2c = I2c::new(
         p.I2C1,
         p.PB6,
@@ -39,11 +41,31 @@ async fn main(_spawner: Spawner) {
         Irqs,
         p.DMA1_CH1,
         p.DMA1_CH2,
-        Hertz(bus_hz),
         i2c_cfg,
     );
 
     let mut bat: SmartBattery<_, Enabled> = SmartBattery::new(i2c);
+
+    // Quick bus scan to verify ACK on 0x35 before higher-level ops
+    {
+        let mut found: heapless::Vec<u8, 16> = heapless::Vec::new();
+        // Use a temporary handle for scanning so we don't move the main `bat`
+        let mut scan = SmartBattery::new(bat.release());
+        for addr in 0x30u8..=0x3Au8 { // small window around 0x35
+            let mut probe = scan.with_addr(addr);
+            if RegisterAccess::read_registers(&mut probe, 0, 1).await.is_ok() {
+                let _ = found.push(addr);
+            }
+            // rebuild `scan` from the inner I2C after using the probed instance
+            let i2c_back = probe.release();
+            scan = SmartBattery::new(i2c_back);
+        }
+        if found.is_empty() { warn!("I2C scan: no ACK in 0x30..0x3A"); }
+        else { info!("I2C scan ACK at addrs: {:?}", found.as_slice()); }
+        // rebuild main handle at default address
+        let i2c_back = scan.with_addr(0x35).release();
+        bat = SmartBattery::new(i2c_back);
+    }
 
     match bat.ping().await {
         Ok(true) => info!("Smart battery signature OK ('SB')"),
