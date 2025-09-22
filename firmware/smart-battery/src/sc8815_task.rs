@@ -29,7 +29,7 @@ const ENABLE_SC8815_DIAG: bool = true;
 const ENABLE_SC8815_SNAP: bool = true; // one-line snapshot each second
 
 // Local alias for the concrete I2C device type used by this task.
-type I2cDev = I2cDevice<'static, CriticalSectionRawMutex, I2c<'static, embassy_stm32::mode::Async>>;
+type I2cDev = I2cDevice<'static, CriticalSectionRawMutex, I2c<'static, embassy_stm32::mode::Async, embassy_stm32::i2c::mode::Master>>;
 
 // Session struct encapsulating an active SC8815 instance and related resources.
 struct ScSession {
@@ -41,8 +41,8 @@ struct ScSession {
 impl ScSession {
     async fn begin(
         mut ce_pin: Output<'static>,
-        mut pstop_pin: Output<'static>,
-        mut i2c: I2cDev,
+        pstop_pin: Output<'static>,
+        i2c: I2cDev,
         address: u8,
     ) -> Result<Self, (Output<'static>, Output<'static>, I2cDev)> {
         // Power-up sequence
@@ -184,7 +184,7 @@ pub async fn sc8815_task(
     i2c_device: I2cDevice<
         'static,
         CriticalSectionRawMutex,
-        I2c<'static, embassy_stm32::mode::Async>,
+        I2c<'static, embassy_stm32::mode::Async, embassy_stm32::i2c::mode::Master>,
     >,
     address: u8,
     sc8815_alerts_publisher: Sc8815AlertsPublisher<'static>,

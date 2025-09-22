@@ -145,6 +145,7 @@ impl<const N: usize> Default for AllMeasurements<N> {
 impl<const N: usize> AllMeasurements<N> {
     /// Converts the aggregated measurements into the flattened USB payload structure.
     /// Assumes that BQ76920 temperatures and current are already in physical units within `self.bq76920.core_measurements`.
+    #[allow(dead_code)]
     pub fn to_usb_payload(&self) -> AllMeasurementsUsbPayload {
         // SC8815 ADC measurements (already in mV/mA in self.sc8815.adc_measurements)
         let sc8815_adc_vbus_mv = self.sc8815.adc_measurements.vbus_mv;

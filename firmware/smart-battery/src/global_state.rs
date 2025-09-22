@@ -82,7 +82,7 @@ pub async fn global_state_task(
 
     let mut last_published: BatteryGlobalState = BatteryGlobalState::default();
     let mut first_pub = true;
-    let mut last_eval = Instant::now();
+    let last_eval = Instant::now();
 
     loop {
         if let Some(a) = sc_alerts_sub.try_next_message_pure() {

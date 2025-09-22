@@ -1,12 +1,12 @@
-use core::cell::Cell;
 use core::sync::atomic::{AtomicBool, AtomicI16, AtomicU16, Ordering};
 
-use embassy_stm32::{interrupt, pac};
-use pac::i2c::vals as ivals;
+use defmt::*;
+use embassy_stm32::i2c::{self, I2c};
+use embassy_stm32::mode::Blocking;
 
 use crate::shared::{Bq76920MeasurementsChannelType, Sc8815MeasurementsChannelType};
 
-// Mirror storage for future I2C1-slave responses (kept simple & ISR-friendly)
+// Mirror storage for future I2C1-slave responses (ISR 无关，传输层在 embassy 从机 API 中实现)
 static VBAT_MV: AtomicU16 = AtomicU16::new(0);
 static IBAT_MA: AtomicI16 = AtomicI16::new(0);
 static ADAPTER_PRESENT: AtomicBool = AtomicBool::new(false);
@@ -14,83 +14,11 @@ static CELLS_PRESENT: AtomicU16 = AtomicU16::new(5);
 static CHG_ENABLE_REQ: AtomicBool = AtomicBool::new(false);
 static CHG_CURRENT_LIMIT_MA: AtomicU16 = AtomicU16::new(0);
 
-#[derive(Copy, Clone)]
-struct I2cState {
-    reg_ptr: u8,
-    send_crc_next: bool,
-    last_tx_data: u8,
-    awaiting_ptr: bool,
-    awaiting_crc: bool,
-    last_rx_data: u8,
-    first_read_byte: bool,
-}
+// 寄存器指针（主机写入后在读侧自增）。
+static REG_PTR: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
 
-impl Default for I2cState {
-    fn default() -> Self {
-        Self {
-            reg_ptr: 0,
-            send_crc_next: false,
-            last_tx_data: 0,
-            awaiting_ptr: true,
-            awaiting_crc: false,
-            last_rx_data: 0,
-            first_read_byte: true,
-        }
-    }
-}
-
-const INIT_STATE: I2cState = I2cState {
-    reg_ptr: 0,
-    send_crc_next: false,
-    last_tx_data: 0,
-    awaiting_ptr: true,
-    awaiting_crc: false,
-    last_rx_data: 0,
-    first_read_byte: true,
-};
-
-static STATE: critical_section::Mutex<Cell<I2cState>> =
-    critical_section::Mutex::new(Cell::new(INIT_STATE));
-
-pub fn init_i2c1_slave() {
-    // Clocks
-    let rcc = pac::RCC;
-    // Enable I2C1 clock
-    rcc.apb1enr().modify(|w| w.set_i2c1en(true));
-    // Reset I2C1
-    rcc.apb1rstr().modify(|w| w.set_i2c1rst(true));
-    rcc.apb1rstr().modify(|w| w.set_i2c1rst(false));
-
-    // Pins PB6/PB7 are configured via board init; if required we will set AF in a subsequent patch.
-
-    // Configure I2C1 in slave mode
-    let i2c = pac::I2C1;
-    // Disable peripheral
-    i2c.cr1().modify(|w| w.set_pe(false));
-    // TIMINGR from .ioc (works for 100/400 kHz as slave)
-    i2c.timingr().write(|w| { w.0 = 0x0000_0608 });
-    // Own address 1: 7-bit 0x35
-    i2c.oar1().write(|w| {
-        // OA1[9:0] at bits 0..9, OA1EN at bit 15, 7-bit mode (OA1MODE=0)
-        w.0 = (((0x35u16 as u32) << 1) & 0x03FF) | (1u32 << 15);
-    });
-    // CR1: enable analog filter, clock stretching, wakeup, and slave interrupts
-    i2c.cr1().modify(|w| {
-        w.set_anfoff(false);
-        w.set_nostretch(false);
-        w.set_rxie(true);
-        w.set_txie(true);
-        w.set_addrie(true);
-        w.set_stopie(true);
-        w.set_nackie(true);
-        w.set_errie(true);
-    });
-    // Enable peripheral
-    i2c.cr1().modify(|w| w.set_pe(true));
-
-    // Enable NVIC for I2C1
-    unsafe { cortex_m::peripheral::NVIC::unmask(pac::Interrupt::I2C1) };
-}
+// Intentionally no low-level pinmux/enable fallbacks here.
+// We rely solely on embassy-stm32 I2C slave API per project policy.
 
 fn crc8(mut c: u8, byte: u8) -> u8 {
     c ^= byte;
@@ -129,123 +57,85 @@ fn read_reg(addr: u8) -> u8 {
         _ => 0,
     }
 }
+// 构造由 main 创建；此处不再提供 builder，避免 Peri<'d> 生存期问题。
 
-fn on_i2c1_irq() {
-    let i2c = pac::I2C1;
-    let isr = i2c.isr().read();
+/// I2C1 从机任务：按 TI/SMBus 风格实现逐字节 PEC（写侧校验，读侧交错返回）。
+#[embassy_executor::task]
+pub async fn slave_task(mut dev: I2c<'static, Blocking, i2c::mode::MultiMaster>) {
+    info!("I2C1 slave task start (addr=0x35)");
+    let mut rx = [0u8; 64];
+    let mut tx = [0u8; 64];
 
-    // Address matched
-    if isr.addr() {
-        i2c.icr().write(|w| w.set_addrcf(true));
-        critical_section::with(|cs| {
-            let mut st = STATE.borrow(cs).get();
-            st.send_crc_next = false;
-            st.awaiting_crc = false;
-            st.first_read_byte = true;
-            let dir_read = isr.dir() == ivals::Dir::READ;
-            st.awaiting_ptr = !dir_read; // write -> expect ptr
-            STATE.borrow(cs).set(st);
-        });
-    }
-
-    // RXNE: data from master
-    if isr.rxne() {
-        let b = i2c.rxdr().read().rxdata();
-        critical_section::with(|cs| {
-            let mut st = STATE.borrow(cs).get();
-            if st.awaiting_ptr {
-                st.reg_ptr = b;
-                st.awaiting_ptr = false;
-                st.awaiting_crc = false;
-            } else if !st.awaiting_crc {
-                st.last_rx_data = b;
-                st.awaiting_crc = true;
-            } else {
-                // CRC byte received
-                let mut c = 0u8;
-                c = crc8(c, (0x35u8) << 1); // ADDR_W
-                c = crc8(c, st.reg_ptr);
-                c = crc8(c, st.last_rx_data);
-                if b == c {
-                    match st.reg_ptr {
-                        0x31 => CHG_ENABLE_REQ.store(st.last_rx_data != 0, Ordering::Relaxed),
-                        0x32 => {
-                            let lo = st.last_rx_data as u16;
-                            let hi = CHG_CURRENT_LIMIT_MA.load(Ordering::Relaxed) & 0xFF00;
-                            CHG_CURRENT_LIMIT_MA.store(hi | lo, Ordering::Relaxed)
+    loop {
+        match dev.listen().await {
+            Ok(cmd) => match cmd.kind {
+                i2c::SlaveCommandKind::Write => {
+                    // 接收一帧写入
+                    let n = dev.blocking_respond_to_write(&mut rx).unwrap_or(0);
+                    if n == 0 { continue; }
+                    // 解析：首字节为寄存器指针，后面交替 [DATA, CRC]
+                    let mut idx = 0usize;
+                    let mut ptr = rx[0];
+                    REG_PTR.store(ptr, Ordering::Relaxed);
+                    let addr_w = 0x35u8 << 1;
+                    while idx + 2 < n {
+                        let reg = ptr;
+                        let data = rx[idx + 1];
+                        let pec = rx[idx + 2];
+                        let mut c = 0u8;
+                        c = crc8(c, addr_w);
+                        c = crc8(c, reg);
+                        c = crc8(c, data);
+                        if c == pec {
+                            match reg {
+                                0x31 => CHG_ENABLE_REQ.store(data != 0, Ordering::Relaxed),
+                                0x32 => {
+                                    let lo = data as u16;
+                                    let hi = CHG_CURRENT_LIMIT_MA.load(Ordering::Relaxed) & 0xFF00;
+                                    CHG_CURRENT_LIMIT_MA.store(hi | lo, Ordering::Relaxed);
+                                }
+                                0x33 => {
+                                    let hi = (data as u16) << 8;
+                                    let lo = CHG_CURRENT_LIMIT_MA.load(Ordering::Relaxed) & 0x00FF;
+                                    CHG_CURRENT_LIMIT_MA.store(hi | lo, Ordering::Relaxed);
+                                }
+                                _ => {}
+                            }
+                            ptr = ptr.wrapping_add(1);
+                            REG_PTR.store(ptr, Ordering::Relaxed);
+                        } else {
+                            warn!("PEC mismatch on write: reg=0x{:02x} data=0x{:02x} got=0x{:02x} exp=0x{:02x}", reg, data, pec, c);
                         }
-                        0x33 => {
-                            let hi = (st.last_rx_data as u16) << 8;
-                            let lo = CHG_CURRENT_LIMIT_MA.load(Ordering::Relaxed) & 0x00FF;
-                            CHG_CURRENT_LIMIT_MA.store(hi | lo, Ordering::Relaxed)
-                        }
-                        _ => {}
+                        idx += 2;
                     }
-                    st.reg_ptr = st.reg_ptr.wrapping_add(1);
                 }
-                st.awaiting_crc = false;
-            }
-            STATE.borrow(cs).set(st);
-        });
-    }
-
-    // TXIS: master wants a byte
-    if isr.txis() {
-        let (send_crc, d, first_read) = critical_section::with(|cs| {
-            let st = STATE.borrow(cs).get();
-            (st.send_crc_next, read_reg(st.reg_ptr), st.first_read_byte)
-        });
-        if send_crc {
-            let mut c = 0u8;
-            if first_read { c = crc8(c, (0x35u8 << 1) | 1); }
-            let last = critical_section::with(|cs| STATE.borrow(cs).get().last_tx_data);
-            c = crc8(c, last);
-            i2c.txdr().write(|w| w.set_txdata(c));
-            critical_section::with(|cs| {
-                let mut st = STATE.borrow(cs).get();
-                st.send_crc_next = false;
-                st.first_read_byte = false;
-                STATE.borrow(cs).set(st);
-            });
-        } else {
-            i2c.txdr().write(|w| w.set_txdata(d));
-            critical_section::with(|cs| {
-                let mut st = STATE.borrow(cs).get();
-                st.last_tx_data = d;
-                st.send_crc_next = true;
-                st.reg_ptr = st.reg_ptr.wrapping_add(1);
-                STATE.borrow(cs).set(st);
-            });
+                i2c::SlaveCommandKind::Read => {
+                    // 读取：根据当前 REG_PTR 构造交错 [DATA, CRC]
+                    let mut p = REG_PTR.load(Ordering::Relaxed);
+                    let mut k = 0usize;
+                    let mut first = true;
+                    let addr_r = (0x35u8 << 1) | 1;
+                    while k + 2 <= tx.len() {
+                        let d = read_reg(p);
+                        let mut c = 0u8;
+                        if first { c = crc8(c, addr_r); }
+                        c = crc8(c, d);
+                        tx[k] = d;
+                        tx[k + 1] = c;
+                        p = p.wrapping_add(1);
+                        if first { first = false; }
+                        k += 2;
+                        // 为了避免过长帧，最多准备 32 数据（64字节交错）。
+                        if (k / 2) >= 32 { break; }
+                    }
+                    let _ = dev.blocking_respond_to_read(&tx[..k]);
+                    REG_PTR.store(p, Ordering::Relaxed);
+                }
+            },
+            Err(e) => warn!("i2c1 listen error: {:?}", e),
         }
     }
-
-    // STOP
-    if isr.stopf() {
-        i2c.icr().write(|w| w.set_stopcf(true));
-        critical_section::with(|cs| {
-            let mut st = STATE.borrow(cs).get();
-            st.awaiting_ptr = true;
-            st.awaiting_crc = false;
-            st.send_crc_next = false;
-            st.first_read_byte = true;
-            STATE.borrow(cs).set(st);
-        });
-    }
-
-    // Clear NACK flag if any
-    if isr.nackf() {
-        i2c.icr().write(|w| w.set_nackcf(true));
-    }
 }
-
-struct I2c1Handler;
-impl interrupt::typelevel::Handler<interrupt::typelevel::I2C1> for I2c1Handler {
-    unsafe fn on_interrupt() {
-        on_i2c1_irq();
-    }
-}
-
-embassy_stm32::bind_interrupts!(struct I2c1Irqs { I2C1 => I2c1Handler; });
 
 #[embassy_executor::task]
 pub async fn sc_meas_mirror_task(ch: &'static Sc8815MeasurementsChannelType) {

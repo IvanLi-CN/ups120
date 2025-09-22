@@ -16,6 +16,7 @@ use crate::global_state::BatteryGlobalState;
 use crate::shared::GlobalStateSubscriber;
 
 #[derive(Debug, Clone, Copy, PartialEq, defmt::Format)]
+#[allow(dead_code)]
 enum LedMode {
     Fault,
     Preparing,
@@ -58,8 +59,7 @@ pub async fn led_status_task(
         }
 
         // 先检查 BQ/SC 故障（最高优先级，立即生效）
-        let mut any_fault = false;
-        any_fault = latest_state.fault_battery || latest_state.fault_charger;
+        let any_fault = latest_state.fault_battery || latest_state.fault_charger;
 
         let now = embassy_time::Instant::now();
 

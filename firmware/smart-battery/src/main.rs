@@ -16,8 +16,8 @@ use embassy_executor::Spawner;
 use embassy_stm32::{
     bind_interrupts,
     gpio::{Level, Output, OutputOpenDrain, Speed},
-    i2c::{self, Config as I2cConfig, I2c},
-    peripherals::I2C2,
+    i2c::{self, Config as I2cConfig, I2c, SlaveAddrConfig},
+    peripherals::{I2C2, I2C1},
     time::Hertz,
 };
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
@@ -35,11 +35,22 @@ bind_interrupts!(struct I2c2Irqs {
     I2C2 => i2c::EventInterruptHandler<I2C2>, i2c::ErrorInterruptHandler<I2C2>;
 });
 
+// Bind I2C1 interrupts so the slave listen/respond paths can wake properly.
+bind_interrupts!(struct I2c1Irqs {
+    I2C1 => i2c::EventInterruptHandler<I2C1>, i2c::ErrorInterruptHandler<I2C1>;
+});
+
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) {
     let mut config = embassy_stm32::Config::default();
     config.rcc.ls = embassy_stm32::rcc::LsConfig::default_lse();
     let p = embassy_stm32::init(config);
+
+    // Configure external I2C1 slave (PB6/PB7 @0x35) using embassy API only.
+    let mut i2c1_cfg = I2cConfig::default();
+    i2c1_cfg.frequency = Hertz(100_000);
+    let i2c1_blocking = I2c::new_blocking(p.I2C1, p.PB6, p.PB7, i2c1_cfg);
+    let i2c1_dev = i2c1_blocking.into_slave_multimaster(SlaveAddrConfig::basic(0x35));
 
     // Keep SC8815 power stage disabled during configuration.
     let ce = Output::new(p.PA10, Level::High, Speed::Low);
@@ -47,8 +58,19 @@ async fn main(_spawner: Spawner) {
     let mut exit_shipmode = Output::new(p.PA1, Level::Low, Speed::Low);
     info!("Startup: CE=HIGH (disabled), PSTOP=HIGH (power stage gated)");
 
+    // Post-startup diagnostics: read back I2C1 config (no writes, just visibility)
+    {
+        let regs = embassy_stm32::pac::I2C1;
+        let cr1 = regs.cr1().read().0;
+        let oar1 = regs.oar1().read().0;
+        let isr = regs.isr().read().0;
+        let timing = regs.timingr().read().0;
+        info!("I2C1 cfg: CR1=0x{:x} OAR1=0x{:x} TIMINGR=0x{:x} ISR=0x{:x}", cr1, oar1, timing, isr);
+    }
+
     // Prepare INNER I2C bus (I2C2 on PB10/PB11) with 100 kHz clock and wrap as shared bus.
-    let i2c_config = I2cConfig::default();
+    let mut i2c_config = I2cConfig::default();
+    i2c_config.frequency = Hertz(100_000);
     let i2c = I2c::new(
         p.I2C2,
         p.PB10,
@@ -56,10 +78,9 @@ async fn main(_spawner: Spawner) {
         I2c2Irqs,
         p.DMA1_CH4,
         p.DMA1_CH5,
-        Hertz(100_000),
         i2c_config,
     );
-    type I2c2Bus = Mutex<CriticalSectionRawMutex, I2c<'static, embassy_stm32::mode::Async>>;
+    type I2c2Bus = Mutex<CriticalSectionRawMutex, I2c<'static, embassy_stm32::mode::Async, i2c::mode::Master>>;
     static I2C2_BUS: StaticCell<I2c2Bus> = StaticCell::new();
     let i2c_bus: &'static I2c2Bus = I2C2_BUS.init(Mutex::new(i2c));
 
@@ -114,18 +135,17 @@ async fn main(_spawner: Spawner) {
                 let sc8815_alerts_sub = _sc8815_alerts_chan
                     .subscriber()
                     .expect("Allocate SC8815 alerts subscriber for BQ task");
-                _spawner
-                    .spawn(bq76920_task::bq76920_task(
-                        i2c_dev_runtime,
-                        BQ76920_I2C_ADDR,
-                        3,    // sense resistor mΩ
-                        None, // no NTC parameters provided
-                        bq76920_alerts_pub,
-                        bq76920_meas_pub,
-                        sc8815_alerts_sub,
-                        balancing_cv_pub,
-                    ))
-                    .ok();
+    _spawner
+        .spawn(bq76920_task::bq76920_task(
+            i2c_dev_runtime,
+            BQ76920_I2C_ADDR,
+            3,    // sense resistor mΩ
+            None, // no NTC parameters provided
+            bq76920_alerts_pub,
+            bq76920_meas_pub,
+            sc8815_alerts_sub,
+            balancing_cv_pub,
+        ).expect("bq token"));
                 break BQ76920_I2C_ADDR;
             }
             Err(e) => {
@@ -169,8 +189,7 @@ async fn main(_spawner: Spawner) {
             sc8815_meas_pub,
             bq76920_meas_sub,
             balancing_cv_sub,
-        ))
-        .ok();
+        ).expect("sc token"));
 
     // 启动 Global State 聚合任务
     let gs_sc_alerts_sub = _sc8815_alerts_chan
@@ -192,8 +211,7 @@ async fn main(_spawner: Spawner) {
             gs_bq_alerts_sub,
             gs_bal_cv_sub,
             global_state_pub,
-        ))
-        .ok();
+        ).expect("gs token"));
 
     // 启动 LED 状态任务
     let led_pin = OutputOpenDrain::new(p.PA5, Level::High, Speed::Low);
@@ -204,17 +222,14 @@ async fn main(_spawner: Spawner) {
         .spawn(led_status_task::led_status_task(
             led_pin,
             led_global_state_sub,
-        ))
-        .ok();
+        ).expect("led token"));
 
-    // Initialize external I2C1 slave interface and spawn snapshot mirror tasks
-    i2c1_slave::init_i2c1_slave();
+    // Spawn I2C1 slave + snapshot mirror tasks for the external interface
+    _spawner.spawn(i2c1_slave::slave_task(i2c1_dev).expect("slave token"));
     _spawner
-        .spawn(i2c1_slave::sc_meas_mirror_task(sc8815_meas_chan))
-        .ok();
+        .spawn(i2c1_slave::sc_meas_mirror_task(sc8815_meas_chan).expect("sc-mirror token"));
     _spawner
-        .spawn(i2c1_slave::bq_meas_mirror_task(bq76920_meas_chan))
-        .ok();
+        .spawn(i2c1_slave::bq_meas_mirror_task(bq76920_meas_chan).expect("bq-mirror token"));
 
     // Main loop: subscribe global-state and log immediate changes + 1s snapshots.
     let mut gs_sub_for_log = global_state_chan
