@@ -1,0 +1,5 @@
+[toolchain]
+channel = "1.90"
+components = ["llvm-tools-preview", "rust-src"]
+# add target used by firmware builds
+targets = ["thumbv6m-none-eabi"]
