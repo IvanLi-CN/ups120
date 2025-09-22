@@ -38,7 +38,7 @@ all: build
 # Build release firmware every time (do not rely on ELF timestamp)
 build:
 	@echo "[build] crate=$(CRATE_DIR) target=$(TARGET_TRIPLE)"
-	$(CARGO) build --release $(CARGO_TARGET_FLAGS) --manifest-path $(CRATE_DIR)/Cargo.toml
+	CARGO_TARGET_DIR=$(TARGET_DIR) $(CARGO) build --release $(CARGO_TARGET_FLAGS) --manifest-path $(CRATE_DIR)/Cargo.toml
 	@echo "[build] ELF=$(ELF)"; \
 	if [ -f "$(ELF)" ]; then \
 	  stat_cmd=$$(command -v gstat || command -v stat); \
@@ -52,7 +52,7 @@ build:
 
 # Flash and run (prints defmt logs via probe-rs)
 run:
-	$(CARGO) run --release $(CARGO_TARGET_FLAGS) --manifest-path $(CRATE_DIR)/Cargo.toml
+	CARGO_TARGET_DIR=$(TARGET_DIR) $(CARGO) run --release $(CARGO_TARGET_FLAGS) --manifest-path $(CRATE_DIR)/Cargo.toml
 
 # Force rebuild before flashing (useful when怀疑缓存)
 run-force: clean run
@@ -73,7 +73,7 @@ reset-attach: reset attach
 # Clean build artifacts for this crate
 clean:
 	@echo "[clean] crate=$(CRATE_DIR)"
-	$(CARGO) clean --manifest-path $(CRATE_DIR)/Cargo.toml
+	CARGO_TARGET_DIR=$(TARGET_DIR) $(CARGO) clean --manifest-path $(CRATE_DIR)/Cargo.toml
 
 # Print current configuration and ELF path/hashes without flashing
 info:
