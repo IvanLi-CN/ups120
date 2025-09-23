@@ -54,7 +54,7 @@ build:
 run:
 	CARGO_TARGET_DIR=$(TARGET_DIR) $(CARGO) run --release $(CARGO_TARGET_FLAGS) --manifest-path $(CRATE_DIR)/Cargo.toml
 
-# Force rebuild before flashing (useful when怀疑缓存)
+# Force rebuild before flashing (useful when cache is suspicious)
 run-force: clean run
 
 # Attach to the running target with release ELF symbols loaded

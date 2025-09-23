@@ -1,6 +1,6 @@
 SHELL := /bin/sh
 
-# 可选参数（保留，但用户可直接不带参数使用）
+# Optional parameters (can be left unset)
 CHIP ?= STM32G031C8
 PROBE ?=
 DEMO_FEATURES ?=
@@ -18,11 +18,11 @@ help:
 	@echo "  sb-reset-attach     Reset then attach smart-battery"
 	@echo "  driver-demo-build   Build STM32G0 demo (features via DEMO_FEATURES)"
 	@echo "  driver-demo-run     Flash+run STM32G0 demo (no auto-build)"
-	@echo "  driver-demo-attach  Attach to STM32G0 demo (CHIP/PROBE 可选)"
+	@echo "  driver-demo-attach  Attach to STM32G0 demo (optional CHIP/PROBE)"
 	@echo "  driver-demo-reset-attach  Reset then attach STM32G0 demo"
 	@echo "Vars: CHIP=$(CHIP) PROBE=$(PROBE) DEMO_FEATURES=$(DEMO_FEATURES)"
 
-# Delegate to firmware/smart-battery/Makefile（其内已硬编码目标探针；这里不透传参数）
+# Delegate to firmware/smart-battery/Makefile (probe config handled there; no arg passthrough)
 sb-build:
 	$(MAKE) -C firmware/smart-battery build
 
@@ -39,7 +39,7 @@ sb-reset:
 sb-reset-attach:
 	$(MAKE) -C firmware/smart-battery reset-attach
 
-# Driver demo（允许可选参数，但不强制）
+# Driver demo (optional arguments; not required)
 driver-demo-build:
 	@cd libs/smart-battery-driver/examples/stm32g0 && cargo build --release $(if $(DEMO_FEATURES),--features $(DEMO_FEATURES),)
 
