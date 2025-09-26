@@ -196,10 +196,10 @@ pub async fn global_state_task(
             first_pub = false;
         }
 
-        // When AC is absent the whole system is quiesced: avoid periodic timers.
+        // 当 AC 缺失时，保持低频评估而不是完全阻塞，
+        // 以便能够吸收来自 SC8815 的“适配器插入”提示并发布新全局状态。
         if crate::scheduler::is_quiesced() {
-            // Block until the scheduler reports activity again (e.g., adapter plug-in or I2C/BQ wake).
-            crate::scheduler::wait_until_active().await;
+            Timer::after(Duration::from_millis(250)).await;
             continue;
         }
 

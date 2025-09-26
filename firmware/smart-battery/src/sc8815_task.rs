@@ -1,5 +1,5 @@
 use bq769x0_async_rs::registers::SysStatFlags;
-use defmt::{error, info, warn, debug};
+use defmt::{debug, error, info, warn};
 use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
 use embassy_stm32::{gpio::Output, i2c::I2c};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
@@ -29,7 +29,11 @@ const ENABLE_SC8815_DIAG: bool = false;
 const ENABLE_SC8815_SNAP: bool = false; // one-line snapshot each second
 
 // Local alias for the concrete I2C device type used by this task.
-type I2cDev = I2cDevice<'static, CriticalSectionRawMutex, I2c<'static, embassy_stm32::mode::Async, embassy_stm32::i2c::mode::Master>>;
+type I2cDev = I2cDevice<
+    'static,
+    CriticalSectionRawMutex,
+    I2c<'static, embassy_stm32::mode::Async, embassy_stm32::i2c::mode::Master>,
+>;
 
 // Session struct encapsulating an active SC8815 instance and related resources.
 struct ScSession {
@@ -140,12 +144,14 @@ impl ScSession {
         }
 
         // Print compact configuration summary
-        debug!("sc:cfg v={} r1={} r2={} ib={} ibt={}",
+        debug!(
+            "sc:cfg v={} r1={} r2={} ib={} ibt={}",
             device_config.power.vinreg_voltage_mv,
             device_config.current_limits.rs1_mohm,
             device_config.current_limits.rs2_mohm,
             device_config.current_limits.ibus_limit_ma,
-            device_config.current_limits.ibat_limit_ma);
+            device_config.current_limits.ibat_limit_ma
+        );
 
         Ok(Self {
             sc,
@@ -219,7 +225,8 @@ pub async fn sc8815_task(
     let mut last_pause_report: Option<(bool, bool)> = None; // (ov_pause_active, imbalance_pause_active)
 
     loop {
-        // Global quiesce policy: when AC is absent, park SC session and avoid polling
+        // 全局“静默”策略：当 AC 不在时，尽量停靠会话并降低采样频率，
+        // 但仍以低频探测适配器插入，避免进入不可唤醒的死锁。
         if crate::scheduler::is_quiesced() {
             if let Some(sess) = sc8815_session.take() {
                 let (ce_back, pstop_back, i2c_back) = sess.end().await;
@@ -227,24 +234,45 @@ pub async fn sc8815_task(
                 pstop_pin_slot = Some(pstop_back);
                 parked_i2c_device = Some(i2c_back);
             } else {
-                if let Some(pin) = pstop_pin_slot.as_mut() { pin.set_high(); }
-                if let Some(pin) = ce_pin_slot.as_mut() { pin.set_high(); }
+                if let Some(pin) = pstop_pin_slot.as_mut() {
+                    pin.set_high();
+                }
+                if let Some(pin) = ce_pin_slot.as_mut() {
+                    pin.set_high();
+                }
             }
             charger_active = false;
             charge_confirmed = false;
             confirm_streak = 0;
             drop_streak = 0;
-            // Publish a minimal alerts snapshot so global_state remains sane
+
+            // 低频探测：尝试读取一次设备状态以判定适配器是否接入。
+            // 不进入完整会话，不开启 ADC，仅用已停靠的 I2C 进行寄存器访问。
+            let mut status_for_pub = SC8815Status::default();
+            if let Some(dev) = parked_i2c_device.take() {
+                let mut probe = SC8815::new(dev, address);
+                match probe.get_device_status().await {
+                    Ok(st) => {
+                        status_for_pub = st;
+                    }
+                    Err(_e) => {
+                        // 保持默认
+                    }
+                }
+                parked_i2c_device = Some(probe.release());
+            }
+
             let alerts_payload = Sc8815Alerts {
-                device_status: SC8815Status::default(),
+                device_status: status_for_pub,
                 expected_charging: false,
                 charging_confirmed: false,
                 ov_pause_active: false,
                 imbalance_pause_active: false,
             };
             sc8815_alerts_publisher.publish_immediate(alerts_payload);
-            // Block until system becomes active again; no periodic timers while quiesced
-            crate::scheduler::wait_until_active().await;
+
+            // 以较低频率轮询一次，留给全局状态聚合器时间吸收并唤醒调度器。
+            Timer::after(Duration::from_millis(250)).await;
             continue;
         }
         if let Some(measurements) = bq76920_measurements_subscriber.try_next_message_pure() {
@@ -288,9 +316,15 @@ pub async fn sc8815_task(
                 drop_streak = 0;
             } else if pack_voltage_mv >= PACK_CHARGE_STOP_THRESHOLD_MV {
                 if latest_bal_req.require_cv {
-                    debug!("cv_hold {}>={}", pack_voltage_mv, PACK_CHARGE_STOP_THRESHOLD_MV);
+                    debug!(
+                        "cv_hold {}>={}",
+                        pack_voltage_mv, PACK_CHARGE_STOP_THRESHOLD_MV
+                    );
                 } else {
-                    debug!("pol:stop {}>={}", pack_voltage_mv, PACK_CHARGE_STOP_THRESHOLD_MV);
+                    debug!(
+                        "pol:stop {}>={}",
+                        pack_voltage_mv, PACK_CHARGE_STOP_THRESHOLD_MV
+                    );
                     if sc8815_session.is_some() {
                         if let Some(sess) = sc8815_session.take() {
                             let (ce_back, pstop_back, i2c_back) = sess.end().await;
@@ -374,7 +408,10 @@ pub async fn sc8815_task(
                     && adapter_holdoff_secs == 0;
                 if pol_start_cond {
                     if !pol_start_latched {
-                        debug!("pol+ {}<{}", pack_voltage_mv, PACK_CHARGE_START_THRESHOLD_MV);
+                        debug!(
+                            "pol+ {}<{}",
+                            pack_voltage_mv, PACK_CHARGE_START_THRESHOLD_MV
+                        );
                         pol_start_latched = true;
                     }
                     if sc8815_session.is_none() {
@@ -419,14 +456,20 @@ pub async fn sc8815_task(
                     } else {
                         if let Some(sess) = sc8815_session.as_mut() {
                             sess.disable_power_stage();
-                        } else if let Some(pin) = pstop_pin_slot.as_mut() { pin.set_high(); }
+                        } else if let Some(pin) = pstop_pin_slot.as_mut() {
+                            pin.set_high();
+                        }
                         // log pause gating only when state (OV/IMB pair) changes
                         let pause_sig = (ov_pause_secs > 0, imbalance_pause_active);
                         if last_pause_report != Some(pause_sig) {
                             let mut b: u8 = 0; // bit0=LH, bit1=OV, bit2=IMB
-                            b |= 1<<0; // LH
-                            if ov_pause_secs > 0 { b |= 1<<1; }
-                            if imbalance_pause_active { b |= 1<<2; }
+                            b |= 1 << 0; // LH
+                            if ov_pause_secs > 0 {
+                                b |= 1 << 1;
+                            }
+                            if imbalance_pause_active {
+                                b |= 1 << 2;
+                            }
                             debug!("sc:g b=0x{:02x}", b);
                             last_pause_report = Some(pause_sig);
                         }
@@ -445,10 +488,18 @@ pub async fn sc8815_task(
                 Some(sess) => match sess.sc.get_device_status().await {
                     Ok(status) => {
                         let mut b: u8 = 0;
-                        if status.ac_adapter_connected { b |= 1<<0; }
-                        if status.usb_load_detected { b |= 1<<1; }
-                        if status.otp_fault { b |= 1<<2; }
-                        if status.vbus_short_fault { b |= 1<<3; }
+                        if status.ac_adapter_connected {
+                            b |= 1 << 0;
+                        }
+                        if status.usb_load_detected {
+                            b |= 1 << 1;
+                        }
+                        if status.otp_fault {
+                            b |= 1 << 2;
+                        }
+                        if status.vbus_short_fault {
+                            b |= 1 << 3;
+                        }
                         debug!("sc:st b=0x{:02x}", b);
 
                         // Track adapter presence
@@ -473,7 +524,10 @@ pub async fn sc8815_task(
                         }
 
                         if status.otp_fault || status.vbus_short_fault {
-                            warn!("sc:fault o={} v={}", status.otp_fault, status.vbus_short_fault);
+                            warn!(
+                                "sc:fault o={} v={}",
+                                status.otp_fault, status.vbus_short_fault
+                            );
                             if let Some(sess) = sc8815_session.take() {
                                 let (ce_back, pstop_back, i2c_back) = sess.end().await;
                                 ce_pin_slot = Some(ce_back);
@@ -521,7 +575,15 @@ pub async fn sc8815_task(
             match sc8815_session.as_mut() {
                 Some(sess) => match sess.sc.get_adc_measurements().await {
                     Ok(measurements) => {
-                        if ENABLE_SC8815_SNAP { debug!("sc snap vbus={} vbat={} ibus={} ibat={}", measurements.vbus_mv, measurements.vbat_mv, measurements.ibus_ma, measurements.ibat_ma); }
+                        if ENABLE_SC8815_SNAP {
+                            debug!(
+                                "sc snap vbus={} vbat={} ibus={} ibat={}",
+                                measurements.vbus_mv,
+                                measurements.vbat_mv,
+                                measurements.ibus_ma,
+                                measurements.ibat_ma
+                            );
+                        }
 
                         if charger_active {
                             let ibat = measurements.ibat_ma;
@@ -596,12 +658,12 @@ pub async fn sc8815_task(
         if adapter_holdoff_secs > 0 {
             adapter_holdoff_secs = adapter_holdoff_secs.saturating_sub(1);
         }
-            if ov_pause_secs > 0 {
-                ov_pause_secs = ov_pause_secs.saturating_sub(1);
-                if ov_pause_secs == 0 {
-                    debug!("pause:ov done");
-                }
+        if ov_pause_secs > 0 {
+            ov_pause_secs = ov_pause_secs.saturating_sub(1);
+            if ov_pause_secs == 0 {
+                debug!("pause:ov done");
             }
+        }
         Timer::after(Duration::from_secs(1)).await;
     }
 }
