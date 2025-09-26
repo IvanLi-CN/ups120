@@ -112,9 +112,12 @@ async fn main(_spawner: Spawner) {
     // Gate other tasks on successful BQ76920 initialization using fixed I2C address.
     let mut ship_mode_pulsed = false;
     let _selected_bq_addr = loop {
-        let i2c_dev_for_bq = I2cDevice::new(i2c_bus);
-        let mut bq: Bq769x0<_, BqCrcEnabled, 5> =
-            Bq769x0::new(i2c_dev_for_bq, BQ76920_I2C_ADDR, 3, None);
+        // Try common fixed-address variants: 0x08 (03) then 0x18 (06)
+        let tried: [u8; 2] = [BQ76920_I2C_ADDR, 0x18u8];
+        let mut ok_addr: Option<u8> = None;
+        for addr in tried.iter().copied() {
+            let i2c_dev_for_bq = I2cDevice::new(i2c_bus);
+            let mut bq: Bq769x0<_, BqCrcEnabled, 5> = Bq769x0::new(i2c_dev_for_bq, addr, 3, None);
         let cfg = BatteryConfig {
             overvoltage_trip: 3650,  // 3.65V per cell
             undervoltage_trip: 2500, // 2.50V per cell
@@ -127,17 +130,25 @@ async fn main(_spawner: Spawner) {
             ..Default::default()
         };
 
-        match bq.try_apply_config(&cfg).await {
-            Ok(_) => {
-                // Spawn the continuous BQ76920 task now that init succeeded.
-                let i2c_dev_runtime = I2cDevice::new(i2c_bus);
-                let sc8815_alerts_sub = _sc8815_alerts_chan
-                    .subscriber()
-                    .expect("Allocate SC8815 alerts subscriber for BQ task");
-                _spawner.spawn(
+            match bq.try_apply_config(&cfg).await {
+                Ok(_) => {
+                    ok_addr = Some(addr);
+                    break;
+                }
+                Err(_e) => {}
+            }
+        }
+        if let Some(ok) = ok_addr {
+            // Spawn the continuous BQ76920 task now that init succeeded.
+            let i2c_dev_runtime = I2cDevice::new(i2c_bus);
+            let sc8815_alerts_sub = _sc8815_alerts_chan
+                .subscriber()
+                .expect("Allocate SC8815 alerts subscriber for BQ task");
+            _spawner
+                .spawn(
                     bq76920_task::bq76920_task(
                         i2c_dev_runtime,
-                        BQ76920_I2C_ADDR,
+                        ok,
                         3,    // sense resistor mΩ
                         None, // no NTC parameters provided
                         bq76920_alerts_pub,
@@ -147,11 +158,7 @@ async fn main(_spawner: Spawner) {
                     )
                     .expect("bq token"),
                 );
-                // (Removed: late I2C1 diag to save flash)
-
-                break BQ76920_I2C_ADDR;
-            }
-            Err(_e) => { /* suppress log to save flash */ }
+            break ok;
         }
         if !ship_mode_pulsed {
             exit_shipmode.set_high();
