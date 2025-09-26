@@ -11,7 +11,6 @@ embassy-stm32 = { path = "../../embassy/embassy-stm32", features = [
   "stm32l051c8",
   "memory-x",
   "exti",
-  "unstable-pac",
 ] }
 embassy-sync = { path = "../../embassy/embassy-sync", features = ["defmt"] }
 embassy-executor = { path = "../../embassy/embassy-executor", features = [
