@@ -25,8 +25,8 @@ const IBAT_RELEASE_MARGIN_MA: u16 = 20;
 const CHARGE_CONFIRMATION_SAMPLES: u8 = 3;
 
 // Logging/diagnostics verbosity for SC8815 task
-const ENABLE_SC8815_DIAG: bool = true;
-const ENABLE_SC8815_SNAP: bool = true; // one-line snapshot each second
+const ENABLE_SC8815_DIAG: bool = false;
+const ENABLE_SC8815_SNAP: bool = false; // one-line snapshot each second
 
 // Local alias for the concrete I2C device type used by this task.
 type I2cDev = I2cDevice<'static, CriticalSectionRawMutex, I2c<'static, embassy_stm32::mode::Async, embassy_stm32::i2c::mode::Master>>;
@@ -221,6 +221,33 @@ pub async fn sc8815_task(
     let mut last_pause_report: Option<(bool, bool)> = None; // (ov_pause_active, imbalance_pause_active)
 
     loop {
+        // Global quiesce policy: when AC is absent, park SC session and avoid polling
+        if crate::scheduler::is_quiesced() {
+            if let Some(sess) = sc8815_session.take() {
+                let (ce_back, pstop_back, i2c_back) = sess.end().await;
+                ce_pin_slot = Some(ce_back);
+                pstop_pin_slot = Some(pstop_back);
+                parked_i2c_device = Some(i2c_back);
+            } else {
+                if let Some(pin) = pstop_pin_slot.as_mut() { pin.set_high(); }
+                if let Some(pin) = ce_pin_slot.as_mut() { pin.set_high(); }
+            }
+            charger_active = false;
+            charge_confirmed = false;
+            confirm_streak = 0;
+            drop_streak = 0;
+            // Publish a minimal alerts snapshot so global_state remains sane
+            let alerts_payload = Sc8815Alerts {
+                device_status: SC8815Status::default(),
+                expected_charging: false,
+                charging_confirmed: false,
+                ov_pause_active: false,
+                imbalance_pause_active: false,
+            };
+            sc8815_alerts_publisher.publish_immediate(alerts_payload);
+            embassy_time::Timer::after(embassy_time::Duration::from_millis(500)).await;
+            continue;
+        }
         if let Some(measurements) = bq76920_measurements_subscriber.try_next_message_pure() {
             latest_bq_measurements = Some(measurements);
         }

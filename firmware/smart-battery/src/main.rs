@@ -8,6 +8,8 @@ mod led_status_task;
 mod sc8815_task;
 mod shared;
 mod i2c1_slave;
+mod scheduler;
+mod exti_bq_alert;
 mod sleep_manager;
 
 use bq769x0_async_rs::{BatteryConfig, Bq769x0, Enabled as BqCrcEnabled, ProtectionConfig};
@@ -267,9 +269,20 @@ async fn main(_spawner: Spawner) {
             led_global_state_sub,
         ).expect("led token"));
 
-    // Spawn sleep manager
+    // Spawn sleep manager + power scheduler (driven by GlobalState)
     _spawner
         .spawn(sleep_manager::sleep_task().expect("sleep-mgr token"));
+
+    let gs_sub_for_sched = global_state_chan
+        .subscriber()
+        .expect("Allocate GS subscriber for scheduler");
+    _spawner
+        .spawn(scheduler::power_scheduler_task(gs_sub_for_sched).expect("sched token"));
+
+    // Configure EXTI on PB1 (BQ ALERT) to wake CPU from SLEEP
+    let mut _bq_alert_exti = embassy_stm32::exti::ExtiInput::new(p.PB1, p.EXTI1, embassy_stm32::gpio::Pull::Down);
+    _spawner
+        .spawn(exti_bq_alert::bq_alert_task(_bq_alert_exti).expect("bq-alert token"));
 
     // Spawn I2C1 slave + snapshot mirror tasks for the external interface
     info!("I2C1 slave spawn issued");

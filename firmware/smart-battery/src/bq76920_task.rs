@@ -29,7 +29,7 @@ const LOCAL_PEAK_MARGIN_MV: i32 = 1;
 
 // Logging verbosity toggles for BQ76920 task
 const VERBOSE_BQ_LOG: bool = false; // set true for full register-by-register dumps
-const SNAP_BQ_EVERY_SEC: u32 = 1; // one-line snapshot interval (seconds)
+const SNAP_BQ_EVERY_SEC: u32 = 0; // disable one-line snapshot
 
 // Test knob: force both CHG/DSG FETs off for charger-path diagnostics.
 // Default false for normal operation; set true only for lab diagnostics.
@@ -330,6 +330,15 @@ pub async fn bq76920_task(
     let mut last_eval_period_secs: u32 = 3600;
 
     loop {
+        if crate::scheduler::is_quiesced() {
+            // Minimal maintenance: ensure balancing off and avoid polling.
+            if let Some(cell) = active_balancing_cell.take() {
+                let _ = bq.set_cell_balancing(0).await;
+                let _ = cell; // silence unused
+            }
+            embassy_time::Timer::after(embassy_time::Duration::from_millis(500)).await;
+            continue;
+        }
         // This task focuses on reading data from the BQ76920 itself.
         // Communication with other chips (like BQ25730 charger) is handled in their respective tasks.
 
@@ -426,7 +435,7 @@ pub async fn bq76920_task(
                 }
 
                 // One-line snapshot (always enabled for quick diagnostics)
-                if snap_tick % SNAP_BQ_EVERY_SEC == 0 {
+                if SNAP_BQ_EVERY_SEC > 0 && (snap_tick % SNAP_BQ_EVERY_SEC == 0) {
                     let chg_on = core_meas.mos_status.0.contains(SysCtrl2Flags::CHG_ON);
                     let dsg_on = core_meas.mos_status.0.contains(SysCtrl2Flags::DSG_ON);
                     let cells = core_meas.cell_voltages.voltages;
