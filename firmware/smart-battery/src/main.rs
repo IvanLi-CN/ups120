@@ -8,6 +8,7 @@ mod led_status_task;
 mod sc8815_task;
 mod shared;
 mod i2c1_slave;
+mod sleep_manager;
 
 use bq769x0_async_rs::{BatteryConfig, Bq769x0, Enabled as BqCrcEnabled, ProtectionConfig};
 use defmt::{info, warn};
@@ -265,6 +266,10 @@ async fn main(_spawner: Spawner) {
             led_pin,
             led_global_state_sub,
         ).expect("led token"));
+
+    // Spawn sleep manager
+    _spawner
+        .spawn(sleep_manager::sleep_task().expect("sleep-mgr token"));
 
     // Spawn I2C1 slave + snapshot mirror tasks for the external interface
     info!("I2C1 slave spawn issued");

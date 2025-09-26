@@ -76,9 +76,12 @@ pub async fn slave_task(mut dev: I2c<'static, Blocking, i2c::mode::MultiMaster>)
     let mut tx = [0u8; 64];
 
     loop {
+        // Mark activity around each I2C1 transaction to help sleep manager
         match dev.listen().await {
             Ok(cmd) => match cmd.kind {
                 i2c::SlaveCommandKind::Write => {
+                    let _g = crate::sleep_manager::hold("i2c1-write");
+                    crate::sleep_manager::bump("i2c1-listen");
                     // 接收一帧写入
                     let n = dev.blocking_respond_to_write(&mut rx).unwrap_or(0);
                     if n == 0 { continue; }
@@ -119,6 +122,8 @@ pub async fn slave_task(mut dev: I2c<'static, Blocking, i2c::mode::MultiMaster>)
                     }
                 }
                 i2c::SlaveCommandKind::Read => {
+                    let _g = crate::sleep_manager::hold("i2c1-read");
+                    crate::sleep_manager::bump("i2c1-listen");
                     // 读取：根据当前 REG_PTR 构造交错 [DATA, CRC]
                     let mut p = REG_PTR.load(Ordering::Relaxed);
                     let mut k = 0usize;
