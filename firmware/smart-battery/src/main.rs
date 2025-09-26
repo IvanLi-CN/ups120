@@ -36,7 +36,7 @@ use {defmt_rtt as _, panic_probe as _};
 
 // Build-id style静态标记（不影响功能，仅用于离线验证产物是否包含本文件的最新改动）
 #[used]
-static _BUILD_MARK_MAIN: &str = "SB.MAIN.BUILD-MARK/2025-09-22";
+static _BUILD_MARK_MAIN: &str = "SBM/25-09";
 
 bind_interrupts!(struct I2c2Irqs {
     I2C2 => i2c::EventInterruptHandler<I2C2>, i2c::ErrorInterruptHandler<I2C2>;
@@ -61,9 +61,9 @@ async fn main(_spawner: Spawner) {
         // Per RM0377, APB1SMENR bit 21 is I2C1SMEN.
         const I2C1SMEN_BIT: u32 = 1 << 21;
         let i2c1smen_on = (apb1smenr & I2C1SMEN_BIT) != 0;
-        debug!("apb1smenr=0x{:08x} i2c1smen={}", apb1smenr, i2c1smen_on);
+        debug!("apb1=0x{:x} i2c1=1", apb1smenr);
         if !i2c1smen_on {
-            warn!("I2C1SMEN=0: enable I2C1 clock in Sleep mode via RCC_APB1SMENR before relying on SLEEP wake");
+            warn!("i2c1smen=0");
         }
     }
 
@@ -86,17 +86,17 @@ async fn main(_spawner: Spawner) {
     let ce = Output::new(p.PA10, Level::High, Speed::Low);
     let pstop = Output::new(p.PA9, Level::High, Speed::Low);
     let mut exit_shipmode = Output::new(p.PA1, Level::Low, Speed::Low);
-    debug!("boot CE=H PSTOP=H ts {}", env!("SB_BUILD_TS"));
+    debug!("boot CE=H P=H t={}", env!("SB_BUILD_TS"));
 
     // Post-startup diagnostics: compact readback
     debug!("i2c1:readback");
     {
         let regs = embassy_stm32::pac::I2C1;
-        let cr1 = regs.cr1().read().0;
-        let oar1 = regs.oar1().read().0;
-        let isr = regs.isr().read().0;
-        let timing = regs.timingr().read().0;
-        debug!("i2c1 cr1=0x{:x} oar1=0x{:x} tm=0x{:x} isr=0x{:x}", cr1, oar1, timing, isr);
+        let _ = regs.cr1().read().0;
+        let _ = regs.oar1().read().0;
+        let _ = regs.isr().read().0;
+        let _ = regs.timingr().read().0;
+        debug!("i2c1 rb");
         debug!("i2c1-nvic:on");
     }
 
@@ -137,7 +137,7 @@ async fn main(_spawner: Spawner) {
     // Gate other tasks on successful BQ76920 initialization using fixed I2C address.
     let mut ship_mode_pulsed = false;
     let _selected_bq_addr = loop {
-        debug!("bq:init try 0x{:02x}", BQ76920_I2C_ADDR);
+        debug!("bq:try 0x{:02x}", BQ76920_I2C_ADDR);
         let i2c_dev_for_bq = I2cDevice::new(i2c_bus);
         let mut bq: Bq769x0<_, BqCrcEnabled, 5> =
             Bq769x0::new(i2c_dev_for_bq, BQ76920_I2C_ADDR, 3, None);
@@ -155,7 +155,7 @@ async fn main(_spawner: Spawner) {
 
         match bq.try_apply_config(&cfg).await {
             Ok(_) => {
-                debug!("bq:init ok 0x{:02x}", BQ76920_I2C_ADDR);
+                debug!("bq:ok 0x{:02x}", BQ76920_I2C_ADDR);
                 // Spawn the continuous BQ76920 task now that init succeeded.
                 let i2c_dev_runtime = I2cDevice::new(i2c_bus);
                 let sc8815_alerts_sub = _sc8815_alerts_chan
@@ -175,17 +175,17 @@ async fn main(_spawner: Spawner) {
                 // Late I2C1 diag once BQ is alive, to avoid early-RTT drop
                 {
                     let regs = embassy_stm32::pac::I2C1;
-                    let cr1 = regs.cr1().read().0;
-                    let oar1 = regs.oar1().read().0;
-                    let isr = regs.isr().read().0;
-                    let timing = regs.timingr().read().0;
-                debug!("i2c1(late) c=0x{:x} o=0x{:x} t=0x{:x} s=0x{:x}", cr1, oar1, timing, isr);
+                    let _ = regs.cr1().read().0;
+                    let _ = regs.oar1().read().0;
+                    let _ = regs.isr().read().0;
+                    let _ = regs.timingr().read().0;
+                debug!("i2c1 rb2");
                 }
 
                 break BQ76920_I2C_ADDR;
             }
-            Err(e) => {
-                warn!("bq:init fail 0x{:02x} {:?}", BQ76920_I2C_ADDR, e);
+            Err(_e) => {
+                warn!("bq:fail 0x{:02x}", BQ76920_I2C_ADDR);
             }
         }
         if !ship_mode_pulsed {
@@ -298,7 +298,7 @@ async fn main(_spawner: Spawner) {
                 if s.balancing_active { b |= 1<<5; }
                 if s.fault_battery { b |= 1<<6; }
                 if s.fault_charger { b |= 1<<7; }
-                warn!("st b=0x{:02x}", b);
+                debug!("st {:02x}", b);
                 last_seen = Some(s);
             }
             continue;
@@ -316,16 +316,23 @@ async fn main(_spawner: Spawner) {
                 if s.balancing_active { b |= 1<<5; }
                 if s.fault_battery { b |= 1<<6; }
                 if s.fault_charger { b |= 1<<7; }
-                warn!("st b=0x{:02x}", b);
+                debug!("st {:02x}", b);
                 last_seen = Some(s);
             }
         }
         let now = embassy_time::Instant::now();
         if now.duration_since(last_snap) >= Duration::from_secs(1) {
             if let Some(s) = last_seen {
-                debug!("snap ac={} chg={} p={} pr={} f={} bal={} bf={} cf={}",
-                    s.ac_present, s.charging, s.charging_paused, s.preparing, s.full,
-                    s.balancing_active, s.fault_battery, s.fault_charger);
+                let mut b: u8 = 0;
+                if s.ac_present { b |= 1<<0; }
+                if s.charging { b |= 1<<1; }
+                if s.charging_paused { b |= 1<<2; }
+                if s.preparing { b |= 1<<3; }
+                if s.full { b |= 1<<4; }
+                if s.balancing_active { b |= 1<<5; }
+                if s.fault_battery { b |= 1<<6; }
+                if s.fault_charger { b |= 1<<7; }
+                info!("snap {:02x}", b);
             }
             last_snap = now;
         }

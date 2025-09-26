@@ -87,12 +87,7 @@ async fn execute_smart_battery_balancing<'a>(
             }
         }
         if all_adjacent_within_margin {
-            if active_cell.is_some() {
-                info!(
-                    "Stopping balancing: all adjacent diffs <= {} mV",
-                    LOCAL_PEAK_MARGIN_MV
-                );
-            }
+            if active_cell.is_some() { debug!("bal:stop adj<= {}mV", LOCAL_PEAK_MARGIN_MV); }
             let _ = bq.set_cell_balancing(0).await;
             *active_cell = None;
             return;
@@ -126,36 +121,23 @@ async fn execute_smart_battery_balancing<'a>(
                 if let Some(prev) = *active_cell {
                     // Ensure single-cell-only: turn all off, wait deadtime, then enable new cell
                     let _ = bq.set_cell_balancing(0).await;
-                    info!(
-                        "Balancing switch deadtime {}ms ({} -> {} )",
-                        BALANCE_SWITCH_DEADTIME_MS,
-                        prev + 1,
-                        cell_idx + 1
-                    );
+                    debug!("bal~ {}ms {}>{}", BALANCE_SWITCH_DEADTIME_MS, prev+1, cell_idx+1);
                     Timer::after(Duration::from_millis(BALANCE_SWITCH_DEADTIME_MS)).await;
                 }
-                info!(
-                    "Starting balancing on cell {} ({} mV, spread {} mV)",
-                    cell_idx + 1,
-                    v[cell_idx],
-                    spread
-                );
+                debug!("bal+ c{} {} d{}", cell_idx+1, v[cell_idx], spread);
             }
-            if let Err(e) = bq.set_cell_balancing(mask).await {
-                error!("Failed to enable cell balancing: {:?}", e);
+            if let Err(_e) = bq.set_cell_balancing(mask).await {
+                error!("bal:en!");
             } else {
                 *active_cell = Some(cell_idx);
                 // Read-back verification
                 match bq.read_register(Register::CELLBAL1).await {
                     Ok(bits) => {
                         if (bits as u16 & mask) == 0 {
-                            warn!(
-                                "BAL verify mismatch: wrote 0x{:04X} but CELLBAL1=0x{:02X}",
-                                mask, bits
-                            );
+                            warn!("bal:vr w={} r={}", mask, bits);
                         }
                     }
-                    Err(e) => warn!("BAL verify read failed: {:?}", e),
+                    Err(_e) => warn!("bal:vr err"),
                 }
             }
         } else {
@@ -169,13 +151,10 @@ async fn execute_smart_battery_balancing<'a>(
             match bq.read_register(Register::CELLBAL1).await {
                 Ok(bits) => {
                     if bits != 0 {
-                        warn!(
-                            "BAL verify mismatch: expected 0 but CELLBAL1=0x{:02X}",
-                            bits
-                        );
+                        warn!("bal:vr0 r={}", bits);
                     }
                 }
-                Err(e) => warn!("BAL verify read failed: {:?}", e),
+                Err(_e) => warn!("bal:vr rd!"),
             }
         }
     } else {
@@ -279,32 +258,8 @@ pub async fn bq76920_task(
                 let _ = bq.enable_discharging().await;
             }
         }
-        Err(BQ769x0Error::ConfigVerificationFailed {
-            register,
-            expected,
-            actual,
-        }) => {
-            // This is a CRITICAL error. Configuration did not write correctly.
-            // FETs will NOT be enabled to prevent potentially unsafe operation
-            // with incorrect protection settings.
-            error!("CRITICAL: BQ76920 CONFIGURATION VERIFICATION FAILED!");
-            error!("  Register: {:?}", register);
-            error!("  Expected: {:#04x}", expected);
-            error!("  Actual:   {:#04x}", actual);
-            error!(
-                "FETs will NOT be enabled due to this configuration error. System may be unsafe."
-            );
-            // Depending on system requirements, this might warrant a panic or a safe shutdown procedure.
-        }
-        Err(e) => {
-            // Handles other errors from try_apply_config, such as I2C communication errors.
-            // Also a CRITICAL failure scenario.
-            error!(
-                "CRITICAL: Failed to apply BQ76920 configuration due to other error: {:?}",
-                e
-            );
-            error!("FETs will NOT be enabled. System may be unsafe.");
-        }
+        Err(BQ769x0Error::ConfigVerificationFailed { .. }) => { error!("bq:cfg_verify"); }
+        Err(_e) => { error!("bq:cfg_apply"); }
     }
 
     // Runtime config (Bq76920RuntimeConfig) is no longer published from here,
@@ -352,15 +307,13 @@ pub async fn bq76920_task(
             let _ = bq.set_cell_balancing(0).await;
         }
 
-        if VERBOSE_BQ_LOG {
-            info!("BQ read: begin");
-        }
+        if VERBOSE_BQ_LOG { debug!("bq:read"); }
 
         // Read ADC calibration values (not used in current logging but kept for potential future use)
         let (_adc_gain_uv_per_lsb, _adc_offset_mv) = match bq.read_adc_calibration().await {
             Ok(cal) => cal,
-            Err(e) => {
-                error!("Failed to read ADC calibration: {:?}", e);
+            Err(_e) => {
+                error!("bq:adc_cal");
                 // Use default calibration values if reading fails
                 (365, 0) // Default values from datasheet
             }
@@ -368,13 +321,7 @@ pub async fn bq76920_task(
 
         // Read and display cell balancing status
         let cellbal1_register = bq.read_register(Register::CELLBAL1).await.unwrap_or(0);
-        if VERBOSE_BQ_LOG {
-            info!("Cell Balancing Status:");
-            info!(
-                "  CELLBAL1 register: 0b{:08b} (0x{:02X})",
-                cellbal1_register, cellbal1_register
-            );
-        }
+        if VERBOSE_BQ_LOG { debug!("bal:stat 0b{:08b}(0x{:02X})", cellbal1_register, cellbal1_register); }
 
         // Display which cells are enabled for balancing
         let mut balancing_cells = [0u8; 5];
@@ -398,37 +345,19 @@ pub async fn bq76920_task(
 
                 // Detailed BQ76920 measurements (optional verbose)
                 if VERBOSE_BQ_LOG {
-                    info!("Cell Voltages:");
-                    for i in 0..5 {
-                        let voltage_mv = core_meas.cell_voltages.voltages[i];
-                        info!("  Cell {}: {} mV", i + 1, voltage_mv);
-                    }
-                    info!("Pack Voltage: {} mV", core_meas.total_voltage_mv);
-                    info!("Current: {} mA", core_meas.current_ma);
-                    info!("Temperatures (0.01°C):");
-                    info!(
-                        "  TS1: {} ({}°C)",
-                        core_meas.temperatures.ts1,
-                        core_meas.temperatures.ts1 as f32 / 100.0
-                    );
-                    if let Some(ts2) = core_meas.temperatures.ts2 {
-                        info!("  TS2: {} ({}°C)", ts2, ts2 as f32 / 100.0);
-                    }
-                    if let Some(ts3) = core_meas.temperatures.ts3 {
-                        info!("  TS3: {} ({}°C)", ts3, ts3 as f32 / 100.0);
-                    }
-                    info!(
-                        "System Status (SYS_STAT register: 0x{:02X})",
-                        core_meas.system_status.0.bits()
-                    );
-                    info!(
-                        "MOS Status: CHG_ON={} DSG_ON={} CC_EN={} CC_ONESHOT={} DELAY_DIS={}",
+                    debug!("cells:");
+                    for i in 0..5 { let v = core_meas.cell_voltages.voltages[i]; debug!("c{}={}mV", i+1, v); }
+                    debug!("pack={}mV cur={}mA", core_meas.total_voltage_mv, core_meas.current_ma);
+                    let ts1 = core_meas.temperatures.ts1; debug!("ts1={}c1e-2", ts1);
+                    if let Some(ts2) = core_meas.temperatures.ts2 { debug!("ts2={}c1e-2", ts2); }
+                    if let Some(ts3) = core_meas.temperatures.ts3 { debug!("ts3={}c1e-2", ts3); }
+                    debug!("sys=0x{:02X}", core_meas.system_status.0.bits());
+                    debug!("mos chg={} dsg={} cc={} oneshot={} dly={}",
                         core_meas.mos_status.0.contains(SysCtrl2Flags::CHG_ON),
                         core_meas.mos_status.0.contains(SysCtrl2Flags::DSG_ON),
                         core_meas.mos_status.0.contains(SysCtrl2Flags::CC_EN),
                         core_meas.mos_status.0.contains(SysCtrl2Flags::CC_ONESHOT),
-                        core_meas.mos_status.0.contains(SysCtrl2Flags::DELAY_DIS)
-                    );
+                        core_meas.mos_status.0.contains(SysCtrl2Flags::DELAY_DIS));
                 }
 
                 // One-line snapshot (always enabled for quick diagnostics)
@@ -516,10 +445,7 @@ pub async fn bq76920_task(
                 let mut should_enable_discharge = protection_allows_discharge;
 
                 if pack_voltage_mv <= PACK_OUTPUT_CUTOFF_THRESHOLD_MV {
-                    info!(
-                        "BQ dsg: off reason Vpack {}<= {} mV",
-                        pack_voltage_mv, PACK_OUTPUT_CUTOFF_THRESHOLD_MV
-                    );
+                    debug!("dsg:off {}<={}", pack_voltage_mv, PACK_OUTPUT_CUTOFF_THRESHOLD_MV);
                     should_enable_discharge = false;
                 }
 
@@ -559,10 +485,7 @@ pub async fn bq76920_task(
                             balancing_needed_by_delta = true;
                         }
                         if balancing_needed_by_delta != prev_balancing_needed_by_delta {
-                            info!(
-                                "bal_eval: spread={}mV need_by_delta={} (start_threshold={}mV)",
-                                spread, balancing_needed_by_delta, BALANCE_START_SPREAD_MV
-                            );
+                            info!("bal:e s={} n={}", spread, balancing_needed_by_delta);
                             prev_balancing_needed_by_delta = balancing_needed_by_delta;
                         }
                     }
@@ -606,14 +529,14 @@ pub async fn bq76920_task(
                 let flags_to_clear = core_meas.system_status.0.bits();
                 if flags_to_clear != 0 {
                     if let Err(e_clear) = bq.clear_status_flags(flags_to_clear).await {
-                        error!("Failed to clear BQ76920 status flags: {:?}", e_clear);
+                        error!("bq:clr_err {:?}", e_clear);
                     } else {
                         debug!("bq:clr {:#010b}", flags_to_clear);
                     }
                 }
             }
-            Err(e) => {
-                error!("Failed to read BQ76920 measurements: {:?}", e);
+            Err(_e) => {
+                error!("bq:meas!");
                 latest_core_measurements = None;
                 // Optionally publish default/error state for alerts if needed
                 let alerts = crate::data_types::Bq76920Alerts::default();
@@ -649,13 +572,13 @@ pub async fn bq76920_task(
             charger_expected || charger_confirmed || ov_pause_active || imbalance_pause_active;
         let eval_period_secs: u32 = 1;
         if eval_period_secs != last_eval_period_secs {
-            info!("bal:per={}s ac={} chgph={}", eval_period_secs, adapter_present, charging_phase);
+            debug!("bal:per={} ac={} chgph={}", eval_period_secs, adapter_present, charging_phase);
             last_eval_period_secs = eval_period_secs;
         }
 
         // Strict policy: if adapter is absent, balancing must not be active under any circumstance.
         if !adapter_present && last_cellbal_bits != 0 {
-            info!("bal:stop no-ac hw=0x{:02X}", last_cellbal_bits);
+            warn!("bal:stop no-ac hw=0x{:02X}", last_cellbal_bits);
             let _ = bq.set_cell_balancing(0).await;
             active_balancing_cell = None;
             last_cellbal_bits = 0;

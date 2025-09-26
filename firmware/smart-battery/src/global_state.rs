@@ -23,7 +23,7 @@ const FULL_ENTER_SECS: u32 = 60;
 const FULL_EXIT_SECS: u32 = 10;
 
 /// Derived, compact system state for UI/LED/logging.
-#[derive(Debug, Copy, Clone, PartialEq, defmt::Format)]
+#[derive(Debug, Copy, Clone, PartialEq)]
 pub struct BatteryGlobalState {
     pub ac_present: bool,
     pub charging: bool,         // include paused-as-charging phase
@@ -181,7 +181,7 @@ pub async fn global_state_task(
 
         if first_pub || new_state != last_published {
             info!(
-                "state_changed ac={} chg={} paused={} prep={} full={} bal={} batt_fault={} chg_fault={}",
+                "state: ac={} chg={} paused={} prep={} full={} bal={} batt_fault={} chg_fault={}",
                 new_state.ac_present,
                 new_state.charging,
                 new_state.charging_paused,
@@ -196,7 +196,14 @@ pub async fn global_state_task(
             first_pub = false;
         }
 
-        // Evaluate every 10ms; also avoid burning CPU
+        // When AC is absent the whole system is quiesced: avoid periodic timers.
+        if crate::scheduler::is_quiesced() {
+            // Block until the scheduler reports activity again (e.g., adapter plug-in or I2C/BQ wake).
+            crate::scheduler::wait_until_active().await;
+            continue;
+        }
+
+        // AC present: evaluate every 10 ms for responsive UI/LED and latching logic.
         let now = Instant::now();
         let _ = now;
         let _ = last_eval; // reserved if later needed

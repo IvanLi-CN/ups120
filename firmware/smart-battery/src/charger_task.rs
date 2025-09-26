@@ -26,7 +26,7 @@ pub async fn charger_task(
 
     // Initialize the SC8815
     if let Err(e) = sc8815.init().await {
-        error!("Failed to initialize SC8815: {:?}", e);
+        error!("sc:init {:?}", e);
         return;
     }
 
@@ -54,14 +54,14 @@ pub async fn charger_task(
 
     // Apply configuration
     if let Err(e) = sc8815.configure_device(&config).await {
-        error!("Failed to configure SC8815: {:?}", e);
+        error!("sc:cfg {:?}", e);
         return;
     }
 
     // In external mode, manually set VBAT monitor ratio for typical battery voltages
     // Use 12.5x ratio for batteries >10.24V (most Li-ion applications)
     if let Err(e) = sc8815.set_vbat_monitor_ratio(0).await {
-        error!("Failed to set VBAT monitor ratio: {:?}", e);
+        error!("sc:vbat_ratio {:?}", e);
         return;
     }
 
@@ -69,14 +69,14 @@ pub async fn charger_task(
 
     // Enable charging mode (disable OTG mode)
     if let Err(e) = sc8815.set_otg_mode(false).await {
-        error!("Failed to enable charging mode: {:?}", e);
+        error!("sc:chg_mode {:?}", e);
         return;
     }
     info!("Charging mode enabled successfully");
 
     // Enable ADC conversion
     if let Err(e) = sc8815.set_adc_conversion(true).await {
-        error!("Failed to start SC8815 ADC conversion: {:?}", e);
+        error!("sc:adc {:?}", e);
     }
 
     // SC8815 state tracking
@@ -91,17 +91,15 @@ pub async fn charger_task(
         let sc8815_adc_measurements_option = match sc8815.get_adc_measurements().await {
             Ok(measurements) => {
                 // Print SC8815 voltage and current information
-                info!(
-                    "[SC8815] VBUS:{}mV, VBAT:{}mV, IBUS:{}mA, IBAT:{}mA",
+                debug!("sc vbus={} vbat={} ibus={} ibat={}",
                     measurements.vbus_mv,
                     measurements.vbat_mv,
                     measurements.ibus_ma,
-                    measurements.ibat_ma
-                );
+                    measurements.ibat_ma);
                 Some(measurements)
             }
             Err(e) => {
-                error!("[SC8815] Failed to read ADC measurements: {:?}", e);
+                error!("sc:adc {:?}", e);
                 sc8815_comm_failed = true; // Mark communication failure
                 None
             }
@@ -112,15 +110,15 @@ pub async fn charger_task(
             Ok(status) => {
                 // Check for critical faults
                 if status.otp_fault {
-                    warn!("[SC8815] Over-temperature protection fault detected!");
+                    warn!("sc:otp");
                 }
                 if status.vbus_short_fault {
-                    warn!("[SC8815] VBUS short circuit fault detected!");
+                    warn!("sc:vbus_short");
                 }
                 Some(status)
             }
             Err(e) => {
-                error!("Failed to read SC8815 device status: {:?}", e);
+                error!("sc:status {:?}", e);
                 sc8815_comm_failed = true; // Mark communication failure
                 None
             }
@@ -135,7 +133,7 @@ pub async fn charger_task(
             if let Some(measurements) = sc8815_adc_measurements_option.as_ref() {
                 if measurements.vbat_mv < 18000 {
                     pstop_pin.set_low();
-                    info!("[DEBUG] PSTOP set to LOW - charging should be enabled");
+                    debug!("sc:pstop L");
                     if let Err(_) = sc8815.set_ibat_limit(500, 0, 10).await {
                         sc8815_comm_failed = true;
                     }
@@ -147,30 +145,21 @@ pub async fn charger_task(
                     let current_time = embassy_time::Instant::now().as_millis() as u32;
                     unsafe {
                         if current_time - LAST_LOG_TIME > 10000 {
-                            info!(
-                                "[CHARGING] VBAT:{}mV, IBAT:{}mA, Status: Active",
-                                measurements.vbat_mv, measurements.ibat_ma
-                            );
+                            debug!("chg v={} i={}", measurements.vbat_mv, measurements.ibat_ma);
                             LAST_LOG_TIME = current_time;
                         }
                     }
                 } else {
                     pstop_pin.set_high();
-                    warn!(
-                        "[CHARGING] Voltage too high: {}mV >= 18000mV",
-                        measurements.vbat_mv
-                    );
+                    warn!("chg:ov {}>=18000", measurements.vbat_mv);
                 }
             } else {
                 pstop_pin.set_high();
-                warn!("[CHARGING] No measurements available");
+                warn!("chg:no-meas");
             }
         } else {
             pstop_pin.set_high();
-            warn!(
-                "[CHARGING] Cannot charge - init:{} comm_ok:{}",
-                sc8815_initialized, !sc8815_comm_failed
-            );
+            warn!("chg:no init={} comm_ok={}", sc8815_initialized, !sc8815_comm_failed);
         }
 
         // Publish measurements and alerts

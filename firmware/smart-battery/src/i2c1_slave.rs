@@ -6,11 +6,11 @@ use embassy_stm32::mode::Blocking;
 
 // Build-id style静态标记（不影响功能，仅用于离线验证产物是否包含本文件的最新改动）
 #[used]
-static _BUILD_MARK_I2C1_SLAVE: &str = "SB.I2C1-SLAVE.BUILD-MARK/2025-09-22";
+static _BUILD_MARK_I2C1_SLAVE: &str = "I2C1/25-09";
 // Extra mark to help offline ELF verification when defmt strings are not discoverable via `strings`.
 // Kept in binary as bytes and referenced inside `slave_task`.
 #[used]
-static _SLAVE_TASK_LINK_MARK: &[u8] = b"I2C1_SLAVE_TASK_LINKED_MARK/2025-09-22";
+static _SLAVE_TASK_LINK_MARK: &[u8] = b"I2C1L/25-09";
 
 use crate::shared::{Bq76920MeasurementsChannelType, Sc8815MeasurementsChannelType};
 
@@ -70,7 +70,7 @@ fn read_reg(addr: u8) -> u8 {
 /// I2C1 从机任务：按 TI/SMBus 风格实现逐字节 PEC（写侧校验，读侧交错返回）。
 #[embassy_executor::task]
 pub async fn slave_task(mut dev: I2c<'static, Blocking, i2c::mode::MultiMaster>) {
-    debug!("i2c1:slave start 0x35");
+    debug!("i2c1:slave 0x35");
     let _ = core::hint::black_box(_SLAVE_TASK_LINK_MARK);
     let mut rx = [0u8; 64];
     let mut tx = [0u8; 64];
@@ -116,7 +116,7 @@ pub async fn slave_task(mut dev: I2c<'static, Blocking, i2c::mode::MultiMaster>)
                             ptr = ptr.wrapping_add(1);
                             REG_PTR.store(ptr, Ordering::Relaxed);
                         } else {
-                            warn!("PEC mismatch on write: reg=0x{:02x} data=0x{:02x} got=0x{:02x} exp=0x{:02x}", reg, data, pec, c);
+                            warn!("pec {} {} {} {}", reg, data, pec, c);
                         }
                         idx += 2;
                     }
@@ -146,7 +146,7 @@ pub async fn slave_task(mut dev: I2c<'static, Blocking, i2c::mode::MultiMaster>)
                     REG_PTR.store(p, Ordering::Relaxed);
                 }
             },
-            Err(e) => warn!("i2c1 listen error: {:?}", e),
+            Err(e) => warn!("i2c1:listen {:?}", e),
         }
     }
 }
