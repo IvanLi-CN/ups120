@@ -38,7 +38,7 @@ pub async fn led_status_task(
     led_pin: OutputOpenDrain<'static>,
     mut global_state_sub: GlobalStateSubscriber<'static>,
 ) {
-    info!("LED status task started");
+    debug!("led:start");
 
     // 配置LED为开漏输出，低使能
     let mut led = led_pin;
@@ -127,7 +127,7 @@ pub async fn led_status_task(
                     .map(|v| v != latest_state.balancing_active)
                     .unwrap_or(true)
                 {
-                    info!("led_chg overlay={}", latest_state.balancing_active);
+                    debug!("led:overlay={}", latest_state.balancing_active);
                     overlay_prev = Some(latest_state.balancing_active);
                 }
                 if on {

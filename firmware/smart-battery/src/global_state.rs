@@ -67,7 +67,7 @@ pub async fn global_state_task(
     mut bal_cv_sub: BalancingCvRequestSubscriber<'static>,
     state_pub: GlobalStatePublisher<'static>,
 ) {
-    info!("global_state: start");
+    debug!("gs:start");
 
     // Latest inputs (non-blocking sampling)
     let mut latest_sc_alerts: Option<Sc8815Alerts> = None;
@@ -138,7 +138,7 @@ pub async fn global_state_task(
                     if full_enter_acc_ms >= FULL_ENTER_SECS * 1000 {
                         is_full_latched = true;
                         full_exit_acc_ms = 0;
-                        info!("global_state: full_latched");
+                        debug!("full=1");
                     }
                 } else {
                     if exit_by_current || exit_by_voltage || !charging_flags {
@@ -149,7 +149,7 @@ pub async fn global_state_task(
                     if full_exit_acc_ms >= FULL_EXIT_SECS * 1000 {
                         is_full_latched = false;
                         full_enter_acc_ms = 0;
-                        info!("global_state: full_released");
+                        debug!("full=0");
                     }
                 }
             }

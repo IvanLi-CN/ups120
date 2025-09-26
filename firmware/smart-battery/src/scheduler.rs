@@ -2,21 +2,33 @@ use core::cell::Cell;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use defmt::*;
-use embassy_executor::Spawner;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::signal::Signal;
 use embassy_sync::pubsub::Subscriber;
+use static_cell::StaticCell;
 
 use crate::global_state::BatteryGlobalState;
 use crate::shared::GlobalStateSubscriber;
 use crate::sleep_manager::{self, BusyGuard};
 
 static QUIESCE: AtomicBool = AtomicBool::new(false);
+static NOTIFY_CELL: StaticCell<Signal<CriticalSectionRawMutex, ()>> = StaticCell::new();
+fn notify() -> &'static Signal<CriticalSectionRawMutex, ()> { NOTIFY_CELL.init(Signal::new()) }
 
 pub fn is_quiesced() -> bool { QUIESCE.load(Ordering::Relaxed) }
 
+pub async fn wait_until_active() {
+    if !is_quiesced() { return; }
+    loop {
+        notify().wait().await;
+        if !is_quiesced() { return; }
+    }
+}
+
+
 #[embassy_executor::task]
 pub async fn power_scheduler_task(mut gs_sub: GlobalStateSubscriber<'static>) {
-    info!("power_scheduler: start");
+    debug!("sched:start");
     let mut hold: Option<BusyGuard> = None;
     let mut last: Option<BatteryGlobalState> = None;
     loop {
@@ -29,17 +41,18 @@ pub async fn power_scheduler_task(mut gs_sub: GlobalStateSubscriber<'static>) {
             QUIESCE.store(false, Ordering::Relaxed);
             if hold.is_none() {
                 hold = Some(sleep_manager::hold("ac_present"));
-                info!("sched: AC present → stay awake (busy token on)\n");
+                debug!("sched:ac=1 busy=1");
             }
+            notify().signal(());
         } else {
             QUIESCE.store(true, Ordering::Relaxed);
             if hold.take().is_some() {
-                info!("sched: AC absent → allow sleep (busy token off)\n");
+                debug!("sched:ac=0 busy=0");
             }
             // Nudge timestamp so sleep manager can consider entering sleep sooner
             // (no busy token held, bumps not strictly required but helps logs ordering)
             sleep_manager::bump("ac_absent");
+            notify().signal(());
         }
     }
 }
-

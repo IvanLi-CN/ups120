@@ -1,5 +1,5 @@
 use bq769x0_async_rs::registers::SysStatFlags;
-use defmt::{error, info, warn};
+use defmt::{error, info, warn, debug};
 use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
 use embassy_stm32::{gpio::Output, i2c::I2c};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
@@ -50,7 +50,7 @@ impl ScSession {
         Timer::after(Duration::from_millis(100)).await;
 
         let mut sc = SC8815::new(i2c, address);
-        info!("SC sess:init");
+        debug!("sc:init");
         if let Err(e) = sc.init().await {
             error!("sc_init_err {:?}", e);
             let i2c_back = sc.release();
@@ -245,7 +245,8 @@ pub async fn sc8815_task(
                 imbalance_pause_active: false,
             };
             sc8815_alerts_publisher.publish_immediate(alerts_payload);
-            embassy_time::Timer::after(embassy_time::Duration::from_millis(500)).await;
+            // Block until system becomes active again; no periodic timers while quiesced
+            crate::scheduler::wait_until_active().await;
             continue;
         }
         if let Some(measurements) = bq76920_measurements_subscriber.try_next_message_pure() {
@@ -334,7 +335,7 @@ pub async fn sc8815_task(
                 drop_streak = 0;
                 if ov_pause_secs == 0 {
                     ov_pause_secs = 180;
-                    warn!("crit_pause_start 180s");
+                    warn!("pause:ov 180s");
                 }
             } else {
                 // Maintain severe-imbalance pause state using spread; start by BalancingCvRequest.severe_imbalance
@@ -359,7 +360,7 @@ pub async fn sc8815_task(
                         }
                         if imbalance_pause_active && spread < 50 {
                             imbalance_pause_active = false;
-                            info!("imbalance_pause_done (Δcell<50mV)");
+                            info!("pause:imb done");
                         }
                     }
                 }
@@ -381,10 +382,7 @@ pub async fn sc8815_task(
                     && adapter_holdoff_secs == 0;
                 if pol_start_cond {
                     if !pol_start_latched {
-                        info!(
-                            "POL start: Vpack {}< {} mV",
-                            pack_voltage_mv, PACK_CHARGE_START_THRESHOLD_MV
-                        );
+                        info!("pol:start {}<{}mV", pack_voltage_mv, PACK_CHARGE_START_THRESHOLD_MV);
                         pol_start_latched = true;
                     }
                     if sc8815_session.is_none() {
@@ -422,7 +420,7 @@ pub async fn sc8815_task(
                         if let Some(sess) = sc8815_session.as_mut() {
                             sess.enable_power_stage();
                         }
-                        info!("SC gates: CE=LOW PSTOP=LOW (power stage enabled)");
+                        info!("sc:gates CE=L PSTOP=L");
                         charger_active = true;
                         // leaving pause state → clear last pause report
                         last_pause_report = None;
@@ -565,12 +563,12 @@ pub async fn sc8815_task(
 
                             if !charge_confirmed && confirm_streak >= CHARGE_CONFIRMATION_SAMPLES {
                                 charge_confirmed = true;
-                                info!("SC charge_confirmed ibat={}mA", ibat);
+                            info!("sc:chg_ok {}mA", ibat);
                             }
 
                             if charge_confirmed && drop_streak >= CHARGE_CONFIRMATION_SAMPLES {
                                 charge_confirmed = false;
-                                warn!("sc_charge_lost {}", ibat);
+                            warn!("sc:chg_lost {}", ibat);
                             }
                         } else {
                             confirm_streak = 0;
@@ -623,7 +621,7 @@ pub async fn sc8815_task(
         if ov_pause_secs > 0 {
             ov_pause_secs = ov_pause_secs.saturating_sub(1);
             if ov_pause_secs == 0 {
-                info!("ov_pause_done");
+                info!("pause:ov done");
             }
         }
         Timer::after(Duration::from_secs(1)).await;

@@ -161,7 +161,7 @@ async fn execute_smart_battery_balancing<'a>(
         } else {
             // No eligible local peak at global max; disable for now
             if active_cell.is_some() {
-                info!("No eligible local peak at max; disabling balancing");
+                debug!("bal:no-peak");
             }
             let _ = bq.set_cell_balancing(0).await;
             *active_cell = None;
@@ -180,7 +180,7 @@ async fn execute_smart_battery_balancing<'a>(
         }
     } else {
         if active_cell.is_some() {
-            info!("No measurements available, disabling balancing as a precaution");
+            debug!("bal:no-meas disable");
             let _ = bq.set_cell_balancing(0).await;
             *active_cell = None;
         }
@@ -226,7 +226,7 @@ pub async fn bq76920_task(
     mut sc8815_alerts_subscriber: Sc8815AlertsSubscriber<'static>,
     balancing_cv_publisher: BalancingCvRequestPublisher<'static>,
 ) {
-    info!("TEST_FORCE_BQ_FETS_OFF={}", TEST_FORCE_BQ_FETS_OFF);
+    debug!("test_fets_off={}", TEST_FORCE_BQ_FETS_OFF);
     // Initialize the BQ769x0 driver instance with CRC enabled and for 5 cells.
     // sense_resistor_m_ohm and ntc_params are now passed as arguments to this task.
     let mut bq: Bq769x0<
@@ -270,7 +270,7 @@ pub async fn bq76920_task(
     match bq.try_apply_config(&battery_config).await {
         Ok(_) => {
             if TEST_FORCE_BQ_FETS_OFF {
-                info!("TEST: Forcing BQ76920 FETs OFF after config (init phase)");
+                debug!("test:force_fets_off:init");
                 let _ = bq.disable_discharging().await;
                 let _ = bq.disable_charging().await;
             } else {
@@ -336,7 +336,8 @@ pub async fn bq76920_task(
                 let _ = bq.set_cell_balancing(0).await;
                 let _ = cell; // silence unused
             }
-            embassy_time::Timer::after(embassy_time::Duration::from_millis(500)).await;
+            // Block until system becomes active again; no periodic timers while quiesced
+            crate::scheduler::wait_until_active().await;
             continue;
         }
         // This task focuses on reading data from the BQ76920 itself.
@@ -386,11 +387,7 @@ pub async fn bq76920_task(
         }
 
         if cellbal1_register != last_cellbal_bits {
-            if balancing_count == 0 {
-                info!("BQ bal: none");
-            } else {
-                info!("BQ bal: cells={:?}", &balancing_cells[..balancing_count]);
-            }
+            if balancing_count == 0 { debug!("bal:none"); } else { debug!("bal:{:?}", &balancing_cells[..balancing_count]); }
             last_cellbal_bits = cellbal1_register;
         }
 
@@ -611,7 +608,7 @@ pub async fn bq76920_task(
                     if let Err(e_clear) = bq.clear_status_flags(flags_to_clear).await {
                         error!("Failed to clear BQ76920 status flags: {:?}", e_clear);
                     } else {
-                        info!("Cleared BQ76920 status flags: {:#010b}", flags_to_clear);
+                        debug!("bq:clr {:#010b}", flags_to_clear);
                     }
                 }
             }
@@ -652,19 +649,13 @@ pub async fn bq76920_task(
             charger_expected || charger_confirmed || ov_pause_active || imbalance_pause_active;
         let eval_period_secs: u32 = 1;
         if eval_period_secs != last_eval_period_secs {
-            info!(
-                "bal_eval: schedule period={}s (ac={} charging_phase={})",
-                eval_period_secs, adapter_present, charging_phase
-            );
+            info!("bal:per={}s ac={} chgph={}", eval_period_secs, adapter_present, charging_phase);
             last_eval_period_secs = eval_period_secs;
         }
 
         // Strict policy: if adapter is absent, balancing must not be active under any circumstance.
         if !adapter_present && last_cellbal_bits != 0 {
-            info!(
-                "adapter_absent_stop_balancing(strict) hw=0x{:02X}",
-                last_cellbal_bits
-            );
+            info!("bal:stop no-ac hw=0x{:02X}", last_cellbal_bits);
             let _ = bq.set_cell_balancing(0).await;
             active_balancing_cell = None;
             last_cellbal_bits = 0;
@@ -719,7 +710,7 @@ pub async fn bq76920_task(
             && !imbalance_pause_active
         {
             if !adapter_lost_logged {
-                info!("BQ warn: adapter_lost during balancing → stop balancing & withdraw CV");
+            debug!("bal:lost-ac stop & withdraw CV");
                 adapter_lost_logged = true;
             }
             let _ = bq.set_cell_balancing(0).await;
@@ -758,9 +749,7 @@ pub async fn bq76920_task(
             severe_imbalance: severe_imbalance_flag,
         });
 
-        if VERBOSE_BQ_LOG {
-            info!("BQ read: end");
-        }
+        if VERBOSE_BQ_LOG { debug!("bq:rd end"); }
 
         // Wait for a defined interval before the next cycle of readings.
         Timer::after(Duration::from_secs(1)).await;
@@ -773,7 +762,7 @@ pub async fn bq76920_task(
         // 当抑制计时刚好归零时，立刻执行一次快速评估，避免再等到下一周期
         if prev_holdoff > 0 && balance_retry_holdoff == 0 {
             if adapter_present && !TEST_FORCE_BQ_FETS_OFF {
-                info!("Balancing holdoff expired → immediate eval");
+                debug!("bal:holdoff");
                 execute_smart_battery_balancing(
                     &mut bq,
                     &latest_core_measurements,
