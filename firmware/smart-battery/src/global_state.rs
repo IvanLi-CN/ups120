@@ -7,10 +7,12 @@
 use defmt::*;
 use embassy_time::{Duration, Instant, Timer};
 
-use crate::data_types::{BalancingCvRequest, Bq76920Alerts, Sc8815Alerts, Sc8815Measurements};
+use crate::data_types::{
+    BalancingCvRequest, Bq76920Alerts, Bq76920Measurements, Sc8815Alerts, Sc8815Measurements,
+};
 use crate::shared::{
-    BalancingCvRequestSubscriber, Bq76920AlertsSubscriber, GlobalStatePublisher,
-    Sc8815AlertsSubscriber, Sc8815MeasurementsSubscriber,
+    BalancingCvRequestSubscriber, Bq76920AlertsSubscriber, Bq76920MeasurementsSubscriber,
+    GlobalStatePublisher, Sc8815AlertsSubscriber, Sc8815MeasurementsSubscriber,
 };
 use bq769x0_async_rs::registers::SysStatFlags;
 
@@ -65,6 +67,7 @@ pub async fn global_state_task(
     mut sc_meas_sub: Sc8815MeasurementsSubscriber<'static>,
     mut bq_alerts_sub: Bq76920AlertsSubscriber<'static>,
     mut bal_cv_sub: BalancingCvRequestSubscriber<'static>,
+    mut bq_meas_sub: Bq76920MeasurementsSubscriber<'static, 5>,
     state_pub: GlobalStatePublisher<'static>,
 ) {
     debug!("gs:start");
@@ -73,6 +76,7 @@ pub async fn global_state_task(
     let mut latest_sc_alerts: Option<Sc8815Alerts> = None;
     let mut latest_sc_meas: Option<Sc8815Measurements> = None;
     let mut latest_bq_alerts: Option<Bq76920Alerts> = None;
+    let mut latest_bq_meas: Option<Bq76920Measurements<5>> = None;
     let mut latest_bal: BalancingCvRequest = BalancingCvRequest::default();
 
     // Full-state hysteresis latches
@@ -93,6 +97,9 @@ pub async fn global_state_task(
         }
         if let Some(a) = bq_alerts_sub.try_next_message_pure() {
             latest_bq_alerts = Some(a);
+        }
+        if let Some(m) = bq_meas_sub.try_next_message_pure() {
+            latest_bq_meas = Some(m);
         }
         if let Some(b) = bal_cv_sub.try_next_message_pure() {
             latest_bal = b;
@@ -160,10 +167,16 @@ pub async fn global_state_task(
             full_exit_acc_ms = 0;
         }
 
-        // Preparing-to-charge: no AC but pack below start threshold, and not already full
+        // Preparing-to-charge: 无 AC 时若电压低于启动阈值则提示。
+        // 优先使用 BQ 测量（低功耗、始终在线），若无则退回 SC 测量。
         if !ac_present {
-            if let Some(meas) = latest_sc_meas.as_ref() {
-                let vbat_mv = meas.adc_measurements.vbat_mv as i32;
+            let mut vbat_mv_opt: Option<i32> = None;
+            if let Some(bq) = latest_bq_meas.as_ref() {
+                vbat_mv_opt = Some(bq.core_measurements.total_voltage_mv);
+            } else if let Some(sc) = latest_sc_meas.as_ref() {
+                vbat_mv_opt = Some(sc.adc_measurements.vbat_mv as i32);
+            }
+            if let Some(vbat_mv) = vbat_mv_opt {
                 preparing = vbat_mv < PACK_CHARGE_START_THRESHOLD_MV && !is_full_latched;
             }
         }

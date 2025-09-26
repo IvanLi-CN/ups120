@@ -203,12 +203,16 @@ async fn main(_spawner: Spawner) {
     let gs_bal_cv_sub = balancing_cv_chan
         .subscriber()
         .expect("Allocate BalancingCv subscriber for GS task");
+    let gs_bq_meas_sub = bq76920_meas_chan
+        .subscriber()
+        .expect("Allocate BQ76920 measurements subscriber for GS task");
     _spawner.spawn(
         global_state::global_state_task(
             gs_sc_alerts_sub,
             gs_sc_meas_sub,
             gs_bq_alerts_sub,
             gs_bal_cv_sub,
+            gs_bq_meas_sub,
             global_state_pub,
         )
         .expect("gs token"),
