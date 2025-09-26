@@ -9,7 +9,6 @@ mod sc8815_task;
 mod shared;
 mod i2c1_slave;
 mod scheduler;
-mod exti_bq_alert;
 mod sleep_manager;
 
 use bq769x0_async_rs::{BatteryConfig, Bq769x0, Enabled as BqCrcEnabled, ProtectionConfig};
@@ -279,10 +278,7 @@ async fn main(_spawner: Spawner) {
     _spawner
         .spawn(scheduler::power_scheduler_task(gs_sub_for_sched).expect("sched token"));
 
-    // Configure EXTI on PB1 (BQ ALERT) to wake CPU from SLEEP
-    let mut _bq_alert_exti = embassy_stm32::exti::ExtiInput::new(p.PB1, p.EXTI1, embassy_stm32::gpio::Pull::Down);
-    _spawner
-        .spawn(exti_bq_alert::bq_alert_task(_bq_alert_exti).expect("bq-alert token"));
+    // (Optional) EXTI for BQ ALERT can be enabled here if needed for additional wake sources.
 
     // Spawn I2C1 slave + snapshot mirror tasks for the external interface
     info!("I2C1 slave spawn issued");
@@ -292,13 +288,35 @@ async fn main(_spawner: Spawner) {
     _spawner
         .spawn(i2c1_slave::bq_meas_mirror_task(bq76920_meas_chan).expect("bq-mirror token"));
 
-    // Main loop: subscribe global-state and log immediate changes + 1s snapshots.
+    // Main loop: subscribe global-state and log immediate changes.
     let mut gs_sub_for_log = global_state_chan
         .subscriber()
         .expect("Allocate GlobalState subscriber for main logger");
     let mut last_seen: Option<crate::global_state::BatteryGlobalState> = None;
     let mut last_snap = embassy_time::Instant::now();
     loop {
+        // When AC is absent, block waiting for actual state changes (no periodic timers)
+        let ac = last_seen.map(|v| v.ac_present).unwrap_or(false);
+        if !ac {
+            let s = gs_sub_for_log.next_message_pure().await;
+            if last_seen.map(|v| v != s).unwrap_or(true) {
+                info!(
+                    "state_changed ac={} chg={} paused={} prep={} full={} bal={} batt_fault={} chg_fault={}",
+                    s.ac_present,
+                    s.charging,
+                    s.charging_paused,
+                    s.preparing,
+                    s.full,
+                    s.balancing_active,
+                    s.fault_battery,
+                    s.fault_charger
+                );
+                last_seen = Some(s);
+            }
+            continue;
+        }
+
+        // AC present: retain lightweight 10ms polling and 1s snapshot
         if let Some(s) = gs_sub_for_log.try_next_message_pure() {
             if last_seen.map(|v| v != s).unwrap_or(true) {
                 info!(
@@ -317,8 +335,8 @@ async fn main(_spawner: Spawner) {
         }
         let now = embassy_time::Instant::now();
         if now.duration_since(last_snap) >= Duration::from_secs(1) {
-            match last_seen {
-                Some(s) => info!(
+            if let Some(s) = last_seen {
+                info!(
                     "state_snap ac={} chg={} paused={} prep={} full={} bal={} batt_fault={} chg_fault={}",
                     s.ac_present,
                     s.charging,
@@ -328,8 +346,7 @@ async fn main(_spawner: Spawner) {
                     s.balancing_active,
                     s.fault_battery,
                     s.fault_charger
-                ),
-                None => info!("state_snap (no data yet)"),
+                );
             }
             last_snap = now;
         }
