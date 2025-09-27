@@ -12,16 +12,21 @@ use crate::sleep_manager::{self, BusyGuard};
 static QUIESCE: AtomicBool = AtomicBool::new(false);
 static NOTIFY: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
-pub fn is_quiesced() -> bool { QUIESCE.load(Ordering::Relaxed) }
-
-pub async fn wait_until_active() {
-    if !is_quiesced() { return; }
-    loop {
-        NOTIFY.wait().await;
-        if !is_quiesced() { return; }
-    }
+pub fn is_quiesced() -> bool {
+    QUIESCE.load(Ordering::Relaxed)
 }
 
+pub async fn wait_until_active() {
+    if !is_quiesced() {
+        return;
+    }
+    loop {
+        NOTIFY.wait().await;
+        if !is_quiesced() {
+            return;
+        }
+    }
+}
 
 #[embassy_executor::task]
 pub async fn power_scheduler_task(mut gs_sub: GlobalStateSubscriber<'static>) {

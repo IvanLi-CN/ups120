@@ -40,7 +40,11 @@ const BALANCE_SWITCH_DEADTIME_MS: u64 = 40;
 // Smart cell balancing logic based on charging status and voltage thresholds
 async fn execute_smart_battery_balancing<'a>(
     bq: &'a mut Bq769x0<
-        I2cDevice<'static, CriticalSectionRawMutex, I2c<'static, embassy_stm32::mode::Async, embassy_stm32::i2c::mode::Master>>,
+        I2cDevice<
+            'static,
+            CriticalSectionRawMutex,
+            I2c<'static, embassy_stm32::mode::Async, embassy_stm32::i2c::mode::Master>,
+        >,
         bq769x0_async_rs::Enabled,
         5,
     >,
@@ -87,7 +91,9 @@ async fn execute_smart_battery_balancing<'a>(
             }
         }
         if all_adjacent_within_margin {
-            if active_cell.is_some() { debug!("bal:stop adj<= {}mV", LOCAL_PEAK_MARGIN_MV); }
+            if active_cell.is_some() {
+                debug!("bal:stop adj<= {}mV", LOCAL_PEAK_MARGIN_MV);
+            }
             let _ = bq.set_cell_balancing(0).await;
             *active_cell = None;
             return;
@@ -121,10 +127,15 @@ async fn execute_smart_battery_balancing<'a>(
                 if let Some(prev) = *active_cell {
                     // Ensure single-cell-only: turn all off, wait deadtime, then enable new cell
                     let _ = bq.set_cell_balancing(0).await;
-                    debug!("bal~ {}ms {}>{}", BALANCE_SWITCH_DEADTIME_MS, prev+1, cell_idx+1);
+                    debug!(
+                        "bal~ {}ms {}>{}",
+                        BALANCE_SWITCH_DEADTIME_MS,
+                        prev + 1,
+                        cell_idx + 1
+                    );
                     Timer::after(Duration::from_millis(BALANCE_SWITCH_DEADTIME_MS)).await;
                 }
-                debug!("bal+ c{} {} d{}", cell_idx+1, v[cell_idx], spread);
+                debug!("bal+ c{} {} d{}", cell_idx + 1, v[cell_idx], spread);
             }
             if let Err(_e) = bq.set_cell_balancing(mask).await {
                 error!("bal:en!");
@@ -196,7 +207,11 @@ async fn execute_smart_battery_balancing<'a>(
 ///   The const generic `5` indicates the number of cells, matching the `N` for `Bq769x0`.
 #[embassy_executor::task]
 pub async fn bq76920_task(
-    i2c_bus: I2cDevice<'static, CriticalSectionRawMutex, I2c<'static, embassy_stm32::mode::Async, embassy_stm32::i2c::mode::Master>>,
+    i2c_bus: I2cDevice<
+        'static,
+        CriticalSectionRawMutex,
+        I2c<'static, embassy_stm32::mode::Async, embassy_stm32::i2c::mode::Master>,
+    >,
     address: u8,
     sense_resistor_m_ohm: u32, // Added: Sense resistor value in mOhms
     ntc_params: Option<NtcParameters>, // Added: NTC parameters
@@ -209,7 +224,11 @@ pub async fn bq76920_task(
     // Initialize the BQ769x0 driver instance with CRC enabled and for 5 cells.
     // sense_resistor_m_ohm and ntc_params are now passed as arguments to this task.
     let mut bq: Bq769x0<
-        I2cDevice<'static, CriticalSectionRawMutex, I2c<'static, embassy_stm32::mode::Async, embassy_stm32::i2c::mode::Master>>,
+        I2cDevice<
+            'static,
+            CriticalSectionRawMutex,
+            I2c<'static, embassy_stm32::mode::Async, embassy_stm32::i2c::mode::Master>,
+        >,
         bq769x0_async_rs::Enabled,
         5,
     > = Bq769x0::new(i2c_bus, address, sense_resistor_m_ohm, ntc_params);
@@ -258,8 +277,12 @@ pub async fn bq76920_task(
                 let _ = bq.enable_discharging().await;
             }
         }
-        Err(BQ769x0Error::ConfigVerificationFailed { .. }) => { error!("bq:cfg_verify"); }
-        Err(_e) => { error!("bq:cfg_apply"); }
+        Err(BQ769x0Error::ConfigVerificationFailed { .. }) => {
+            error!("bq:cfg_verify");
+        }
+        Err(_e) => {
+            error!("bq:cfg_apply");
+        }
     }
 
     // Runtime config (Bq76920RuntimeConfig) is no longer published from here,
@@ -307,7 +330,9 @@ pub async fn bq76920_task(
             let _ = bq.set_cell_balancing(0).await;
         }
 
-        if VERBOSE_BQ_LOG { debug!("bq:read"); }
+        if VERBOSE_BQ_LOG {
+            debug!("bq:read");
+        }
 
         // Read ADC calibration values (not used in current logging but kept for potential future use)
         let (_adc_gain_uv_per_lsb, _adc_offset_mv) = match bq.read_adc_calibration().await {
@@ -321,7 +346,12 @@ pub async fn bq76920_task(
 
         // Read and display cell balancing status
         let cellbal1_register = bq.read_register(Register::CELLBAL1).await.unwrap_or(0);
-        if VERBOSE_BQ_LOG { debug!("bal:stat 0b{:08b}(0x{:02X})", cellbal1_register, cellbal1_register); }
+        if VERBOSE_BQ_LOG {
+            debug!(
+                "bal:stat 0b{:08b}(0x{:02X})",
+                cellbal1_register, cellbal1_register
+            );
+        }
 
         // Display which cells are enabled for balancing
         let mut balancing_cells = [0u8; 5];
@@ -334,7 +364,11 @@ pub async fn bq76920_task(
         }
 
         if cellbal1_register != last_cellbal_bits {
-            if balancing_count == 0 { debug!("bal:none"); } else { debug!("bal:{:?}", &balancing_cells[..balancing_count]); }
+            if balancing_count == 0 {
+                debug!("bal:none");
+            } else {
+                debug!("bal:{:?}", &balancing_cells[..balancing_count]);
+            }
             last_cellbal_bits = cellbal1_register;
         }
 
@@ -346,18 +380,31 @@ pub async fn bq76920_task(
                 // Detailed BQ76920 measurements (optional verbose)
                 if VERBOSE_BQ_LOG {
                     debug!("cells:");
-                    for i in 0..5 { let v = core_meas.cell_voltages.voltages[i]; debug!("c{}={}mV", i+1, v); }
-                    debug!("pack={}mV cur={}mA", core_meas.total_voltage_mv, core_meas.current_ma);
-                    let ts1 = core_meas.temperatures.ts1; debug!("ts1={}c1e-2", ts1);
-                    if let Some(ts2) = core_meas.temperatures.ts2 { debug!("ts2={}c1e-2", ts2); }
-                    if let Some(ts3) = core_meas.temperatures.ts3 { debug!("ts3={}c1e-2", ts3); }
+                    for i in 0..5 {
+                        let v = core_meas.cell_voltages.voltages[i];
+                        debug!("c{}={}mV", i + 1, v);
+                    }
+                    debug!(
+                        "pack={}mV cur={}mA",
+                        core_meas.total_voltage_mv, core_meas.current_ma
+                    );
+                    let ts1 = core_meas.temperatures.ts1;
+                    debug!("ts1={}c1e-2", ts1);
+                    if let Some(ts2) = core_meas.temperatures.ts2 {
+                        debug!("ts2={}c1e-2", ts2);
+                    }
+                    if let Some(ts3) = core_meas.temperatures.ts3 {
+                        debug!("ts3={}c1e-2", ts3);
+                    }
                     debug!("sys=0x{:02X}", core_meas.system_status.0.bits());
-                    debug!("mos chg={} dsg={} cc={} oneshot={} dly={}",
+                    debug!(
+                        "mos chg={} dsg={} cc={} oneshot={} dly={}",
                         core_meas.mos_status.0.contains(SysCtrl2Flags::CHG_ON),
                         core_meas.mos_status.0.contains(SysCtrl2Flags::DSG_ON),
                         core_meas.mos_status.0.contains(SysCtrl2Flags::CC_EN),
                         core_meas.mos_status.0.contains(SysCtrl2Flags::CC_ONESHOT),
-                        core_meas.mos_status.0.contains(SysCtrl2Flags::DELAY_DIS));
+                        core_meas.mos_status.0.contains(SysCtrl2Flags::DELAY_DIS)
+                    );
                 }
 
                 // One-line snapshot (always enabled for quick diagnostics)
@@ -445,7 +492,10 @@ pub async fn bq76920_task(
                 let mut should_enable_discharge = protection_allows_discharge;
 
                 if pack_voltage_mv <= PACK_OUTPUT_CUTOFF_THRESHOLD_MV {
-                    debug!("dsg:off {}<={}", pack_voltage_mv, PACK_OUTPUT_CUTOFF_THRESHOLD_MV);
+                    debug!(
+                        "dsg:off {}<={}",
+                        pack_voltage_mv, PACK_OUTPUT_CUTOFF_THRESHOLD_MV
+                    );
                     should_enable_discharge = false;
                 }
 
@@ -572,7 +622,10 @@ pub async fn bq76920_task(
             charger_expected || charger_confirmed || ov_pause_active || imbalance_pause_active;
         let eval_period_secs: u32 = 1;
         if eval_period_secs != last_eval_period_secs {
-            debug!("bal:per={} ac={} chgph={}", eval_period_secs, adapter_present, charging_phase);
+            debug!(
+                "bal:per={} ac={} chgph={}",
+                eval_period_secs, adapter_present, charging_phase
+            );
             last_eval_period_secs = eval_period_secs;
         }
 
@@ -633,7 +686,7 @@ pub async fn bq76920_task(
             && !imbalance_pause_active
         {
             if !adapter_lost_logged {
-            debug!("bal:lost-ac stop & withdraw CV");
+                debug!("bal:lost-ac stop & withdraw CV");
                 adapter_lost_logged = true;
             }
             let _ = bq.set_cell_balancing(0).await;
@@ -672,7 +725,9 @@ pub async fn bq76920_task(
             severe_imbalance: severe_imbalance_flag,
         });
 
-        if VERBOSE_BQ_LOG { debug!("bq:rd end"); }
+        if VERBOSE_BQ_LOG {
+            debug!("bq:rd end");
+        }
 
         // Wait for a defined interval before the next cycle of readings.
         Timer::after(Duration::from_secs(1)).await;

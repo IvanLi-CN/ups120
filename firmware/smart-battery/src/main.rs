@@ -12,7 +12,7 @@ mod shared;
 mod sleep_manager;
 
 use bq769x0_async_rs::{BatteryConfig, Bq769x0, Enabled as BqCrcEnabled, ProtectionConfig};
-use defmt::{warn, info};
+use defmt::info;
 use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
 use embassy_executor::Spawner;
 use embassy_stm32::interrupt::typelevel::Interrupt as _;
@@ -26,6 +26,7 @@ use embassy_stm32::{
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex;
 use embassy_time::{Duration, Timer};
+use embassy_stm32::{exti::ExtiInput, gpio::Pull};
 use static_cell::StaticCell;
 
 // Fixed I2C address for BQ7692003PWR (7‑bit).
@@ -139,7 +140,7 @@ async fn main(_spawner: Spawner) {
             }
         }
         if let Some(ok) = ok_addr {
-            info!("bq:ok addr=0x{:02x}", ok);
+    info!("bq:0x{:02x}", ok);
             // Spawn the continuous BQ76920 task now that init succeeded.
             let i2c_dev_runtime = I2cDevice::new(i2c_bus);
             let sc8815_alerts_sub = _sc8815_alerts_chan
@@ -198,6 +199,11 @@ async fn main(_spawner: Spawner) {
         .expect("sc token"),
     );
 
+    // SC8815 INT: per README mapping PB2 = INNER_INT (EXTI2)
+    let sc_int = ExtiInput::new(p.PB2, p.EXTI2, Pull::Up);
+    _spawner
+        .spawn(sc8815_task::sc8815_irq_task(sc_int).expect("sc-int token"));
+
     // 启动 Global State 聚合任务
     let gs_sc_alerts_sub = _sc8815_alerts_chan
         .subscriber()
@@ -248,7 +254,7 @@ async fn main(_spawner: Spawner) {
     _spawner.spawn(i2c1_slave::slave_task(i2c1_dev).expect("slave token"));
     _spawner.spawn(i2c1_slave::sc_meas_mirror_task(sc8815_meas_chan).expect("sc-mirror token"));
     _spawner.spawn(i2c1_slave::bq_meas_mirror_task(bq76920_meas_chan).expect("bq-mirror token"));
-    _spawner.spawn(i2c1_slave::gs_mirror_task(global_state_chan).expect("gs-mirror token"));
+    // (omit gs_mirror_task to reduce flash)
 
     // Idle task: periodically yield; low-power executor controls STOP entry.
     loop {

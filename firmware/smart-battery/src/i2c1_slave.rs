@@ -4,13 +4,6 @@ use defmt::*;
 use embassy_stm32::i2c::{self, I2c};
 use embassy_stm32::mode::Blocking;
 
-// Build-id style静态标记（不影响功能，仅用于离线验证产物是否包含本文件的最新改动）
-#[used]
-static _BUILD_MARK_I2C1_SLAVE: &str = "I2C1/25-09";
-// Extra mark to help offline ELF verification when defmt strings are not discoverable via `strings`.
-// Kept in binary as bytes and referenced inside `slave_task`.
-#[used]
-static _SLAVE_TASK_LINK_MARK: &[u8] = b"I2C1L/25-09";
 
 use crate::shared::{Bq76920MeasurementsChannelType, Sc8815MeasurementsChannelType};
 
@@ -70,8 +63,7 @@ fn read_reg(addr: u8) -> u8 {
 /// I2C1 从机任务：按 TI/SMBus 风格实现逐字节 PEC（写侧校验，读侧交错返回）。
 #[embassy_executor::task]
 pub async fn slave_task(mut dev: I2c<'static, Blocking, i2c::mode::MultiMaster>) {
-    debug!("i2c1:slave 0x35");
-    let _ = core::hint::black_box(_SLAVE_TASK_LINK_MARK);
+    debug!("i2c1:slave");
     let mut rx = [0u8; 64];
     let mut tx = [0u8; 64];
 
@@ -84,7 +76,9 @@ pub async fn slave_task(mut dev: I2c<'static, Blocking, i2c::mode::MultiMaster>)
                     crate::sleep_manager::bump("i2c1-listen");
                     // 接收一帧写入
                     let n = dev.blocking_respond_to_write(&mut rx).unwrap_or(0);
-                    if n == 0 { continue; }
+                    if n == 0 {
+                        continue;
+                    }
                     // 解析：首字节为寄存器指针，后面交替 [DATA, CRC]
                     let mut idx = 0usize;
                     let mut ptr = rx[0];
@@ -132,15 +126,21 @@ pub async fn slave_task(mut dev: I2c<'static, Blocking, i2c::mode::MultiMaster>)
                     while k + 2 <= tx.len() {
                         let d = read_reg(p);
                         let mut c = 0u8;
-                        if first { c = crc8(c, addr_r); }
+                        if first {
+                            c = crc8(c, addr_r);
+                        }
                         c = crc8(c, d);
                         tx[k] = d;
                         tx[k + 1] = c;
                         p = p.wrapping_add(1);
-                        if first { first = false; }
+                        if first {
+                            first = false;
+                        }
                         k += 2;
                         // 为了避免过长帧，最多准备 32 数据（64字节交错）。
-                        if (k / 2) >= 32 { break; }
+                        if (k / 2) >= 32 {
+                            break;
+                        }
                     }
                     let _ = dev.blocking_respond_to_read(&tx[..k]);
                     REG_PTR.store(p, Ordering::Relaxed);
@@ -158,7 +158,7 @@ pub async fn sc_meas_mirror_task(ch: &'static Sc8815MeasurementsChannelType) {
         let m = sub.next_message_pure().await;
         VBAT_MV.store(m.adc_measurements.vbat_mv as u16, Ordering::Relaxed);
         IBAT_MA.store(m.adc_measurements.ibat_ma as i16, Ordering::Relaxed);
-        ADAPTER_PRESENT.store(m.adc_measurements.vbus_mv > 0, Ordering::Relaxed);
+        // ADAPTER_PRESENT 由全局状态镜像任务维护，避免在 SC 任务静默时误判
     }
 }
 
@@ -168,6 +168,9 @@ pub async fn bq_meas_mirror_task(ch: &'static Bq76920MeasurementsChannelType<5>)
     loop {
         let m = sub.next_message_pure().await;
         CELLS_PRESENT.store(5, Ordering::Relaxed);
-        VBAT_MV.store(m.core_measurements.total_voltage_mv as u16, Ordering::Relaxed);
+        VBAT_MV.store(
+            m.core_measurements.total_voltage_mv as u16,
+            Ordering::Relaxed,
+        );
     }
 }
