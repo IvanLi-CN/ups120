@@ -332,13 +332,13 @@ pub async fn sc8815_task(
                 drop_streak = 0;
             } else if pack_voltage_mv >= PACK_CHARGE_STOP_THRESHOLD_MV {
                 if latest_bal_req.require_cv {
-                    debug!(
-                        "cv_hold {}>={}",
+                    info!(
+                        "chg:gated_cv vb>stop {}>={}",
                         pack_voltage_mv, PACK_CHARGE_STOP_THRESHOLD_MV
                     );
                 } else {
-                    debug!(
-                        "pol:stop {}>={}",
+                    info!(
+                        "chg:stop vb>stop {}>={}",
                         pack_voltage_mv, PACK_CHARGE_STOP_THRESHOLD_MV
                     );
                     if sc8815_session.is_some() {
@@ -365,6 +365,8 @@ pub async fn sc8815_task(
                 if charger_active {
                     warn!("blocking_fault {}", pack_voltage_mv);
                 }
+                // 明确打印阻断充电的故障原因
+                warn!("chg:block fault flags=0x{:02x} vb={}mV", system_status_flags.bits(), pack_voltage_mv);
                 // For ANY BQ critical fault (OV/UV/SCD/OCD), gate power stage and keep session for timed recovery
                 if let Some(sess) = sc8815_session.as_mut() {
                     sess.disable_power_stage();
@@ -424,9 +426,15 @@ pub async fn sc8815_task(
                     && adapter_holdoff_secs == 0;
                 if pol_start_cond {
                     if !pol_start_latched {
-                        debug!(
-                            "pol+ {}<{}",
-                            pack_voltage_mv, PACK_CHARGE_START_THRESHOLD_MV
+                        // 在尝试建立会话前打印一次“前置检查结果”
+                        info!(
+                            "chg:precheck vb={}mV<th={}mV fault=0x{:02x} ov_pause={} imb_pause={} holdoff={}",
+                            pack_voltage_mv,
+                            PACK_CHARGE_START_THRESHOLD_MV,
+                            system_status_flags.bits(),
+                            ov_pause_secs > 0,
+                            imbalance_pause_active,
+                            adapter_holdoff_secs
                         );
                         pol_start_latched = true;
                     }
@@ -465,7 +473,7 @@ pub async fn sc8815_task(
                         if let Some(sess) = sc8815_session.as_mut() {
                             sess.enable_power_stage();
                         }
-                        debug!("sc:g LL");
+                        info!("chg:start vb={}mV", pack_voltage_mv);
                         charger_active = true;
                         // leaving pause state → clear last pause report
                         last_pause_report = None;
