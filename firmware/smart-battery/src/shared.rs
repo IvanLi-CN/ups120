@@ -59,7 +59,7 @@ static BQ76920_ALERTS_PUBSUB: StaticCell<
 
 // BQ76920 测量数据 PubSub
 const BQ76920_MEASUREMENTS_PUBSUB_DEPTH: usize = 4; // 消息队列深度
-const BQ76920_MEASUREMENTS_PUBSUB_READERS: usize = 2; // 消费者数量 (usb_task, bq25730_task)
+const BQ76920_MEASUREMENTS_PUBSUB_READERS: usize = 3; // 消费者数量 (sc8815_task + i2c1_slave + global_state)
 static BQ76920_MEASUREMENTS_PUBSUB: StaticCell<
     PubSubChannel<
         CriticalSectionRawMutex,
