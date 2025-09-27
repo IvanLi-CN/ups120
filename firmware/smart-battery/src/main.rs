@@ -12,7 +12,7 @@ mod shared;
 mod sleep_manager;
 
 use bq769x0_async_rs::{BatteryConfig, Bq769x0, Enabled as BqCrcEnabled, ProtectionConfig};
-use defmt::warn;
+use defmt::{warn, info};
 use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
 use embassy_executor::Spawner;
 use embassy_stm32::interrupt::typelevel::Interrupt as _;
@@ -139,6 +139,7 @@ async fn main(_spawner: Spawner) {
             }
         }
         if let Some(ok) = ok_addr {
+            info!("bq:ok addr=0x{:02x}", ok);
             // Spawn the continuous BQ76920 task now that init succeeded.
             let i2c_dev_runtime = I2cDevice::new(i2c_bus);
             let sc8815_alerts_sub = _sc8815_alerts_chan
@@ -247,6 +248,7 @@ async fn main(_spawner: Spawner) {
     _spawner.spawn(i2c1_slave::slave_task(i2c1_dev).expect("slave token"));
     _spawner.spawn(i2c1_slave::sc_meas_mirror_task(sc8815_meas_chan).expect("sc-mirror token"));
     _spawner.spawn(i2c1_slave::bq_meas_mirror_task(bq76920_meas_chan).expect("bq-mirror token"));
+    _spawner.spawn(i2c1_slave::gs_mirror_task(global_state_chan).expect("gs-mirror token"));
 
     // Idle task: periodically yield; low-power executor controls STOP entry.
     loop {
