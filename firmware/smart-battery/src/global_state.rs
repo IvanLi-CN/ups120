@@ -135,6 +135,16 @@ pub async fn global_state_task(
                     >= ((ITERM_MA as u32 * ITERM_EXIT_MULTIPLIER_X10 as u32 + 9) / 10) as u16;
                 let exit_by_voltage = vbat_mv < PACK_CHARGE_START_THRESHOLD_MV;
 
+                // 满电判据：SC EOC 或 BQ 迟滞（二者任一即可）
+                let sc_eoc = latest_sc_alerts
+                    .as_ref()
+                    .map(|a| a.device_status.eoc)
+                    .unwrap_or(false);
+                if sc_eoc {
+                    is_full_latched = true;
+                    full_exit_acc_ms = 0;
+                }
+
                 if !is_full_latched {
                     if enter_ok {
                         full_enter_acc_ms =
@@ -193,17 +203,7 @@ pub async fn global_state_task(
         };
 
         if first_pub || new_state != last_published {
-            info!(
-                "state: ac={} chg={} paused={} prep={} full={} bal={} batt_fault={} chg_fault={}",
-                new_state.ac_present,
-                new_state.charging,
-                new_state.charging_paused,
-                new_state.preparing,
-                new_state.full,
-                new_state.balancing_active,
-                new_state.fault_battery,
-                new_state.fault_charger
-            );
+            // snapshot omitted to save flash; state is visible via I2C + event logs
             state_pub.publish_immediate(new_state);
             last_published = new_state;
             first_pub = false;
