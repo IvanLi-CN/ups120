@@ -223,6 +223,7 @@ pub async fn sc8815_task(
     // Log de-noising latches
     let mut pol_start_latched: bool = false; // only log POL start on rising condition
     let mut last_pause_report: Option<(bool, bool)> = None; // (ov_pause_active, imbalance_pause_active)
+    let mut last_probe_ac: Option<bool> = None; // quiesce probe AC edge log
 
     loop {
         // 全局“静默”策略：当 AC 不在时，尽量停靠会话并降低采样频率，
@@ -247,20 +248,35 @@ pub async fn sc8815_task(
             drop_streak = 0;
 
             // 低频探测：尝试读取一次设备状态以判定适配器是否接入。
-            // 不进入完整会话，不开启 ADC，仅用已停靠的 I2C 进行寄存器访问。
+            // 不进入完整会话，不开启 ADC。为确保器件可响应 I2C，在探测窗口内短暂拉低 CE（启用芯片），
+            // 但保持 PSTOP=High（功率级关闭），探测后立即恢复 CE=High。
             let mut status_for_pub = SC8815Status::default();
+            // 瞬时上电芯片以便读状态
+            if let Some(pin) = ce_pin_slot.as_mut() { pin.set_low(); }
+            Timer::after(Duration::from_millis(20)).await;
             if let Some(dev) = parked_i2c_device.take() {
                 let mut probe = SC8815::new(dev, address);
                 match probe.get_device_status().await {
                     Ok(st) => {
                         status_for_pub = st;
+                        // Edge-log AC presence to INFO for visibility during idle
+                        if last_probe_ac.map(|v| v != st.ac_adapter_connected).unwrap_or(true) {
+                            info!("sc:probe ac={}", st.ac_adapter_connected);
+                            last_probe_ac = Some(st.ac_adapter_connected);
+                        }
                     }
                     Err(_e) => {
                         // 保持默认
+                        if last_probe_ac.map(|v| v != false).unwrap_or(true) {
+                            info!("sc:probe err");
+                            last_probe_ac = Some(false);
+                        }
                     }
                 }
                 parked_i2c_device = Some(probe.release());
             }
+            // 探测结束，关闭芯片以降功耗
+            if let Some(pin) = ce_pin_slot.as_mut() { pin.set_high(); }
 
             let alerts_payload = Sc8815Alerts {
                 device_status: status_for_pub,
