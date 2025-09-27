@@ -68,7 +68,7 @@ impl ScSession {
         Timer::after(Duration::from_millis(100)).await;
 
         let mut sc = SC8815::new(i2c, address);
-        debug!("sc:init");
+        // init
         if let Err(_e) = sc.init().await {
             error!("sc_init_err");
             let i2c_back = sc.release();
@@ -158,14 +158,7 @@ impl ScSession {
         }
 
         // Print compact configuration summary
-        debug!(
-            "sc:cfg v={} r1={} r2={} ib={} ibt={}",
-            device_config.power.vinreg_voltage_mv,
-            device_config.current_limits.rs1_mohm,
-            device_config.current_limits.rs2_mohm,
-            device_config.current_limits.ibus_limit_ma,
-            device_config.current_limits.ibat_limit_ma
-        );
+        // cfg summary
 
         Ok(Self {
             sc,
@@ -303,9 +296,7 @@ pub async fn sc8815_task(
                 confirm_streak = 0;
                 drop_streak = 0;
             } else if pack_voltage_mv >= PACK_CHARGE_STOP_THRESHOLD_MV {
-                if latest_bal_req.require_cv {
-                    info!("cv gate vb>{} {}", PACK_CHARGE_STOP_THRESHOLD_MV, pack_voltage_mv);
-                } else {
+                if !latest_bal_req.require_cv {
                     info!("stop vb>{} {}", PACK_CHARGE_STOP_THRESHOLD_MV, pack_voltage_mv);
                     if sc8815_session.is_some() {
                         if let Some(sess) = sc8815_session.take() {
@@ -370,7 +361,7 @@ pub async fn sc8815_task(
                         }
                         if imbalance_pause_active && spread < 50 {
                             imbalance_pause_active = false;
-                            debug!("pause:imb done");
+                            // imb pause done
                         }
                     }
                 }
@@ -391,13 +382,7 @@ pub async fn sc8815_task(
                     && !charger_active
                     && adapter_holdoff_secs == 0;
                 if pol_start_cond {
-                    if !pol_start_latched {
-                        // 在尝试建立会话前打印一次“前置检查结果”
-                        info!("pre vb<{} {} f=0x{:02x} ov={} imb={} ho={}",
-                            PACK_CHARGE_START_THRESHOLD_MV, pack_voltage_mv,
-                            system_status_flags.bits(), ov_pause_secs>0, imbalance_pause_active, adapter_holdoff_secs);
-                        pol_start_latched = true;
-                    }
+                    pol_start_latched = true;
                     if sc8815_session.is_none() {
                         if let Some(pin) = pstop_pin_slot.as_mut() {
                             pin.set_high();
@@ -471,20 +456,7 @@ pub async fn sc8815_task(
             match sc8815_session.as_mut() {
                 Some(sess) => match sess.sc.get_device_status().await {
                     Ok(status) => {
-                        let mut b: u8 = 0;
-                        if status.ac_adapter_connected {
-                            b |= 1 << 0;
-                        }
-                        if status.usb_load_detected {
-                            b |= 1 << 1;
-                        }
-                        if status.otp_fault {
-                            b |= 1 << 2;
-                        }
-                        if status.vbus_short_fault {
-                            b |= 1 << 3;
-                        }
-                        debug!("sc:st b=0x{:02x}", b);
+                        // status fetched
 
                         // Track adapter presence
                         if !status.ac_adapter_connected {
@@ -505,6 +477,23 @@ pub async fn sc8815_task(
                             continue;
                         } else {
                             _adapter_present = true;
+                        }
+
+                        // EOC: terminate charging session immediately per device indication
+                        if status.eoc {
+                            info!("eoc");
+                            if let Some(sess) = sc8815_session.take() {
+                                let (ce_back, pstop_back, i2c_back) = sess.end().await;
+                                ce_pin_slot = Some(ce_back);
+                                pstop_pin_slot = Some(pstop_back);
+                                parked_i2c_device = Some(i2c_back);
+                            }
+                            charger_active = false;
+                            charge_confirmed = false;
+                            confirm_streak = 0;
+                            drop_streak = 0;
+                            _latest_status_for_alerts = Some(status);
+                            continue;
                         }
 
                         if status.otp_fault || status.vbus_short_fault {
@@ -560,13 +549,7 @@ pub async fn sc8815_task(
                 Some(sess) => match sess.sc.get_adc_measurements().await {
                     Ok(measurements) => {
                         if ENABLE_SC8815_SNAP {
-                            debug!(
-                                "sc snap vbus={} vbat={} ibus={} ibat={}",
-                                measurements.vbus_mv,
-                                measurements.vbat_mv,
-                                measurements.ibus_ma,
-                                measurements.ibat_ma
-                            );
+                            // snap
                         }
 
                         if charger_active {
