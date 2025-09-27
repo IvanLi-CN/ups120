@@ -14,6 +14,8 @@ use crate::shared::{
     BalancingCvRequestSubscriber, Bq76920MeasurementsSubscriber, Sc8815AlertsPublisher,
     Sc8815MeasurementsPublisher,
 };
+use embassy_stm32::exti::ExtiInput;
+use portable_atomic::AtomicBool;
 
 pub const SC8815_DEFAULT_ADDRESS: u8 = sc8815::registers::constants::DEFAULT_ADDRESS;
 
@@ -40,6 +42,18 @@ struct ScSession {
     sc: SC8815<I2cDev>,
     ce_pin: Output<'static>,
     pstop_pin: Output<'static>,
+}
+
+// SC8815 INT → 事件通知（EXTI 边沿触发后唤醒本任务查询状态）
+static SC_INT_PENDING: AtomicBool = AtomicBool::new(false);
+
+#[embassy_executor::task]
+pub async fn sc8815_irq_task(mut int_pin: ExtiInput<'static>) {
+    loop {
+        int_pin.wait_for_falling_edge().await;
+        SC_INT_PENDING.store(true, portable_atomic::Ordering::Relaxed);
+        crate::sleep_manager::bump("sc-int");
+    }
 }
 
 impl ScSession {
@@ -223,11 +237,10 @@ pub async fn sc8815_task(
     // Log de-noising latches
     let mut pol_start_latched: bool = false; // only log POL start on rising condition
     let mut last_pause_report: Option<(bool, bool)> = None; // (ov_pause_active, imbalance_pause_active)
-    let mut last_probe_ac: Option<bool> = None; // quiesce probe AC edge log
+    // quiesce INT mode: no probe state needed
 
     loop {
-        // 全局“静默”策略：当 AC 不在时，尽量停靠会话并降低采样频率，
-        // 但仍以低频探测适配器插入，避免进入不可唤醒的死锁。
+        // 全局“静默”策略：当 AC 不在时，停靠会话并仅依赖 INT 事件，不再轮询。
         if crate::scheduler::is_quiesced() {
             if let Some(sess) = sc8815_session.take() {
                 let (ce_back, pstop_back, i2c_back) = sess.end().await;
@@ -239,56 +252,15 @@ pub async fn sc8815_task(
                     pin.set_high();
                 }
                 if let Some(pin) = ce_pin_slot.as_mut() {
-                    pin.set_high();
+                    pin.set_low(); // 芯片在线，以便产生 INT
                 }
             }
             charger_active = false;
             charge_confirmed = false;
             confirm_streak = 0;
             drop_streak = 0;
-
-            // 低频探测：尝试读取一次设备状态以判定适配器是否接入。
-            // 不进入完整会话，不开启 ADC。为确保器件可响应 I2C，在探测窗口内短暂拉低 CE（启用芯片），
-            // 但保持 PSTOP=High（功率级关闭），探测后立即恢复 CE=High。
-            let mut status_for_pub = SC8815Status::default();
-            // 瞬时上电芯片以便读状态
-            if let Some(pin) = ce_pin_slot.as_mut() { pin.set_low(); }
-            Timer::after(Duration::from_millis(20)).await;
-            if let Some(dev) = parked_i2c_device.take() {
-                let mut probe = SC8815::new(dev, address);
-                match probe.get_device_status().await {
-                    Ok(st) => {
-                        status_for_pub = st;
-                        // Edge-log AC presence to INFO for visibility during idle
-                        if last_probe_ac.map(|v| v != st.ac_adapter_connected).unwrap_or(true) {
-                            info!("sc:probe ac={}", st.ac_adapter_connected);
-                            last_probe_ac = Some(st.ac_adapter_connected);
-                        }
-                    }
-                    Err(_e) => {
-                        // 保持默认
-                        if last_probe_ac.map(|v| v != false).unwrap_or(true) {
-                            info!("sc:probe err");
-                            last_probe_ac = Some(false);
-                        }
-                    }
-                }
-                parked_i2c_device = Some(probe.release());
-            }
-            // 探测结束，关闭芯片以降功耗
-            if let Some(pin) = ce_pin_slot.as_mut() { pin.set_high(); }
-
-            let alerts_payload = Sc8815Alerts {
-                device_status: status_for_pub,
-                expected_charging: false,
-                charging_confirmed: false,
-                ov_pause_active: false,
-                imbalance_pause_active: false,
-            };
-            sc8815_alerts_publisher.publish_immediate(alerts_payload);
-
-            // 以较低频率轮询一次，留给全局状态聚合器时间吸收并唤醒调度器。
-            Timer::after(Duration::from_millis(250)).await;
+            // 短等待：允许由 IRQ 唤醒，无状态轮询
+            Timer::after(Duration::from_millis(100)).await;
             continue;
         }
         if let Some(measurements) = bq76920_measurements_subscriber.try_next_message_pure() {
@@ -332,15 +304,9 @@ pub async fn sc8815_task(
                 drop_streak = 0;
             } else if pack_voltage_mv >= PACK_CHARGE_STOP_THRESHOLD_MV {
                 if latest_bal_req.require_cv {
-                    info!(
-                        "chg:gated_cv vb>stop {}>={}",
-                        pack_voltage_mv, PACK_CHARGE_STOP_THRESHOLD_MV
-                    );
+                    info!("cv gate vb>{} {}", PACK_CHARGE_STOP_THRESHOLD_MV, pack_voltage_mv);
                 } else {
-                    info!(
-                        "chg:stop vb>stop {}>={}",
-                        pack_voltage_mv, PACK_CHARGE_STOP_THRESHOLD_MV
-                    );
+                    info!("stop vb>{} {}", PACK_CHARGE_STOP_THRESHOLD_MV, pack_voltage_mv);
                     if sc8815_session.is_some() {
                         if let Some(sess) = sc8815_session.take() {
                             let (ce_back, pstop_back, i2c_back) = sess.end().await;
@@ -365,8 +331,8 @@ pub async fn sc8815_task(
                 if charger_active {
                     warn!("blocking_fault {}", pack_voltage_mv);
                 }
-                // 明确打印阻断充电的故障原因
-                warn!("chg:block fault flags=0x{:02x} vb={}mV", system_status_flags.bits(), pack_voltage_mv);
+                // 打印阻断充电的故障原因
+                warn!("blk f=0x{:02x} vb={}", system_status_flags.bits(), pack_voltage_mv);
                 // For ANY BQ critical fault (OV/UV/SCD/OCD), gate power stage and keep session for timed recovery
                 if let Some(sess) = sc8815_session.as_mut() {
                     sess.disable_power_stage();
@@ -379,7 +345,7 @@ pub async fn sc8815_task(
                 drop_streak = 0;
                 if ov_pause_secs == 0 {
                     ov_pause_secs = 180;
-                    warn!("pause:ov 180s");
+                    // ov cooldown start
                 }
             } else {
                 // Maintain severe-imbalance pause state using spread; start by BalancingCvRequest.severe_imbalance
@@ -427,15 +393,9 @@ pub async fn sc8815_task(
                 if pol_start_cond {
                     if !pol_start_latched {
                         // 在尝试建立会话前打印一次“前置检查结果”
-                        info!(
-                            "chg:precheck vb={}mV<th={}mV fault=0x{:02x} ov_pause={} imb_pause={} holdoff={}",
-                            pack_voltage_mv,
-                            PACK_CHARGE_START_THRESHOLD_MV,
-                            system_status_flags.bits(),
-                            ov_pause_secs > 0,
-                            imbalance_pause_active,
-                            adapter_holdoff_secs
-                        );
+                        info!("pre vb<{} {} f=0x{:02x} ov={} imb={} ho={}",
+                            PACK_CHARGE_START_THRESHOLD_MV, pack_voltage_mv,
+                            system_status_flags.bits(), ov_pause_secs>0, imbalance_pause_active, adapter_holdoff_secs);
                         pol_start_latched = true;
                     }
                     if sc8815_session.is_none() {
@@ -473,7 +433,7 @@ pub async fn sc8815_task(
                         if let Some(sess) = sc8815_session.as_mut() {
                             sess.enable_power_stage();
                         }
-                        info!("chg:start vb={}mV", pack_voltage_mv);
+                        info!("start vb={}", pack_voltage_mv);
                         charger_active = true;
                         // leaving pause state → clear last pause report
                         last_pause_report = None;
@@ -494,7 +454,7 @@ pub async fn sc8815_task(
                             if imbalance_pause_active {
                                 b |= 1 << 2;
                             }
-                            debug!("sc:g b=0x{:02x}", b);
+                        let _ = b; // shrink log
                             last_pause_report = Some(pause_sig);
                         }
                         charger_active = false;
@@ -685,9 +645,9 @@ pub async fn sc8815_task(
         if ov_pause_secs > 0 {
             ov_pause_secs = ov_pause_secs.saturating_sub(1);
             if ov_pause_secs == 0 {
-                debug!("pause:ov done");
+                // ov cooldown done
             }
         }
-        Timer::after(Duration::from_secs(1)).await;
+        Timer::after(Duration::from_millis(100)).await;
     }
 }
