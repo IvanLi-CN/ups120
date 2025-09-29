@@ -35,6 +35,7 @@ pub struct BatteryGlobalState {
     pub balancing_active: bool, // HW balancing active (overlay indicator)
     pub fault_battery: bool, // BQ OV/UV/SCD/OCD
     pub fault_charger: bool, // SC8815 OTP/VBUS short
+    // Dropout flags are not part of compact state (LED derives locally when needed)
 }
 
 impl Default for BatteryGlobalState {

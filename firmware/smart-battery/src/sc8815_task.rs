@@ -231,6 +231,7 @@ pub async fn sc8815_task(
     let mut pol_start_latched: bool = false; // only log POL start on rising condition
     let mut last_pause_report: Option<(bool, bool)> = None; // (ov_pause_active, imbalance_pause_active)
     // quiesce INT mode: no probe state needed
+    // dropout counters omitted in this step to keep flash within limits
 
     loop {
         // 全局“静默”策略：当 AC 不在时，停靠会话并仅依赖 INT 事件，不再轮询。
@@ -457,6 +458,7 @@ pub async fn sc8815_task(
                 Some(sess) => match sess.sc.get_device_status().await {
                     Ok(status) => {
                         // status fetched
+                        // ok
 
                         // Track adapter presence
                         if !status.ac_adapter_connected {
@@ -497,7 +499,7 @@ pub async fn sc8815_task(
                         }
 
                         if status.otp_fault || status.vbus_short_fault {
-                            warn!(
+                            defmt::debug!(
                                 "sc:fault o={} v={}",
                                 status.otp_fault, status.vbus_short_fault
                             );
@@ -517,6 +519,7 @@ pub async fn sc8815_task(
                     }
                     Err(_e) => {
                         error!("sc:status!");
+                        // err
                         if let Some(sess) = sc8815_session.take() {
                             let (ce_back, pstop_back, i2c_back) = sess.end().await;
                             ce_pin_slot = Some(ce_back);
@@ -551,6 +554,7 @@ pub async fn sc8815_task(
                         if ENABLE_SC8815_SNAP {
                             // snap
                         }
+                        // ok
 
                         if charger_active {
                             let ibat = measurements.ibat_ma;
@@ -590,6 +594,7 @@ pub async fn sc8815_task(
                     }
                     Err(_e) => {
                         error!("sc_adc_read!");
+                        // err
                         charge_confirmed = false;
                         confirm_streak = 0;
                         drop_streak = 0;

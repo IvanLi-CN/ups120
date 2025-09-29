@@ -83,15 +83,21 @@ pub async fn leds_task(
     // Latest sources
     let mut gs: BatteryGlobalState = BatteryGlobalState::default();
     let mut bq: Option<crate::data_types::Bq76920Measurements<5>> = None;
+    let mut bq_dropout = true;
+    let mut last_bq_meas: Option<Instant> = None;
 
     loop {
+        let now = Instant::now();
         // Non-blocking drains
         if let Some(s) = gs_sub.try_next_message_pure() {
             gs = s;
         }
         if let Some(m) = bq_sub.try_next_message_pure() {
             bq = Some(m);
+            last_bq_meas = Some(now);
         }
+        // bq_dropout derived from measurement staleness (≥3 s w/o frames)
+        if let Some(t) = last_bq_meas { bq_dropout = now - t >= Duration::from_secs(3); }
 
         // Trigger async green pulse on I2C1 activity
         if crate::activity::I2C1_ACTIVITY_PULSE.load(core::sync::atomic::Ordering::Relaxed) {
@@ -99,7 +105,6 @@ pub async fn leds_task(
             green_pulse_until = Some(Instant::now() + Duration::from_millis(PULSE_W_MS as u64));
         }
 
-        let now = Instant::now();
         let p_red = (now - epoch_red).as_millis() as u32 % CYCLE_MS;
         let p_yellow = (now - epoch_yellow).as_millis() as u32 % CYCLE_MS;
         let p_green = (now - epoch_green).as_millis() as u32 % CYCLE_MS;
@@ -114,6 +119,7 @@ pub async fn leds_task(
         if gs.fault_battery {
             red.fault_blink = true;
         }
+        if bq_dropout { red.dropout_blink = true; }
         // Pulse: 1 = balancing active (from global state overlay)
         if gs.balancing_active { red.pulses = 1; }
 

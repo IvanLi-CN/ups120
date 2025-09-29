@@ -24,7 +24,6 @@ impl<const N: usize> Default for Bq76920Measurements<N> {
 
 /// BQ76920 安全告警信息
 #[derive(Debug, Copy, Clone, PartialEq)]
-
 pub struct Bq76920Alerts {
     pub system_status: SystemStatus,
 }

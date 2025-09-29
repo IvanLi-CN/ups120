@@ -88,7 +88,7 @@ async fn execute_smart_battery_balancing<'a>(
             }
         }
         if max_v == i32::MIN || min_v == i32::MAX {
-            warn!("No valid cell voltages available for balancing");
+            defmt::debug!("No valid cell voltages available for balancing");
             let _ = bq.set_cell_balancing(0).await;
             *active_cell = None;
             return;
@@ -160,10 +160,10 @@ async fn execute_smart_battery_balancing<'a>(
                 match bq.read_register(Register::CELLBAL1).await {
                     Ok(bits) => {
                         if (bits as u16 & mask) == 0 {
-                            warn!("bal:vr w={} r={}", mask, bits);
+                            defmt::debug!("bal:vr w={} r={}", mask, bits);
                         }
                     }
-                    Err(_e) => warn!("bal:vr err"),
+                    Err(_e) => defmt::debug!("bal:vr err"),
                 }
             }
         } else {
@@ -177,10 +177,10 @@ async fn execute_smart_battery_balancing<'a>(
             match bq.read_register(Register::CELLBAL1).await {
                 Ok(bits) => {
                     if bits != 0 {
-                        warn!("bal:vr0 r={}", bits);
+                        defmt::debug!("bal:vr0 r={}", bits);
                     }
                 }
-                Err(_e) => warn!("bal:vr rd!"),
+                Err(_e) => defmt::debug!("bal:vr rd!"),
             }
         }
     } else {
@@ -318,6 +318,7 @@ pub async fn bq76920_task(
     let mut balancing_needed_by_delta: bool = false;
     let mut prev_balancing_needed_by_delta: bool = false;
     let mut snap_tick: u32 = 0;
+    // Dropout counters omitted in this step to keep flash within limits
     let mut adapter_lost_logged: bool = false;
     // Fast-evaluation triggers tracking
     let mut prev_adapter_present: bool = false;
@@ -335,9 +336,7 @@ pub async fn bq76920_task(
                 match bq.read_all_measurements().await {
                     Ok(core_meas) => {
                         latest_core_measurements = Some(core_meas);
-                        let alerts = crate::data_types::Bq76920Alerts {
-                            system_status: core_meas.system_status,
-                        };
+                        let alerts = crate::data_types::Bq76920Alerts { system_status: core_meas.system_status };
                         bq76920_alerts_publisher.publish_immediate(alerts);
                         let meas_payload = crate::data_types::Bq76920Measurements {
                             core_measurements: core_meas,
@@ -349,7 +348,7 @@ pub async fn bq76920_task(
                         }
                     }
                     Err(_e) => {
-                        let alerts = crate::data_types::Bq76920Alerts::default();
+                        let alerts = crate::data_types::Bq76920Alerts { system_status: Default::default() };
                         bq76920_alerts_publisher.publish_immediate(alerts);
                     }
                 }
@@ -414,7 +413,7 @@ pub async fn bq76920_task(
         // Read all measurements from BQ76920. These are now in physical units.
         match bq.read_all_measurements().await {
             Ok(core_meas) => {
-                latest_core_measurements = Some(core_meas);
+                        latest_core_measurements = Some(core_meas);
 
                 // Detailed BQ76920 measurements (optional verbose)
                 if VERBOSE_BQ_LOG {
@@ -608,9 +607,7 @@ pub async fn bq76920_task(
                 }
 
                 // Publish BQ76920 alert information (derived from system status).
-                let alerts = crate::data_types::Bq76920Alerts {
-                    system_status: core_meas.system_status,
-                };
+                let alerts = crate::data_types::Bq76920Alerts { system_status: core_meas.system_status };
                 bq76920_alerts_publisher.publish_immediate(alerts);
 
                 // It's important to clear any set status flags after reading them,
@@ -628,7 +625,7 @@ pub async fn bq76920_task(
                 error!("bq:meas!");
                 latest_core_measurements = None;
                 // Optionally publish default/error state for alerts if needed
-                let alerts = crate::data_types::Bq76920Alerts::default();
+                let alerts = crate::data_types::Bq76920Alerts { system_status: Default::default() };
                 bq76920_alerts_publisher.publish_immediate(alerts);
             }
         }
@@ -670,7 +667,7 @@ pub async fn bq76920_task(
 
         // Strict policy: if adapter is absent, balancing must not be active under any circumstance.
         if !adapter_present && last_cellbal_bits != 0 {
-            warn!("bal:stop no-ac hw=0x{:02X}", last_cellbal_bits);
+            defmt::debug!("bal:stop no-ac hw=0x{:02X}", last_cellbal_bits);
             let _ = bq.set_cell_balancing(0).await;
             active_balancing_cell = None;
             last_cellbal_bits = 0;
