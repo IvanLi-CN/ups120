@@ -3,7 +3,7 @@
 
 mod bq76920_task;
 mod data_types;
-mod global_state;
+// mod global_state; // removed to save flash; LEDs derive state locally
 mod i2c1_slave;
 mod activity;
 mod failsafe;
@@ -123,8 +123,6 @@ async fn main(_spawner: Spawner) {
         bq76920_meas_chan,
         balancing_cv_pub,
         balancing_cv_chan,
-        global_state_pub,
-        global_state_chan,
     ) = shared::init_pubsubs();
 
     // Gate other tasks on successful BQ76920 initialization using fixed I2C address.
@@ -228,33 +226,7 @@ async fn main(_spawner: Spawner) {
     _spawner
         .spawn(bq76920_task::bq_alert_irq_task(bq_alert).expect("bq-int token"));
 
-    // 启动 Global State 聚合任务
-    let gs_sc_alerts_sub = _sc8815_alerts_chan
-        .subscriber()
-        .expect("Allocate SC8815 alerts subscriber for GS task");
-    let gs_sc_meas_sub = sc8815_meas_chan
-        .subscriber()
-        .expect("Allocate SC8815 measurements subscriber for GS task");
-    let gs_bq_alerts_sub = _bq76920_alerts_chan
-        .subscriber()
-        .expect("Allocate BQ76920 alerts subscriber for GS task");
-    let gs_bal_cv_sub = balancing_cv_chan
-        .subscriber()
-        .expect("Allocate BalancingCv subscriber for GS task");
-    let gs_bq_meas_sub = bq76920_meas_chan
-        .subscriber()
-        .expect("Allocate BQ76920 measurements subscriber for GS task");
-    _spawner.spawn(
-        global_state::global_state_task(
-            gs_sc_alerts_sub,
-            gs_sc_meas_sub,
-            gs_bq_alerts_sub,
-            gs_bal_cv_sub,
-            gs_bq_meas_sub,
-            global_state_pub,
-        )
-        .expect("gs token"),
-    );
+    // Global state aggregator removed; LEDs derive locally to save flash
 
     // 启动 4‑LED 状态任务（PA5=Red, PA6=Yellow, PA7=Green, PB0=Blue）
     let led_r = OutputOpenDrain::new(p.PA5, Level::High, Speed::Low);
