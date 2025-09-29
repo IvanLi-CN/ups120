@@ -1,5 +1,5 @@
 use bq769x0_async_rs::registers::SysStatFlags;
-use defmt::{debug, error, info, warn};
+use defmt::{debug, error};
 use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
 use embassy_stm32::{gpio::Output, i2c::I2c};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
@@ -234,6 +234,16 @@ pub async fn sc8815_task(
     // dropout counters omitted in this step to keep flash within limits
 
     loop {
+        // 全局 fail-safe：一旦请求，强制功率级停机（PSTOP=高），直到 BQ 成功通信后清除
+        if crate::failsafe::is_pstop_requested() {
+            if let Some(sess) = sc8815_session.as_mut() {
+                sess.disable_power_stage();
+            } else if let Some(pin) = pstop_pin_slot.as_mut() {
+                pin.set_high();
+            }
+            charger_active = false;
+            charge_confirmed = false;
+        }
         // 全局“静默”策略：当 AC 不在时，停靠会话并仅依赖 INT 事件，不再轮询。
         if crate::scheduler::is_quiesced() {
             if let Some(sess) = sc8815_session.take() {
@@ -458,6 +468,8 @@ pub async fn sc8815_task(
                 Some(sess) => match sess.sc.get_device_status().await {
                     Ok(status) => {
                         // status fetched
+                        let now_ms = embassy_time::Instant::now().as_millis() as u32;
+                        crate::failsafe::sc_heartbeat_update(now_ms);
                         // ok
 
                         // Track adapter presence
@@ -554,6 +566,8 @@ pub async fn sc8815_task(
                         if ENABLE_SC8815_SNAP {
                             // snap
                         }
+                        let now_ms = embassy_time::Instant::now().as_millis() as u32;
+                        crate::failsafe::sc_heartbeat_update(now_ms);
                         // ok
 
                         if charger_active {

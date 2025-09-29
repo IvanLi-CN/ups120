@@ -44,7 +44,7 @@ pub async fn ina226_task(
             power: power_mw_f64 as f32,
         };
         ina226_measurements_publisher.publish_immediate(ina226_measurements);
-        info!(
+        defmt::debug!(
             "INA226 Measurements: Voltage: {}mV, Current: {}mA, Power: {}mW",
             ina226_measurements.voltage, ina226_measurements.current, ina226_measurements.power
         );

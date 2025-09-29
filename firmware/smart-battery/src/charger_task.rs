@@ -25,8 +25,8 @@ pub async fn charger_task(
     let mut sc8815 = SC8815::new(i2c_bus, address);
 
     // Initialize the SC8815
-    if let Err(e) = sc8815.init().await {
-        error!("sc:init {:?}", e);
+    if let Err(_e) = sc8815.init().await {
+        error!("sc:init");
         return;
     }
 
@@ -53,30 +53,30 @@ pub async fn charger_task(
     config.use_ibus_for_charging = false; // Use IBAT (battery side) for charging current
 
     // Apply configuration
-    if let Err(e) = sc8815.configure_device(&config).await {
-        error!("sc:cfg {:?}", e);
+    if let Err(_e) = sc8815.configure_device(&config).await {
+        error!("sc:cfg");
         return;
     }
 
     // In external mode, manually set VBAT monitor ratio for typical battery voltages
     // Use 12.5x ratio for batteries >10.24V (most Li-ion applications)
-    if let Err(e) = sc8815.set_vbat_monitor_ratio(0).await {
-        error!("sc:vbat_ratio {:?}", e);
+    if let Err(_e) = sc8815.set_vbat_monitor_ratio(0).await {
+        error!("sc:vbat_ratio");
         return;
     }
 
     defmt::debug!("SC8815 OK");
 
     // Enable charging mode (disable OTG mode)
-    if let Err(e) = sc8815.set_otg_mode(false).await {
-        error!("sc:chg_mode {:?}", e);
+    if let Err(_e) = sc8815.set_otg_mode(false).await {
+        error!("sc:chg_mode");
         return;
     }
     defmt::debug!("Charging mode enabled successfully");
 
     // Enable ADC conversion
-    if let Err(e) = sc8815.set_adc_conversion(true).await {
-        error!("sc:adc {:?}", e);
+    if let Err(_e) = sc8815.set_adc_conversion(true).await {
+        error!("sc:adc");
     }
 
     // SC8815 state tracking
@@ -98,8 +98,8 @@ pub async fn charger_task(
                     measurements.ibat_ma);
                 Some(measurements)
             }
-            Err(e) => {
-                error!("sc:adc {:?}", e);
+            Err(_e) => {
+                error!("sc:adc");
                 sc8815_comm_failed = true; // Mark communication failure
                 None
             }
@@ -117,8 +117,8 @@ pub async fn charger_task(
                 }
                 Some(status)
             }
-            Err(e) => {
-                error!("sc:status {:?}", e);
+            Err(_e) => {
+                error!("sc:status");
                 sc8815_comm_failed = true; // Mark communication failure
                 None
             }

@@ -6,6 +6,7 @@ mod data_types;
 mod global_state;
 mod i2c1_slave;
 mod activity;
+mod failsafe;
 mod leds4_task;
 mod sc8815_task;
 mod scheduler;
@@ -13,7 +14,7 @@ mod shared;
 mod sleep_manager;
 
 use bq769x0_async_rs::{BatteryConfig, Bq769x0, Enabled as BqCrcEnabled, ProtectionConfig};
-use defmt::info;
+// no direct info! logs to减小尺寸
 use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
 use embassy_executor::Spawner;
 use embassy_stm32::interrupt::typelevel::Interrupt as _;

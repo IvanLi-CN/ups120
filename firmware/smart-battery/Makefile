@@ -33,8 +33,8 @@ PROBE := probe-rs
 
 # Default defmt log level for release builds; can be overridden by env.
 # Lowering the level trims compiled-in format strings and saves FLASH.
-# Default to 'info' per project policy; size stays within limits after log demotion.
-DEFMT_LOG ?= info
+# 为满足固件体积限制，默认降为 'warn'（如需详日志，可导出 DEFMT_LOG=info 再构建）。
+DEFMT_LOG ?= error
 
 .PHONY: all build run attach reset reset-attach clean info run-force
 

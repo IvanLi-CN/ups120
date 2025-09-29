@@ -85,6 +85,7 @@ pub async fn leds_task(
     let mut bq: Option<crate::data_types::Bq76920Measurements<5>> = None;
     let mut bq_dropout = true;
     let mut last_bq_meas: Option<Instant> = None;
+    let mut sc_dropout = true;
 
     loop {
         let now = Instant::now();
@@ -98,6 +99,8 @@ pub async fn leds_task(
         }
         // bq_dropout derived from measurement staleness (≥3 s w/o frames)
         if let Some(t) = last_bq_meas { bq_dropout = now - t >= Duration::from_secs(3); }
+        let last_ms = crate::failsafe::sc_last_ms();
+        sc_dropout = if last_ms == 0 { true } else { (now.as_millis() as u32).wrapping_sub(last_ms) >= 3000 };
 
         // Trigger async green pulse on I2C1 activity
         if crate::activity::I2C1_ACTIVITY_PULSE.load(core::sync::atomic::Ordering::Relaxed) {
@@ -127,6 +130,7 @@ pub async fn leds_task(
         let mut yellow = LedIntent::default();
         yellow.base_on = gs.charging; // charging → ON, otherwise OFF
         if gs.fault_charger { yellow.fault_blink = true; }
+        if sc_dropout { yellow.dropout_blink = true; }
         // 1-pulse when preparing (conditions met but AC absent)
         if gs.preparing { yellow.pulses = yellow.pulses.max(1); }
 

@@ -235,7 +235,7 @@ pub async fn bq76920_task(
     mut sc8815_alerts_subscriber: Sc8815AlertsSubscriber<'static>,
     balancing_cv_publisher: BalancingCvRequestPublisher<'static>,
 ) {
-    debug!("test_fets_off={}", TEST_FORCE_BQ_FETS_OFF);
+    // dbg: test_fets_off
     // Initialize the BQ769x0 driver instance with CRC enabled and for 5 cells.
     // sense_resistor_m_ohm and ntc_params are now passed as arguments to this task.
     let mut bq: Bq769x0<
@@ -318,6 +318,7 @@ pub async fn bq76920_task(
     let mut balancing_needed_by_delta: bool = false;
     let mut prev_balancing_needed_by_delta: bool = false;
     let mut snap_tick: u32 = 0;
+    let mut fail_streak: u8 = 0; // BQ 连续通信失败计数（最小实现）
     // Dropout counters omitted in this step to keep flash within limits
     let mut adapter_lost_logged: bool = false;
     // Fast-evaluation triggers tracking
@@ -336,6 +337,9 @@ pub async fn bq76920_task(
                 match bq.read_all_measurements().await {
                     Ok(core_meas) => {
                         latest_core_measurements = Some(core_meas);
+                        // 成功则清空 fail-safe
+                        fail_streak = 0;
+                        crate::failsafe::clear_pstop();
                         let alerts = crate::data_types::Bq76920Alerts { system_status: core_meas.system_status };
                         bq76920_alerts_publisher.publish_immediate(alerts);
                         let meas_payload = crate::data_types::Bq76920Measurements {
@@ -348,6 +352,11 @@ pub async fn bq76920_task(
                         }
                     }
                     Err(_e) => {
+                        // 失败计数，达到阈值后提出 fail-safe 请求
+                        fail_streak = fail_streak.saturating_add(1);
+                        if fail_streak >= 3 {
+                            crate::failsafe::request_pstop();
+                        }
                         let alerts = crate::data_types::Bq76920Alerts { system_status: Default::default() };
                         bq76920_alerts_publisher.publish_immediate(alerts);
                     }
@@ -368,9 +377,7 @@ pub async fn bq76920_task(
             let _ = bq.set_cell_balancing(0).await;
         }
 
-        if VERBOSE_BQ_LOG {
-            debug!("bq:read");
-        }
+        // dbg: read begin
 
         // Read ADC calibration values (not used in current logging but kept for potential future use)
         let (_adc_gain_uv_per_lsb, _adc_offset_mv) = match bq.read_adc_calibration().await {
@@ -413,37 +420,12 @@ pub async fn bq76920_task(
         // Read all measurements from BQ76920. These are now in physical units.
         match bq.read_all_measurements().await {
             Ok(core_meas) => {
-                        latest_core_measurements = Some(core_meas);
+                latest_core_measurements = Some(core_meas);
+                fail_streak = 0;
+                crate::failsafe::clear_pstop();
 
                 // Detailed BQ76920 measurements (optional verbose)
-                if VERBOSE_BQ_LOG {
-                    debug!("cells:");
-                    for i in 0..5 {
-                        let v = core_meas.cell_voltages.voltages[i];
-                        debug!("c{}={}mV", i + 1, v);
-                    }
-                    debug!(
-                        "pack={}mV cur={}mA",
-                        core_meas.total_voltage_mv, core_meas.current_ma
-                    );
-                    let ts1 = core_meas.temperatures.ts1;
-                    debug!("ts1={}c1e-2", ts1);
-                    if let Some(ts2) = core_meas.temperatures.ts2 {
-                        debug!("ts2={}c1e-2", ts2);
-                    }
-                    if let Some(ts3) = core_meas.temperatures.ts3 {
-                        debug!("ts3={}c1e-2", ts3);
-                    }
-                    debug!("sys=0x{:02X}", core_meas.system_status.0.bits());
-                    debug!(
-                        "mos chg={} dsg={} cc={} oneshot={} dly={}",
-                        core_meas.mos_status.0.contains(SysCtrl2Flags::CHG_ON),
-                        core_meas.mos_status.0.contains(SysCtrl2Flags::DSG_ON),
-                        core_meas.mos_status.0.contains(SysCtrl2Flags::CC_EN),
-                        core_meas.mos_status.0.contains(SysCtrl2Flags::CC_ONESHOT),
-                        core_meas.mos_status.0.contains(SysCtrl2Flags::DELAY_DIS)
-                    );
-                }
+                // dbg: verbose block removed to save flash
 
                 // One-line snapshot (always enabled for quick diagnostics)
                 if SNAP_BQ_EVERY_SEC > 0 && (snap_tick % SNAP_BQ_EVERY_SEC == 0) {
@@ -474,49 +456,7 @@ pub async fn bq76920_task(
                             }
                         }
                     }
-                    // Build a human-readable fault list
-                    let mut faults_str: heapless::String<24> = heapless::String::new();
-                    if faults == 0 {
-                        let _ = core::fmt::Write::write_str(&mut faults_str, "none");
-                    } else {
-                        let mut first = true;
-                        let append = |s: &str, out: &mut heapless::String<24>, first: &mut bool| {
-                            if !*first {
-                                let _ = core::fmt::Write::write_str(out, "|");
-                            }
-                            let _ = core::fmt::Write::write_str(out, s);
-                            *first = false;
-                        };
-                        if (faults & SysStatFlags::UV.bits()) != 0 {
-                            append("UV", &mut faults_str, &mut first);
-                        }
-                        if (faults & SysStatFlags::OV.bits()) != 0 {
-                            append("OV", &mut faults_str, &mut first);
-                        }
-                        if (faults & SysStatFlags::OCD.bits()) != 0 {
-                            append("OCD", &mut faults_str, &mut first);
-                        }
-                        if (faults & SysStatFlags::SCD.bits()) != 0 {
-                            append("SCD", &mut faults_str, &mut first);
-                        }
-                    }
-                    debug!(
-                        "BQ snap: pack={}mV curr={}mA ts1={}.{}C chg={} dsg={} faults=0x{:02X}({}) bal_cell={} cells=[{},{},{},{},{}]mV",
-                        core_meas.total_voltage_mv,
-                        core_meas.current_ma,
-                        ts1_i,
-                        ts1_f,
-                        chg_on,
-                        dsg_on,
-                        faults,
-                        faults_str.as_str(),
-                        bal_cell_num,
-                        cells[0],
-                        cells[1],
-                        cells[2],
-                        cells[3],
-                        cells[4]
-                    );
+                    // dbg: compact snapshot removed to save flash
                 }
 
                 // Evaluate pack-level conditions
@@ -614,16 +554,18 @@ pub async fn bq76920_task(
                 // so that new events can be detected. Writing '1' to a bit clears it.
                 let flags_to_clear = core_meas.system_status.0.bits();
                 if flags_to_clear != 0 {
-                    if let Err(e_clear) = bq.clear_status_flags(flags_to_clear).await {
-                        error!("bq:clr_err {:?}", e_clear);
-                    } else {
-                        debug!("bq:clr {:#010b}", flags_to_clear);
-                    }
+                    if let Err(_e_clear) = bq.clear_status_flags(flags_to_clear).await {
+                        error!("bq:clr_err");
+                    } else { /* dbg clr */ }
                 }
             }
             Err(_e) => {
                 error!("bq:meas!");
                 latest_core_measurements = None;
+                fail_streak = fail_streak.saturating_add(1);
+                if fail_streak >= 3 {
+                    crate::failsafe::request_pstop();
+                }
                 // Optionally publish default/error state for alerts if needed
                 let alerts = crate::data_types::Bq76920Alerts { system_status: Default::default() };
                 bq76920_alerts_publisher.publish_immediate(alerts);
@@ -761,9 +703,7 @@ pub async fn bq76920_task(
             severe_imbalance: severe_imbalance_flag,
         });
 
-        if VERBOSE_BQ_LOG {
-            debug!("bq:rd end");
-        }
+        // dbg: read end
 
         // Wait for a defined interval before the next cycle of readings.
         Timer::after(Duration::from_secs(1)).await;
