@@ -307,6 +307,7 @@ pub async fn bq76920_task(
 
     // Main loop for continuous data acquisition and publishing.
     let mut balance_timer_counter: u32 = 0; // Counter for battery balancing frequency
+    let mut cell_sample_elapsed: u32 = 0;   // Cell measurement scheduler (seconds)
     let mut active_balancing_cell: Option<usize> = None;
     let mut adapter_present: bool = false;
     let mut charger_expected: bool = false;
@@ -377,6 +378,15 @@ pub async fn bq76920_task(
             let _ = bq.set_cell_balancing(0).await;
         }
 
+        // 采样调度：均衡期间 1s，其余按阶段 30/60s；ALERT 立即采样
+        let hw_balancing_active_now = last_cellbal_bits != 0 || active_balancing_cell.is_some() || balancing_needed_by_delta;
+        let charging_phase = charger_expected || charger_confirmed || ov_pause_active || imbalance_pause_active;
+        let period_secs: u32 = if hw_balancing_active_now { 1 } else if charging_phase { 30 } else { 60 };
+        let mut sample_due = cell_sample_elapsed >= period_secs;
+        let alert_due_now = BQ_ALERT_PENDING.swap(false, portable_atomic::Ordering::Relaxed);
+        if alert_due_now { sample_due = true; }
+
+        if sample_due {
         // dbg: read begin
 
         // Read ADC calibration values (not used in current logging but kept for potential future use)
@@ -574,16 +584,18 @@ pub async fn bq76920_task(
 
         // last_cellbal_bits already updated earlier on change; keep it as snapshot
 
-        // (spread re-evaluated earlier within the OK-measurements branch)
-
-        // Construct the BQ76920 measurements payload for the main `AllMeasurements` publisher.
-        // If read_all_measurements failed, use default values.
+        // 发布测量（即便失败也发布默认值，便于外设镜像）
         let bq76920_measurements_payload_for_main_pub = crate::data_types::Bq76920Measurements {
             core_measurements: latest_core_measurements.unwrap_or_default(),
         };
-
-        // Publish the collected BQ76920 measurements (which are now wrapped in the main project's type).
         bq76920_measurements_publisher.publish_immediate(bq76920_measurements_payload_for_main_pub);
+
+        cell_sample_elapsed = 0;
+        } // end sample_due
+
+        // (spread re-evaluated earlier within the OK-measurements branch)
+
+        // （按需）其余逻辑基于最新一次有效测量
 
         // Pull latest charger/adapter alerts
         if let Some(sc_alerts) = sc8815_alerts_subscriber.try_next_message_pure() {
@@ -708,6 +720,7 @@ pub async fn bq76920_task(
         // Wait for a defined interval before the next cycle of readings.
         Timer::after(Duration::from_secs(1)).await;
         balance_timer_counter += 1;
+        cell_sample_elapsed = cell_sample_elapsed.saturating_add(1);
         snap_tick = snap_tick.wrapping_add(1);
         let prev_holdoff = balance_retry_holdoff;
         if balance_retry_holdoff > 0 {
