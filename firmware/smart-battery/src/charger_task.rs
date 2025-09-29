@@ -65,14 +65,14 @@ pub async fn charger_task(
         return;
     }
 
-    info!("SC8815 OK");
+    defmt::debug!("SC8815 OK");
 
     // Enable charging mode (disable OTG mode)
     if let Err(e) = sc8815.set_otg_mode(false).await {
         error!("sc:chg_mode {:?}", e);
         return;
     }
-    info!("Charging mode enabled successfully");
+    defmt::debug!("Charging mode enabled successfully");
 
     // Enable ADC conversion
     if let Err(e) = sc8815.set_adc_conversion(true).await {

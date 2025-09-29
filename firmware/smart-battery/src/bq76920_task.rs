@@ -5,6 +5,8 @@ use embassy_time::{Duration, Timer};
 
 use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
 use embassy_stm32::i2c::I2c;
+use embassy_stm32::exti::ExtiInput;
+use portable_atomic::AtomicBool;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 
 use bq769x0_async_rs::ProtectionConfig;
@@ -36,6 +38,19 @@ const SNAP_BQ_EVERY_SEC: u32 = 0; // disable one-line snapshot
 const TEST_FORCE_BQ_FETS_OFF: bool = false;
 // Interlock deadtime when switching balancing target cells (safety)
 const BALANCE_SWITCH_DEADTIME_MS: u64 = 40;
+
+// Wake-on-ALERT pending flag for BQ (set by EXTI task)
+static BQ_ALERT_PENDING: AtomicBool = AtomicBool::new(false);
+
+#[embassy_executor::task]
+pub async fn bq_alert_irq_task(mut int_pin: ExtiInput<'static>) {
+    loop {
+        // ALERT is active-high per datasheet: trigger on rising edges.
+        int_pin.wait_for_rising_edge().await;
+        BQ_ALERT_PENDING.store(true, portable_atomic::Ordering::Relaxed);
+        crate::sleep_manager::bump("bq-int");
+    }
+}
 
 // Smart cell balancing logic based on charging status and voltage thresholds
 async fn execute_smart_battery_balancing<'a>(
@@ -239,6 +254,8 @@ pub async fn bq76920_task(
         bq769x0_async_rs::data_types::Bq76920Measurements<5>,
     > = None;
 
+    // use top-level BQ_ALERT_PENDING (set by IRQ task)
+
     // --- BQ76920 Initialization Sequence ---
 
     // Note: Waking the BQ76920 from SHIP mode (if it was in that mode)
@@ -309,13 +326,35 @@ pub async fn bq76920_task(
 
     loop {
         if crate::scheduler::is_quiesced() {
-            // Minimal maintenance: ensure balancing off and avoid polling.
-            if let Some(cell) = active_balancing_cell.take() {
+            // Minimal maintenance: ensure balancing off
+            if let Some(_cell) = active_balancing_cell.take() {
                 let _ = bq.set_cell_balancing(0).await;
-                let _ = cell; // silence unused
             }
-            // Block until system becomes active again; no periodic timers while quiesced
-            crate::scheduler::wait_until_active().await;
+            // Wake-on-ALERT: if IRQ flagged, do a quick status/measurements read and publish
+            if BQ_ALERT_PENDING.swap(false, portable_atomic::Ordering::Relaxed) {
+                match bq.read_all_measurements().await {
+                    Ok(core_meas) => {
+                        latest_core_measurements = Some(core_meas);
+                        let alerts = crate::data_types::Bq76920Alerts {
+                            system_status: core_meas.system_status,
+                        };
+                        bq76920_alerts_publisher.publish_immediate(alerts);
+                        let meas_payload = crate::data_types::Bq76920Measurements {
+                            core_measurements: core_meas,
+                        };
+                        bq76920_measurements_publisher.publish_immediate(meas_payload);
+                        let flags_to_clear = core_meas.system_status.0.bits();
+                        if flags_to_clear != 0 {
+                            let _ = bq.clear_status_flags(flags_to_clear).await;
+                        }
+                    }
+                    Err(_e) => {
+                        let alerts = crate::data_types::Bq76920Alerts::default();
+                        bq76920_alerts_publisher.publish_immediate(alerts);
+                    }
+                }
+            }
+            embassy_time::Timer::after(embassy_time::Duration::from_millis(100)).await;
             continue;
         }
         // This task focuses on reading data from the BQ76920 itself.
@@ -462,7 +501,7 @@ pub async fn bq76920_task(
                             append("SCD", &mut faults_str, &mut first);
                         }
                     }
-                    info!(
+                    debug!(
                         "BQ snap: pack={}mV curr={}mA ts1={}.{}C chg={} dsg={} faults=0x{:02X}({}) bal_cell={} cells=[{},{},{},{},{}]mV",
                         core_meas.total_voltage_mv,
                         core_meas.current_ma,
@@ -535,7 +574,7 @@ pub async fn bq76920_task(
                             balancing_needed_by_delta = true;
                         }
                         if balancing_needed_by_delta != prev_balancing_needed_by_delta {
-                            info!("bal:e s={} n={}", spread, balancing_needed_by_delta);
+                            debug!("bal:e s={} n={}", spread, balancing_needed_by_delta);
                             prev_balancing_needed_by_delta = balancing_needed_by_delta;
                         }
                     }
@@ -559,7 +598,7 @@ pub async fn bq76920_task(
 
                 if TEST_FORCE_BQ_FETS_OFF {
                     let _ = bq.disable_charging().await;
-                    info!("TEST: Forcing BQ76920 CHG/DSG OFF (runtime)");
+                    debug!("TEST: Forcing BQ76920 CHG/DSG OFF (runtime)");
                 } else {
                     if should_enable_charging {
                         let _ = bq.enable_charging().await;

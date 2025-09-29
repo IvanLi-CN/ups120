@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 authors = ["Ivan Li<ivanli2048@gmail.com>"]
 
+
 [dependencies]
 embassy-stm32 = { path = "../../embassy/embassy-stm32", features = [
   "defmt",

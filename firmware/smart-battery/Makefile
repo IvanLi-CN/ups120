@@ -31,6 +31,11 @@ CARGO_TARGET_FLAGS := --target $(TARGET_TRIPLE)
 CARGO := cargo
 PROBE := probe-rs
 
+# Default defmt log level for release builds; can be overridden by env.
+# Lowering the level trims compiled-in format strings and saves FLASH.
+# Default to 'info' per project policy; size stays within limits after log demotion.
+DEFMT_LOG ?= info
+
 .PHONY: all build run attach reset reset-attach clean info run-force
 
 all: build
@@ -38,7 +43,7 @@ all: build
 # Build release firmware every time (do not rely on ELF timestamp)
 build:
 	@echo "[build] crate=$(CRATE_DIR) target=$(TARGET_TRIPLE)"
-	CARGO_TARGET_DIR=$(TARGET_DIR) $(CARGO) build --release $(CARGO_TARGET_FLAGS) --manifest-path $(CRATE_DIR)/Cargo.toml
+	DEFMT_LOG=$(DEFMT_LOG) CARGO_TARGET_DIR=$(TARGET_DIR) $(CARGO) build --release $(CARGO_TARGET_FLAGS) --manifest-path $(CRATE_DIR)/Cargo.toml
 	@echo "[build] ELF=$(ELF)"; \
 	if [ -f "$(ELF)" ]; then \
 	  stat_cmd=$$(command -v gstat || command -v stat); \
@@ -52,7 +57,7 @@ build:
 
 # Flash and run (prints defmt logs via probe-rs)
 run:
-	CARGO_TARGET_DIR=$(TARGET_DIR) $(CARGO) run --release $(CARGO_TARGET_FLAGS) --manifest-path $(CRATE_DIR)/Cargo.toml
+	DEFMT_LOG=$(DEFMT_LOG) CARGO_TARGET_DIR=$(TARGET_DIR) $(CARGO) run --release $(CARGO_TARGET_FLAGS) --manifest-path $(CRATE_DIR)/Cargo.toml
 
 # Force rebuild before flashing (useful when cache is suspicious)
 run-force: clean run

@@ -42,7 +42,7 @@ pub fn hold(_who: &str) -> BusyGuard {
     }
     let was = WAKE_LATCH.swap(true, portable_atomic::Ordering::Relaxed);
     if !was && !WAKE_CAUSE_PRINTED.swap(true, portable_atomic::Ordering::Relaxed) {
-        info!("wake: cause={}()", _who);
+        debug!("wake: cause={}()", _who);
     }
     NOTIFY.signal(());
     BusyGuard::new()
@@ -57,7 +57,7 @@ pub fn bump(_who: &str) {
 
 #[embassy_executor::task]
 pub async fn sleep_task() {
-    warn!("sleep: start (mode=SLEEP)");
+    debug!("sleep: start (mode=SLEEP)");
     bump("start");
     let n = &NOTIFY;
     loop {
@@ -78,7 +78,7 @@ pub async fn sleep_task() {
         }
         if elapsed >= SLEEP_REENTER_IDLE_MS {
             if !SLEEPING.swap(true, portable_atomic::Ordering::Relaxed) {
-                warn!("sleep: enter (idle_ms={})", elapsed);
+                debug!("sleep: enter (idle_ms={})", elapsed);
                 WAKE_LATCH.store(false, portable_atomic::Ordering::Relaxed);
                 WAKE_CAUSE_PRINTED.store(false, portable_atomic::Ordering::Relaxed);
             }
@@ -92,7 +92,7 @@ pub async fn sleep_task() {
                 if SLEEPING.swap(false, portable_atomic::Ordering::Relaxed) {
                     let now2 = Instant::now().as_millis();
                     let idle_ms = now2.saturating_sub(unsafe { LAST_ACTIVITY_MS });
-                    warn!(
+                    debug!(
                         "sleep: exit (active_count={} idle_ms={} latched={})",
                         active, idle_ms, latched
                     );

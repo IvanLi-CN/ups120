@@ -129,31 +129,31 @@ impl ScSession {
         if ENABLE_SC8815_DIAG {
             use sc8815::registers::Register as R;
             if let Ok(vbat_set) = sc.read_register(R::VbatSet).await {
-                info!("SC cfg: VbatSet=0x{:02X}", vbat_set);
+                debug!("SC cfg: VbatSet=0x{:02X}", vbat_set);
             }
             if let Ok(ratio) = sc.read_register(R::Ratio).await {
-                info!("SC cfg: Ratio=0x{:02X}", ratio);
+                debug!("SC cfg: Ratio=0x{:02X}", ratio);
             }
             if let Ok((vbat_hi, vbat_lo)) = sc.read_consecutive_registers(R::VbatFbValue).await {
-                info!("SC adc: VBAT_FB hi=0x{:02X} lo=0x{:02X}", vbat_hi, vbat_lo);
+                debug!("SC adc: VBAT_FB hi=0x{:02X} lo=0x{:02X}", vbat_hi, vbat_lo);
             }
             if let Ok(vinreg) = sc.read_register(R::VinregSet).await {
-                info!("SC cfg: VinregSet=0x{:02X}", vinreg);
+                debug!("SC cfg: VinregSet=0x{:02X}", vinreg);
             }
             if let Ok(ibus_lim) = sc.read_register(R::IbusLimSet).await {
-                info!("SC cfg: IbusLimSet=0x{:02X}", ibus_lim);
+                debug!("SC cfg: IbusLimSet=0x{:02X}", ibus_lim);
             }
             if let Ok(ibat_lim) = sc.read_register(R::IbatLimSet).await {
-                info!("SC cfg: IbatLimSet=0x{:02X}", ibat_lim);
+                debug!("SC cfg: IbatLimSet=0x{:02X}", ibat_lim);
             }
             if let Ok(ctrl1) = sc.read_register(R::Ctrl1Set).await {
-                info!("SC cfg: Ctrl1Set=0x{:02X}", ctrl1);
+                debug!("SC cfg: Ctrl1Set=0x{:02X}", ctrl1);
             }
             if let Ok(ctrl3) = sc.read_register(R::Ctrl3Set).await {
-                info!("SC cfg: Ctrl3Set=0x{:02X}", ctrl3);
+                debug!("SC cfg: Ctrl3Set=0x{:02X}", ctrl3);
             }
             if let Ok(status) = sc.read_register(R::Status).await {
-                info!("SC stat: Status=0x{:02X}", status);
+                debug!("SC stat: Status=0x{:02X}", status);
             }
         }
 
@@ -297,7 +297,7 @@ pub async fn sc8815_task(
                 drop_streak = 0;
             } else if pack_voltage_mv >= PACK_CHARGE_STOP_THRESHOLD_MV {
                 if !latest_bal_req.require_cv {
-                    info!("stop vb>{} {}", PACK_CHARGE_STOP_THRESHOLD_MV, pack_voltage_mv);
+                    debug!("stop vb>{} {}", PACK_CHARGE_STOP_THRESHOLD_MV, pack_voltage_mv);
                     if sc8815_session.is_some() {
                         if let Some(sess) = sc8815_session.take() {
                             let (ce_back, pstop_back, i2c_back) = sess.end().await;
@@ -418,7 +418,7 @@ pub async fn sc8815_task(
                         if let Some(sess) = sc8815_session.as_mut() {
                             sess.enable_power_stage();
                         }
-                        info!("start vb={}", pack_voltage_mv);
+                        debug!("start vb={}", pack_voltage_mv);
                         charger_active = true;
                         // leaving pause state → clear last pause report
                         last_pause_report = None;
@@ -481,7 +481,7 @@ pub async fn sc8815_task(
 
                         // EOC: terminate charging session immediately per device indication
                         if status.eoc {
-                            info!("eoc");
+                            debug!("eoc");
                             if let Some(sess) = sc8815_session.take() {
                                 let (ce_back, pstop_back, i2c_back) = sess.end().await;
                                 ce_pin_slot = Some(ce_back);
@@ -570,7 +570,7 @@ pub async fn sc8815_task(
 
                             if !charge_confirmed && confirm_streak >= CHARGE_CONFIRMATION_SAMPLES {
                                 charge_confirmed = true;
-                                info!("sc:chg_ok {}mA", ibat);
+                                debug!("sc:chg_ok {}mA", ibat);
                             }
 
                             if charge_confirmed && drop_streak >= CHARGE_CONFIRMATION_SAMPLES {

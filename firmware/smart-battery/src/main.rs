@@ -50,11 +50,13 @@ bind_interrupts!(struct I2c1Irqs {
 async fn main(_spawner: Spawner) {
     let mut config = embassy_stm32::Config::default();
     config.rcc.ls = embassy_stm32::rcc::LsConfig::default_lse();
-    // Minimize current during STOP; keep SWD/JTAG off while sleeping.
+    // Single firmware profile: keep debug disabled during sleep for lowest current.
     config.enable_debug_during_sleep = false;
     let p = embassy_stm32::init(config);
 
     // 使用默认线程模式执行器：WFE 进入轻度 SLEEP（非 STOP）。
+    // 启动日志（必须打印，复用与 sleep_task 相同的格式字符串以节省 FLASH）。
+    defmt::warn!("sleep: start (mode=SLEEP)");
 
     // (Removed: APB1SMENR diagnostics to save flash)
 
@@ -78,10 +80,23 @@ async fn main(_spawner: Spawner) {
     let ce = Output::new(p.PA10, Level::High, Speed::Low);
     let pstop = Output::new(p.PA9, Level::High, Speed::Low);
     let mut exit_shipmode = Output::new(p.PA1, Level::Low, Speed::Low);
+    // BQ76920 may power-up in SHIP; assert wake pin early to bring it to NORMAL.
+    info!("bq:wake");
+    exit_shipmode.set_high();
+    Timer::after(Duration::from_millis(1200)).await;
+    exit_shipmode.set_low();
 
     // (Removed: raw I2C1 PAC readbacks to save flash)
 
     // Prepare INNER I2C bus (I2C2 on PB10/PB11) with 100 kHz clock and wrap as shared bus.
+    // Ensure I2C2 NVIC is unmasked to avoid async transactions stalling.
+    unsafe {
+        #[allow(non_snake_case)]
+        {
+            embassy_stm32::interrupt::typelevel::I2C2::unpend();
+            embassy_stm32::interrupt::typelevel::I2C2::enable();
+        }
+    }
     let mut i2c_config = I2cConfig::default();
     i2c_config.frequency = Hertz(100_000);
     let i2c = I2c::new(
@@ -111,15 +126,16 @@ async fn main(_spawner: Spawner) {
     ) = shared::init_pubsubs();
 
     // Gate other tasks on successful BQ76920 initialization using fixed I2C address.
-    let mut ship_mode_pulsed = false;
+    info!("bq:init");
+    let mut ship_mode_pulsed = true; // already pulsed once at boot
+    let mut retry_count: u32 = 0;
     let _selected_bq_addr = loop {
         // Try common fixed-address variants: 0x08 (03) then 0x18 (06)
         let tried: [u8; 2] = [BQ76920_I2C_ADDR, 0x18u8];
         let mut ok_addr: Option<u8> = None;
         for addr in tried.iter().copied() {
-            let i2c_dev_for_bq = I2cDevice::new(i2c_bus);
-            let mut bq: Bq769x0<_, BqCrcEnabled, 5> = Bq769x0::new(i2c_dev_for_bq, addr, 3, None);
-        let cfg = BatteryConfig {
+            defmt::debug!("bq:try=0x{:02x}", addr);
+            let cfg = BatteryConfig {
             overvoltage_trip: 3650,  // 3.65V per cell
             undervoltage_trip: 2500, // 2.50V per cell
             protection_config: ProtectionConfig {
@@ -130,13 +146,11 @@ async fn main(_spawner: Spawner) {
             rsense: 3, // 3 mΩ sense resistor
             ..Default::default()
         };
-
-            match bq.try_apply_config(&cfg).await {
-                Ok(_) => {
-                    ok_addr = Some(addr);
-                    break;
-                }
-                Err(_e) => {}
+            let i2c_dev_for_bq = I2cDevice::new(i2c_bus);
+            let mut bq: Bq769x0<_, BqCrcEnabled, 5> = Bq769x0::new(i2c_dev_for_bq, addr, 3, None);
+            if bq.try_apply_config(&cfg).await.is_ok() {
+                ok_addr = Some(addr);
+                break;
             }
         }
         if let Some(ok) = ok_addr {
@@ -162,15 +176,18 @@ async fn main(_spawner: Spawner) {
                 );
             break ok;
         }
-        if !ship_mode_pulsed {
+        // periodic retry with occasional wake pulse refresh
+        retry_count = retry_count.wrapping_add(1);
+        if (retry_count % 3) == 0 {
+            defmt::debug!("bq:wake+");
             exit_shipmode.set_high();
-            Timer::after(Duration::from_millis(500)).await;
+            Timer::after(Duration::from_millis(300)).await;
             exit_shipmode.set_low();
-            ship_mode_pulsed = true;
-            continue;
         }
-
-        // suppress retry log to save flash
+        if (retry_count % 5) == 0 {
+            info!("bq:r");
+        }
+        defmt::debug!("bq:retry");
         Timer::after(Duration::from_secs(1)).await;
     };
 
@@ -204,6 +221,11 @@ async fn main(_spawner: Spawner) {
     _spawner
         .spawn(sc8815_task::sc8815_irq_task(sc_int).expect("sc-int token"));
 
+    // BQ76920 ALERT: PB1 = ALERT (EXTI1). Datasheet: push-pull active-high → no pull.
+    let bq_alert = ExtiInput::new(p.PB1, p.EXTI1, Pull::None);
+    _spawner
+        .spawn(bq76920_task::bq_alert_irq_task(bq_alert).expect("bq-int token"));
+
     // 启动 Global State 聚合任务
     let gs_sc_alerts_sub = _sc8815_alerts_chan
         .subscriber()
@@ -233,7 +255,14 @@ async fn main(_spawner: Spawner) {
     );
 
     // 启动 LED 状态任务（需要用户可见的状态指示）
-    let led_pin = OutputOpenDrain::new(p.PA5, Level::High, Speed::Low);
+    let mut led_pin = OutputOpenDrain::new(p.PA5, Level::High, Speed::Low);
+    // Boot heartbeat: 两次短闪，确保即便 RTT 无输出也能肉眼确认 MCU 已运行。
+    for _ in 0..2u8 {
+        led_pin.set_low();
+        Timer::after(Duration::from_millis(80)).await;
+        led_pin.set_high();
+        Timer::after(Duration::from_millis(120)).await;
+    }
     let led_global_state_sub = global_state_chan
         .subscriber()
         .expect("Allocate GlobalState subscriber for LED task");
