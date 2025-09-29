@@ -4,6 +4,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 static BQ_FAILSAFE_PSTOP: AtomicBool = AtomicBool::new(false);
 // Use a separate AtomicU32 for SC heartbeat (ms since boot, lower 32 bits)
 static SC_LAST_MS32: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static QUIESCE: AtomicBool = AtomicBool::new(false); // true=外设静默（无 AC）
 
 #[inline]
 pub fn request_pstop() {
@@ -28,4 +29,15 @@ pub fn sc_heartbeat_update(now_ms: u32) {
 #[inline]
 pub fn sc_last_ms() -> u32 {
     SC_LAST_MS32.load(Ordering::Relaxed)
+}
+
+#[inline]
+pub fn set_ac_present(ac: bool) {
+    // 反向记录静默标志：无 AC => QUIESCE=true
+    QUIESCE.store(!ac, Ordering::Relaxed);
+}
+
+#[inline]
+pub fn is_quiesced() -> bool {
+    QUIESCE.load(Ordering::Relaxed)
 }

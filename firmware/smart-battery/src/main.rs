@@ -9,7 +9,7 @@ mod activity;
 mod failsafe;
 mod leds4_task;
 mod sc8815_task;
-mod scheduler;
+// scheduler removed (合并到 failsafe + SC 路径)
 mod shared;
 mod sleep_manager;
 
@@ -279,10 +279,7 @@ async fn main(_spawner: Spawner) {
     // 保留软件睡眠管理器（轻度 SLEEP 策略），由默认执行器 WFE 驱动。
     _spawner.spawn(sleep_manager::sleep_task().expect("sleep-mgr token"));
 
-    let gs_sub_for_sched = global_state_chan
-        .subscriber()
-        .expect("Allocate GS subscriber for scheduler");
-    _spawner.spawn(scheduler::power_scheduler_task(gs_sub_for_sched).expect("sched token"));
+    // 电源静默策略改由 SC 路径直接更新至 failsafe，不再单独起调度任务
 
     // (Optional) EXTI for BQ ALERT can be enabled here if needed for additional wake sources.
 

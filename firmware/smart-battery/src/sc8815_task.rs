@@ -245,7 +245,7 @@ pub async fn sc8815_task(
             charge_confirmed = false;
         }
         // 全局“静默”策略：当 AC 不在时，停靠会话并仅依赖 INT 事件，不再轮询。
-        if crate::scheduler::is_quiesced() {
+        if crate::failsafe::is_quiesced() {
             if let Some(sess) = sc8815_session.take() {
                 let (ce_back, pstop_back, i2c_back) = sess.end().await;
                 ce_pin_slot = Some(ce_back);
@@ -468,6 +468,8 @@ pub async fn sc8815_task(
                 Some(sess) => match sess.sc.get_device_status().await {
                     Ok(status) => {
                         // status fetched
+                        // 更新 AC 静默策略
+                        crate::failsafe::set_ac_present(status.ac_adapter_connected);
                         let now_ms = embassy_time::Instant::now().as_millis() as u32;
                         crate::failsafe::sc_heartbeat_update(now_ms);
                         // ok

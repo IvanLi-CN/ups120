@@ -328,7 +328,7 @@ pub async fn bq76920_task(
     let mut last_eval_period_secs: u32 = 3600;
 
     loop {
-        if crate::scheduler::is_quiesced() {
+        if crate::failsafe::is_quiesced() {
             // Minimal maintenance: ensure balancing off
             if let Some(_cell) = active_balancing_cell.take() {
                 let _ = bq.set_cell_balancing(0).await;

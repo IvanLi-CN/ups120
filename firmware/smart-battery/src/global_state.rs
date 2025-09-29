@@ -212,7 +212,7 @@ pub async fn global_state_task(
 
         // 当 AC 缺失时，保持低频评估而不是完全阻塞，
         // 以便能够吸收来自 SC8815 的“适配器插入”提示并发布新全局状态。
-        if crate::scheduler::is_quiesced() {
+        if crate::failsafe::is_quiesced() {
             Timer::after(Duration::from_millis(250)).await;
             continue;
         }
