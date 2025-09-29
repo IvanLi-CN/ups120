@@ -76,10 +76,10 @@ pub async fn leds_task(
     mut bal_cv_sub: BalancingCvRequestSubscriber<'static>,
 ) {
     // Per-LED 3 s epochs
-    let mut epoch_red = Instant::now();
-    let mut epoch_yellow = epoch_red;
-    let mut epoch_green = epoch_red;
-    let mut epoch_blue = epoch_red;
+    let epoch_red = Instant::now();
+    let epoch_yellow = epoch_red;
+    let epoch_green = epoch_red;
+    let epoch_blue = epoch_red;
 
     // Async green pulse state
     let mut green_pulse_until: Option<Instant> = None;
@@ -88,7 +88,7 @@ pub async fn leds_task(
     let mut bq: Option<crate::data_types::Bq76920Measurements<5>> = None;
     let mut bq_dropout = true;
     let mut last_bq_meas: Option<Instant> = None;
-    let mut sc_dropout = true;
+    // sc_dropout computed per-loop from heartbeat
     // SC/BQ derived flags
     let mut sc_ac_present = false;
     let mut sc_fault = false; // OTP or VBUS short
@@ -106,17 +106,26 @@ pub async fn leds_task(
             bq = Some(m);
             last_bq_meas = Some(now);
         }
+        // Cache decoded flags for this iteration to avoid jitter and repeated reads
+        let mut sc_vbus_short = false;
+        let mut sc_otp = false;
         if let Some(a) = sc_alerts_sub.try_next_message_pure() {
             sc_ac_present = a.device_status.ac_adapter_connected;
-            sc_fault = a.device_status.otp_fault || a.device_status.vbus_short_fault;
+            sc_vbus_short = a.device_status.vbus_short_fault;
+            sc_otp = a.device_status.otp_fault;
+            sc_fault = sc_vbus_short || sc_otp;
             sc_expected = a.expected_charging;
             sc_confirmed = a.charging_confirmed;
             sc_pause_ov = a.ov_pause_active;
             sc_pause_imb = a.imbalance_pause_active;
         }
+        let mut red_pulse_severity: u8 = 0; // 4>3>2>1
         if let Some(ba) = bq_alerts_sub.try_next_message_pure() {
             use bq769x0_async_rs::registers::SysStatFlags;
             let f = ba.system_status.0;
+            if f.contains(SysStatFlags::SCD) { red_pulse_severity = red_pulse_severity.max(3); }
+            if f.contains(SysStatFlags::OCD) { red_pulse_severity = red_pulse_severity.max(4); }
+            if f.intersects(SysStatFlags::UV | SysStatFlags::OV) { red_pulse_severity = red_pulse_severity.max(2); }
             bq_fault = f.intersects(SysStatFlags::UV | SysStatFlags::OV | SysStatFlags::SCD | SysStatFlags::OCD);
         }
         if let Some(b) = bal_cv_sub.try_next_message_pure() {
@@ -125,7 +134,7 @@ pub async fn leds_task(
         // bq_dropout derived from measurement staleness (≥3 s w/o frames)
         if let Some(t) = last_bq_meas { bq_dropout = now - t >= Duration::from_secs(3); }
         let last_ms = crate::failsafe::sc_last_ms();
-        sc_dropout = if last_ms == 0 { true } else { (now.as_millis() as u32).wrapping_sub(last_ms) >= 3000 };
+        let sc_dropout = if last_ms == 0 { true } else { (now.as_millis() as u32).wrapping_sub(last_ms) >= 3000 };
 
         // Trigger async green pulse on I2C1 activity
         if crate::activity::I2C1_ACTIVITY_PULSE.load(core::sync::atomic::Ordering::Relaxed) {
@@ -149,13 +158,7 @@ pub async fn leds_task(
         }
         if bq_dropout { red.dropout_blink = true; }
         // Pulse code（severity）：3=SCD，4=OCD，2=UV/OV，其次 1=均衡叠加
-        if let Some(a) = bq_alerts_sub.try_next_message_pure() {
-            use bq769x0_async_rs::registers::SysStatFlags;
-            let f = a.system_status.0;
-            if f.contains(SysStatFlags::SCD) { red.pulses = red.pulses.max(3); }
-            if f.contains(SysStatFlags::OCD) { red.pulses = red.pulses.max(4); }
-            if f.intersects(SysStatFlags::UV | SysStatFlags::OV) { red.pulses = red.pulses.max(2); }
-        }
+        if red_pulse_severity > 0 { red.pulses = red.pulses.max(red_pulse_severity); }
         if overlay_balancing { red.pulses = red.pulses.max(1); }
 
         // Yellow (SC8815)
@@ -173,13 +176,8 @@ pub async fn leds_task(
                 if m.core_measurements.total_voltage_mv < 17_000 { yellow.pulses = yellow.pulses.max(1); }
             }
         }
-        if sc_fault {
-            // 使用 SC 设备状态位区分 OTP/VBUS short（无需新增寄存器读取）
-            if let Some(a) = sc_alerts_sub.try_next_message_pure() {
-                if a.device_status.vbus_short_fault { yellow.pulses = yellow.pulses.max(2); }
-                if a.device_status.otp_fault { yellow.pulses = yellow.pulses.max(4); }
-            }
-        }
+        if sc_vbus_short { yellow.pulses = yellow.pulses.max(2); }
+        if sc_otp { yellow.pulses = yellow.pulses.max(4); }
 
         // Green (Comm + Sleep)
         let mut green = LedIntent::default();

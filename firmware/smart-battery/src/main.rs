@@ -127,7 +127,7 @@ async fn main(_spawner: Spawner) {
 
     // Gate other tasks on successful BQ76920 initialization using fixed I2C address.
     defmt::debug!("bq:init");
-    let mut ship_mode_pulsed = true; // already pulsed once at boot
+    // removed unused ship_mode_pulsed to reduce flash
     let mut retry_count: u32 = 0;
     let _selected_bq_addr = loop {
         // Try common fixed-address variants: 0x08 (03) then 0x18 (06)

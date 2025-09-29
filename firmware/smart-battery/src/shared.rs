@@ -151,14 +151,6 @@ pub type Sc8815MeasurementsPublisher<'a> = Publisher<
     SC8815_MEASUREMENTS_PUBSUB_READERS,
     1,
 >;
-pub type Sc8815MeasurementsSubscriber<'a> = Subscriber<
-    'a,
-    CriticalSectionRawMutex,
-    Sc8815Measurements,
-    SC8815_MEASUREMENTS_PUBSUB_DEPTH,
-    SC8815_MEASUREMENTS_PUBSUB_READERS,
-    1,
->;
 
 pub type Bq76920MeasurementsPublisher<'a, const N: usize> = Publisher<
     // Added generic parameter

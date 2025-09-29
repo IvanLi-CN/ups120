@@ -227,8 +227,7 @@ pub async fn sc8815_task(
     // Severe imbalance pause (Δ>=100 mV) clear when Δ<50 mV
     let mut imbalance_pause_active: bool = false;
 
-    // Log de-noising latches
-    let mut pol_start_latched: bool = false; // only log POL start on rising condition
+    // Log de-noising latch for pause state changes only
     let mut last_pause_report: Option<(bool, bool)> = None; // (ov_pause_active, imbalance_pause_active)
     // quiesce INT mode: no probe state needed
     // dropout counters omitted in this step to keep flash within limits
@@ -393,7 +392,7 @@ pub async fn sc8815_task(
                     && !charger_active
                     && adapter_holdoff_secs == 0;
                 if pol_start_cond {
-                    pol_start_latched = true;
+                    // (edge latch removed)
                     if sc8815_session.is_none() {
                         if let Some(pin) = pstop_pin_slot.as_mut() {
                             pin.set_high();
@@ -455,9 +454,6 @@ pub async fn sc8815_task(
                         }
                         charger_active = false;
                     }
-                } else {
-                    // reset edge latch when the start condition is not true
-                    pol_start_latched = false;
                 }
             }
         }
