@@ -9,8 +9,10 @@
 use embassy_stm32::gpio::OutputOpenDrain;
 use embassy_time::{Duration, Instant, Timer};
 
-use crate::global_state::BatteryGlobalState;
-use crate::shared::{Bq76920MeasurementsSubscriber, GlobalStateSubscriber};
+use crate::shared::{
+    BalancingCvRequestSubscriber, Bq76920AlertsSubscriber, Bq76920MeasurementsSubscriber,
+    Sc8815AlertsSubscriber,
+};
 
 // Timing (3 s base cycle; pulses are 120 ms wide with 120 ms gaps)
 const CYCLE_MS: u32 = 3000;
@@ -68,8 +70,10 @@ fn bq_fets_both_on<const N: usize>(bq_opt: &Option<crate::data_types::Bq76920Mea
 #[embassy_executor::task]
 pub async fn leds_task(
     mut pins: LedPins,
-    mut gs_sub: GlobalStateSubscriber<'static>,
     mut bq_sub: Bq76920MeasurementsSubscriber<'static, 5>,
+    mut sc_alerts_sub: Sc8815AlertsSubscriber<'static>,
+    mut bq_alerts_sub: Bq76920AlertsSubscriber<'static>,
+    mut bal_cv_sub: BalancingCvRequestSubscriber<'static>,
 ) {
     // Per-LED 3 s epochs
     let mut epoch_red = Instant::now();
@@ -81,21 +85,42 @@ pub async fn leds_task(
     let mut green_pulse_until: Option<Instant> = None;
 
     // Latest sources
-    let mut gs: BatteryGlobalState = BatteryGlobalState::default();
     let mut bq: Option<crate::data_types::Bq76920Measurements<5>> = None;
     let mut bq_dropout = true;
     let mut last_bq_meas: Option<Instant> = None;
     let mut sc_dropout = true;
+    // SC/BQ derived flags
+    let mut sc_ac_present = false;
+    let mut sc_fault = false; // OTP or VBUS short
+    let mut sc_expected = false;
+    let mut sc_confirmed = false;
+    let mut sc_pause_ov = false;
+    let mut sc_pause_imb = false;
+    let mut bq_fault = false;
+    let mut overlay_balancing = false;
 
     loop {
         let now = Instant::now();
         // Non-blocking drains
-        if let Some(s) = gs_sub.try_next_message_pure() {
-            gs = s;
-        }
         if let Some(m) = bq_sub.try_next_message_pure() {
             bq = Some(m);
             last_bq_meas = Some(now);
+        }
+        if let Some(a) = sc_alerts_sub.try_next_message_pure() {
+            sc_ac_present = a.device_status.ac_adapter_connected;
+            sc_fault = a.device_status.otp_fault || a.device_status.vbus_short_fault;
+            sc_expected = a.expected_charging;
+            sc_confirmed = a.charging_confirmed;
+            sc_pause_ov = a.ov_pause_active;
+            sc_pause_imb = a.imbalance_pause_active;
+        }
+        if let Some(ba) = bq_alerts_sub.try_next_message_pure() {
+            use bq769x0_async_rs::registers::SysStatFlags;
+            let f = ba.system_status.0;
+            bq_fault = f.intersects(SysStatFlags::UV | SysStatFlags::OV | SysStatFlags::SCD | SysStatFlags::OCD);
+        }
+        if let Some(b) = bal_cv_sub.try_next_message_pure() {
+            overlay_balancing = b.overlay;
         }
         // bq_dropout derived from measurement staleness (≥3 s w/o frames)
         if let Some(t) = last_bq_meas { bq_dropout = now - t >= Duration::from_secs(3); }
@@ -119,20 +144,25 @@ pub async fn leds_task(
         let both_on = bq_fets_both_on(&bq);
         red.base_on = !both_on;
         // Fault blink mapping (simplified at step 1): battery fault → 50% blink
-        if gs.fault_battery {
+        if bq_fault {
             red.fault_blink = true;
         }
         if bq_dropout { red.dropout_blink = true; }
         // Pulse: 1 = balancing active (from global state overlay)
-        if gs.balancing_active { red.pulses = 1; }
+        if overlay_balancing { red.pulses = 1; }
 
         // Yellow (SC8815)
         let mut yellow = LedIntent::default();
-        yellow.base_on = gs.charging; // charging → ON, otherwise OFF
-        if gs.fault_charger { yellow.fault_blink = true; }
+        // charging: 期望或已确认均视为“在充电会话中”
+        yellow.base_on = sc_ac_present && (sc_expected || sc_confirmed);
+        if sc_fault { yellow.fault_blink = true; }
         if sc_dropout { yellow.dropout_blink = true; }
         // 1-pulse when preparing (conditions met but AC absent)
-        if gs.preparing { yellow.pulses = yellow.pulses.max(1); }
+        if !sc_ac_present {
+            if let Some(m) = bq.as_ref() {
+                if m.core_measurements.total_voltage_mv < 17_000 { yellow.pulses = yellow.pulses.max(1); }
+            }
+        }
 
         // Green (Comm + Sleep)
         let mut green = LedIntent::default();
@@ -143,16 +173,14 @@ pub async fn leds_task(
         let mut blue = LedIntent::default();
         // Must not be pulse-less; if no pulse applies, show OFF
         blue.base_on = false;
-        // Suggested codebook mapping
-        if gs.fault_battery || gs.fault_charger {
+        // Suggested codebook mapping（简化但语义一致）
+        if bq_fault || sc_fault {
             blue.pulses = blue.pulses.max(6);
-        } else if gs.full {
-            blue.pulses = blue.pulses.max(5);
-        } else if gs.balancing_active {
+        } else if overlay_balancing {
             blue.pulses = blue.pulses.max(4);
-        } else if gs.charging_paused {
+        } else if sc_pause_ov || sc_pause_imb {
             blue.pulses = blue.pulses.max(3);
-        } else if gs.charging {
+        } else if sc_ac_present && (sc_expected || sc_confirmed) {
             blue.pulses = blue.pulses.max(2);
         } else {
             blue.pulses = blue.pulses.max(1);

@@ -31,7 +31,7 @@ const LOCAL_PEAK_MARGIN_MV: i32 = 1;
 
 // Logging verbosity toggles for BQ76920 task
 const VERBOSE_BQ_LOG: bool = false; // set true for full register-by-register dumps
-const SNAP_BQ_EVERY_SEC: u32 = 0; // disable one-line snapshot
+// snapshot disabled to save flash
 
 // Test knob: force both CHG/DSG FETs off for charger-path diagnostics.
 // Default false for normal operation; set true only for lab diagnostics.
@@ -437,37 +437,7 @@ pub async fn bq76920_task(
                 // Detailed BQ76920 measurements (optional verbose)
                 // dbg: verbose block removed to save flash
 
-                // One-line snapshot (always enabled for quick diagnostics)
-                if SNAP_BQ_EVERY_SEC > 0 && (snap_tick % SNAP_BQ_EVERY_SEC == 0) {
-                    let chg_on = core_meas.mos_status.0.contains(SysCtrl2Flags::CHG_ON);
-                    let dsg_on = core_meas.mos_status.0.contains(SysCtrl2Flags::DSG_ON);
-                    let cells = core_meas.cell_voltages.voltages;
-                    // TS1 is in 0.01°C units; avoid floats in no_std
-                    let ts1_centi = core_meas.temperatures.ts1;
-                    let ts1_i = ts1_centi / 100;
-                    let mut ts1_f = ts1_centi % 100;
-                    if ts1_f < 0 {
-                        ts1_f = -ts1_f;
-                    }
-                    // Critical fault summary (mask out non-fault bits like CC_READY)
-                    let fault_mask = (SysStatFlags::UV
-                        | SysStatFlags::OV
-                        | SysStatFlags::SCD
-                        | SysStatFlags::OCD)
-                        .bits();
-                    let faults = core_meas.system_status.0.bits() & fault_mask;
-                    // Derive current balancing cell number (0 if none)
-                    let mut bal_cell_num: u8 = 0;
-                    if last_cellbal_bits != 0 {
-                        for i in 0..5 {
-                            if (last_cellbal_bits & (1 << i)) != 0 {
-                                bal_cell_num = (i + 1) as u8;
-                                break;
-                            }
-                        }
-                    }
-                    // dbg: compact snapshot removed to save flash
-                }
+                // snapshot disabled to save flash
 
                 // Evaluate pack-level conditions
                 let pack_voltage_mv = core_meas.total_voltage_mv;

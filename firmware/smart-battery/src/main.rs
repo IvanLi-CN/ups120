@@ -261,17 +261,25 @@ async fn main(_spawner: Spawner) {
     let led_y = OutputOpenDrain::new(p.PA6, Level::High, Speed::Low);
     let led_g = OutputOpenDrain::new(p.PA7, Level::High, Speed::Low);
     let led_b = OutputOpenDrain::new(p.PB0, Level::High, Speed::Low);
-    let led_gs_sub = global_state_chan
-        .subscriber()
-        .expect("Allocate GlobalState subscriber for 4-LED task");
     let led_bq_sub = bq76920_meas_chan
         .subscriber()
         .expect("Allocate BQ76920 measurements subscriber for 4-LED task");
+    let led_sc_alerts_sub = _sc8815_alerts_chan
+        .subscriber()
+        .expect("Allocate SC8815 alerts subscriber for 4-LED task");
+    let led_bq_alerts_sub = _bq76920_alerts_chan
+        .subscriber()
+        .expect("Allocate BQ76920 alerts subscriber for 4-LED task");
+    let led_bal_cv_sub = balancing_cv_chan
+        .subscriber()
+        .expect("Allocate BalancingCv subscriber for 4-LED task");
     _spawner.spawn(
         leds4_task::leds_task(
             leds4_task::LedPins { red: led_r, yellow: led_y, green: led_g, blue: led_b },
-            led_gs_sub,
             led_bq_sub,
+            led_sc_alerts_sub,
+            led_bq_alerts_sub,
+            led_bal_cv_sub,
         )
         .expect("led4 token"),
     );
