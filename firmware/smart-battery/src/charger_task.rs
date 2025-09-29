@@ -110,10 +110,10 @@ pub async fn charger_task(
             Ok(status) => {
                 // Check for critical faults
                 if status.otp_fault {
-                    warn!("sc:otp");
+                    defmt::debug!("sc:otp");
                 }
                 if status.vbus_short_fault {
-                    warn!("sc:vbus_short");
+                    defmt::debug!("sc:vbus_short");
                 }
                 Some(status)
             }
@@ -151,15 +151,15 @@ pub async fn charger_task(
                     }
                 } else {
                     pstop_pin.set_high();
-                    warn!("chg:ov {}>=18000", measurements.vbat_mv);
+                    defmt::debug!("chg:ov {}>=18000", measurements.vbat_mv);
                 }
             } else {
                 pstop_pin.set_high();
-                warn!("chg:no-meas");
+                defmt::debug!("chg:no-meas");
             }
         } else {
             pstop_pin.set_high();
-            warn!("chg:no init={} comm_ok={}", sc8815_initialized, !sc8815_comm_failed);
+            defmt::debug!("chg:no init={} comm_ok={}", sc8815_initialized, !sc8815_comm_failed);
         }
 
         // Publish measurements and alerts

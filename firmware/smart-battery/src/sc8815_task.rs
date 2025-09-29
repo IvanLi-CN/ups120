@@ -73,7 +73,7 @@ impl ScSession {
             error!("sc_init_err");
             let i2c_back = sc.release();
             ce_pin.set_high();
-            warn!("sc_disable");
+            defmt::debug!("sc_disable");
             return Err((ce_pin, pstop_pin, i2c_back));
         }
 
@@ -99,7 +99,7 @@ impl ScSession {
             error!("sc_cfg_err");
             let i2c_back = sc.release();
             ce_pin.set_high();
-            warn!("sc_disable");
+            defmt::debug!("sc_disable");
             return Err((ce_pin, pstop_pin, i2c_back));
         }
 
@@ -107,7 +107,7 @@ impl ScSession {
             error!("sc_vbat_err");
             let i2c_back = sc.release();
             ce_pin.set_high();
-            warn!("sc_disable");
+            defmt::debug!("sc_disable");
             return Err((ce_pin, pstop_pin, i2c_back));
         }
 
@@ -115,7 +115,7 @@ impl ScSession {
             error!("sc_otg_err");
             let i2c_back = sc.release();
             ce_pin.set_high();
-            warn!("sc_disable");
+            defmt::debug!("sc_disable");
             return Err((ce_pin, pstop_pin, i2c_back));
         }
 
@@ -274,7 +274,7 @@ pub async fn sc8815_task(
 
             if pack_voltage_mv <= PACK_OUTPUT_CUTOFF_THRESHOLD_MV {
                 if charger_active {
-                    warn!("cutoff {}", pack_voltage_mv);
+                    defmt::debug!("cutoff {}", pack_voltage_mv);
                 }
                 if sc8815_session.is_some() {
                     if let Some(sess) = sc8815_session.take() {
@@ -320,10 +320,10 @@ pub async fn sc8815_task(
                 }
             } else if critical_fault {
                 if charger_active {
-                    warn!("blocking_fault {}", pack_voltage_mv);
+                    defmt::debug!("blocking_fault {}", pack_voltage_mv);
                 }
                 // 打印阻断充电的故障原因
-                warn!("blk f=0x{:02x} vb={}", system_status_flags.bits(), pack_voltage_mv);
+                defmt::debug!("blk f=0x{:02x} vb={}", system_status_flags.bits(), pack_voltage_mv);
                 // For ANY BQ critical fault (OV/UV/SCD/OCD), gate power stage and keep session for timed recovery
                 if let Some(sess) = sc8815_session.as_mut() {
                     sess.disable_power_stage();
@@ -357,7 +357,7 @@ pub async fn sc8815_task(
                         let spread = max_v - min_v;
                         if !imbalance_pause_active && latest_bal_req.severe_imbalance {
                             imbalance_pause_active = true;
-                            warn!("pause:imb start");
+                            defmt::debug!("pause:imb start");
                         }
                         if imbalance_pause_active && spread < 50 {
                             imbalance_pause_active = false;
@@ -407,7 +407,7 @@ pub async fn sc8815_task(
                                 if adapter_holdoff_secs < 5 {
                                     adapter_holdoff_secs = 5;
                                 }
-                                warn!("sc:backoff 5s");
+                                defmt::debug!("sc:backoff 5s");
                                 continue;
                             }
                         }
@@ -531,7 +531,7 @@ pub async fn sc8815_task(
                 },
                 None => {
                     // CE claimed enabled but no session exists; recover by disabling gates.
-                    warn!("sc_session_missing");
+                    defmt::debug!("sc_session_missing");
                     if let Some(pin) = pstop_pin_slot.as_mut() {
                         pin.set_high();
                     }
@@ -575,7 +575,7 @@ pub async fn sc8815_task(
 
                             if charge_confirmed && drop_streak >= CHARGE_CONFIRMATION_SAMPLES {
                                 charge_confirmed = false;
-                                warn!("sc:chg_lost {}", ibat);
+                                defmt::debug!("sc:chg_lost {}", ibat);
                             }
                         } else {
                             confirm_streak = 0;

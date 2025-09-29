@@ -5,7 +5,8 @@ mod bq76920_task;
 mod data_types;
 mod global_state;
 mod i2c1_slave;
-mod led_status_task;
+mod activity;
+mod leds4_task;
 mod sc8815_task;
 mod scheduler;
 mod shared;
@@ -56,7 +57,7 @@ async fn main(_spawner: Spawner) {
 
     // 使用默认线程模式执行器：WFE 进入轻度 SLEEP（非 STOP）。
     // 启动日志（必须打印，复用与 sleep_task 相同的格式字符串以节省 FLASH）。
-    defmt::warn!("sleep: start (mode=SLEEP)");
+    defmt::debug!("sleep: start (mode=SLEEP)");
 
     // (Removed: APB1SMENR diagnostics to save flash)
 
@@ -81,7 +82,7 @@ async fn main(_spawner: Spawner) {
     let pstop = Output::new(p.PA9, Level::High, Speed::Low);
     let mut exit_shipmode = Output::new(p.PA1, Level::Low, Speed::Low);
     // BQ76920 may power-up in SHIP; assert wake pin early to bring it to NORMAL.
-    info!("bq:wake");
+    defmt::debug!("bq:wake");
     exit_shipmode.set_high();
     Timer::after(Duration::from_millis(1200)).await;
     exit_shipmode.set_low();
@@ -126,7 +127,7 @@ async fn main(_spawner: Spawner) {
     ) = shared::init_pubsubs();
 
     // Gate other tasks on successful BQ76920 initialization using fixed I2C address.
-    info!("bq:init");
+    defmt::debug!("bq:init");
     let mut ship_mode_pulsed = true; // already pulsed once at boot
     let mut retry_count: u32 = 0;
     let _selected_bq_addr = loop {
@@ -154,7 +155,7 @@ async fn main(_spawner: Spawner) {
             }
         }
         if let Some(ok) = ok_addr {
-    info!("bq:0x{:02x}", ok);
+    defmt::debug!("bq:0x{:02x}", ok);
             // Spawn the continuous BQ76920 task now that init succeeded.
             let i2c_dev_runtime = I2cDevice::new(i2c_bus);
             let sc8815_alerts_sub = _sc8815_alerts_chan
@@ -185,7 +186,7 @@ async fn main(_spawner: Spawner) {
             exit_shipmode.set_low();
         }
         if (retry_count % 5) == 0 {
-            info!("bq:r");
+            defmt::debug!("bq:r");
         }
         defmt::debug!("bq:retry");
         Timer::after(Duration::from_secs(1)).await;
@@ -254,20 +255,25 @@ async fn main(_spawner: Spawner) {
         .expect("gs token"),
     );
 
-    // 启动 LED 状态任务（需要用户可见的状态指示）
-    let mut led_pin = OutputOpenDrain::new(p.PA5, Level::High, Speed::Low);
-    // Boot heartbeat: 两次短闪，确保即便 RTT 无输出也能肉眼确认 MCU 已运行。
-    for _ in 0..2u8 {
-        led_pin.set_low();
-        Timer::after(Duration::from_millis(80)).await;
-        led_pin.set_high();
-        Timer::after(Duration::from_millis(120)).await;
-    }
-    let led_global_state_sub = global_state_chan
+    // 启动 4‑LED 状态任务（PA5=Red, PA6=Yellow, PA7=Green, PB0=Blue）
+    let led_r = OutputOpenDrain::new(p.PA5, Level::High, Speed::Low);
+    let led_y = OutputOpenDrain::new(p.PA6, Level::High, Speed::Low);
+    let led_g = OutputOpenDrain::new(p.PA7, Level::High, Speed::Low);
+    let led_b = OutputOpenDrain::new(p.PB0, Level::High, Speed::Low);
+    let led_gs_sub = global_state_chan
         .subscriber()
-        .expect("Allocate GlobalState subscriber for LED task");
-    _spawner
-        .spawn(led_status_task::led_status_task(led_pin, led_global_state_sub).expect("led token"));
+        .expect("Allocate GlobalState subscriber for 4-LED task");
+    let led_bq_sub = bq76920_meas_chan
+        .subscriber()
+        .expect("Allocate BQ76920 measurements subscriber for 4-LED task");
+    _spawner.spawn(
+        leds4_task::leds_task(
+            leds4_task::LedPins { red: led_r, yellow: led_y, green: led_g, blue: led_b },
+            led_gs_sub,
+            led_bq_sub,
+        )
+        .expect("led4 token"),
+    );
 
     // 保留软件睡眠管理器（轻度 SLEEP 策略），由默认执行器 WFE 驱动。
     _spawner.spawn(sleep_manager::sleep_task().expect("sleep-mgr token"));

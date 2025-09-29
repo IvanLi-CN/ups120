@@ -6,6 +6,7 @@ use embassy_stm32::mode::Blocking;
 
 
 use crate::shared::{Bq76920MeasurementsChannelType, Sc8815MeasurementsChannelType};
+use crate::activity::poke_i2c1_activity;
 
 // Mirror storage for future I2C1-slave responses (ISR 无关，传输层在 embassy 从机 API 中实现)
 static VBAT_MV: AtomicU16 = AtomicU16::new(0);
@@ -74,6 +75,7 @@ pub async fn slave_task(mut dev: I2c<'static, Blocking, i2c::mode::MultiMaster>)
                 i2c::SlaveCommandKind::Write => {
                     let _g = crate::sleep_manager::hold("i2c1-write");
                     crate::sleep_manager::bump("i2c1-listen");
+                    poke_i2c1_activity();
                     // 接收一帧写入
                     let n = dev.blocking_respond_to_write(&mut rx).unwrap_or(0);
                     if n == 0 {
@@ -110,7 +112,7 @@ pub async fn slave_task(mut dev: I2c<'static, Blocking, i2c::mode::MultiMaster>)
                             ptr = ptr.wrapping_add(1);
                             REG_PTR.store(ptr, Ordering::Relaxed);
                         } else {
-                            warn!("pec {} {} {} {}", reg, data, pec, c);
+                            defmt::debug!("pec {} {} {} {}", reg, data, pec, c);
                         }
                         idx += 2;
                     }
@@ -118,6 +120,7 @@ pub async fn slave_task(mut dev: I2c<'static, Blocking, i2c::mode::MultiMaster>)
                 i2c::SlaveCommandKind::Read => {
                     let _g = crate::sleep_manager::hold("i2c1-read");
                     crate::sleep_manager::bump("i2c1-listen");
+                    poke_i2c1_activity();
                     // 读取：根据当前 REG_PTR 构造交错 [DATA, CRC]
                     let mut p = REG_PTR.load(Ordering::Relaxed);
                     let mut k = 0usize;
@@ -146,7 +149,7 @@ pub async fn slave_task(mut dev: I2c<'static, Blocking, i2c::mode::MultiMaster>)
                     REG_PTR.store(p, Ordering::Relaxed);
                 }
             },
-            Err(e) => warn!("i2c1:listen {:?}", e),
+            Err(e) => defmt::debug!("i2c1:listen {:?}", e),
         }
     }
 }
