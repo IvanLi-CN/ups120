@@ -143,13 +143,20 @@ pub async fn leds_task(
         // Base: both CHG & DSG ON => OFF; else ON
         let both_on = bq_fets_both_on(&bq);
         red.base_on = !both_on;
-        // Fault blink mapping (simplified at step 1): battery fault → 50% blink
+        // Fault blink mapping：电池故障 → 50% 闪烁；并按严重度分配脉冲数（越严重脉冲数越大）
         if bq_fault {
             red.fault_blink = true;
         }
         if bq_dropout { red.dropout_blink = true; }
-        // Pulse: 1 = balancing active (from global state overlay)
-        if overlay_balancing { red.pulses = 1; }
+        // Pulse code（severity）：3=SCD，4=OCD，2=UV/OV，其次 1=均衡叠加
+        if let Some(a) = bq_alerts_sub.try_next_message_pure() {
+            use bq769x0_async_rs::registers::SysStatFlags;
+            let f = a.system_status.0;
+            if f.contains(SysStatFlags::SCD) { red.pulses = red.pulses.max(3); }
+            if f.contains(SysStatFlags::OCD) { red.pulses = red.pulses.max(4); }
+            if f.intersects(SysStatFlags::UV | SysStatFlags::OV) { red.pulses = red.pulses.max(2); }
+        }
+        if overlay_balancing { red.pulses = red.pulses.max(1); }
 
         // Yellow (SC8815)
         let mut yellow = LedIntent::default();
@@ -157,10 +164,20 @@ pub async fn leds_task(
         yellow.base_on = sc_ac_present && (sc_expected || sc_confirmed);
         if sc_fault { yellow.fault_blink = true; }
         if sc_dropout { yellow.dropout_blink = true; }
-        // 1-pulse when preparing (conditions met but AC absent)
+        // Yellow pulses：
+        // - 2 = 适配器异常（VBUS short）
+        // - 4 = 过温
+        // - 1 = preparing（需要充电但 AC 不在）
         if !sc_ac_present {
             if let Some(m) = bq.as_ref() {
                 if m.core_measurements.total_voltage_mv < 17_000 { yellow.pulses = yellow.pulses.max(1); }
+            }
+        }
+        if sc_fault {
+            // 使用 SC 设备状态位区分 OTP/VBUS short（无需新增寄存器读取）
+            if let Some(a) = sc_alerts_sub.try_next_message_pure() {
+                if a.device_status.vbus_short_fault { yellow.pulses = yellow.pulses.max(2); }
+                if a.device_status.otp_fault { yellow.pulses = yellow.pulses.max(4); }
             }
         }
 
