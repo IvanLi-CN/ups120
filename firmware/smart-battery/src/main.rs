@@ -58,7 +58,7 @@ async fn main(_spawner: Spawner) {
 
     // 使用默认线程模式执行器：WFE 进入轻度 SLEEP（非 STOP）。
     // 启动日志（必须打印，复用与 sleep_task 相同的格式字符串以节省 FLASH）。
-    defmt::debug!("sleep: start (mode=SLEEP)");
+    defmt::info!("sleep: start (mode=SLEEP)");
 
     // (Removed: APB1SMENR diagnostics to save flash)
 
@@ -83,7 +83,7 @@ async fn main(_spawner: Spawner) {
     let pstop = Output::new(p.PA9, Level::High, Speed::Low);
     let mut exit_shipmode = Output::new(p.PA1, Level::Low, Speed::Low);
     // BQ76920 may power-up in SHIP; assert wake pin early to bring it to NORMAL.
-    defmt::debug!("bq:wake");
+    defmt::info!("bq:wake");
     exit_shipmode.set_high();
     Timer::after(Duration::from_millis(1200)).await;
     exit_shipmode.set_low();
@@ -126,7 +126,7 @@ async fn main(_spawner: Spawner) {
     ) = shared::init_pubsubs();
 
     // Gate other tasks on successful BQ76920 initialization using fixed I2C address.
-    defmt::debug!("bq:init");
+    defmt::info!("bq:init");
     // removed unused ship_mode_pulsed to reduce flash
     let mut retry_count: u32 = 0;
     let _selected_bq_addr = loop {
@@ -154,7 +154,7 @@ async fn main(_spawner: Spawner) {
             }
         }
         if let Some(ok) = ok_addr {
-    defmt::debug!("bq:0x{:02x}", ok);
+    defmt::info!("bq:0x{:02x}", ok);
             // Spawn the continuous BQ76920 task now that init succeeded.
             let i2c_dev_runtime = I2cDevice::new(i2c_bus);
             let sc8815_alerts_sub = _sc8815_alerts_chan
@@ -179,13 +179,13 @@ async fn main(_spawner: Spawner) {
         // periodic retry with occasional wake pulse refresh
         retry_count = retry_count.wrapping_add(1);
         if (retry_count % 3) == 0 {
-            defmt::debug!("bq:wake+");
+            defmt::info!("bq:wake+");
             exit_shipmode.set_high();
             Timer::after(Duration::from_millis(300)).await;
             exit_shipmode.set_low();
         }
         if (retry_count % 5) == 0 {
-            defmt::debug!("bq:r");
+            defmt::info!("bq:r");
         }
         defmt::debug!("bq:retry");
         Timer::after(Duration::from_secs(1)).await;

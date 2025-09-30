@@ -64,7 +64,7 @@ fn read_reg(addr: u8) -> u8 {
 /// I2C1 从机任务：按 TI/SMBus 风格实现逐字节 PEC（写侧校验，读侧交错返回）。
 #[embassy_executor::task]
 pub async fn slave_task(mut dev: I2c<'static, Blocking, i2c::mode::MultiMaster>) {
-    debug!("i2c1:slave");
+    info!("i2c1:slave");
     let mut rx = [0u8; 64];
     let mut tx = [0u8; 64];
 
@@ -149,7 +149,7 @@ pub async fn slave_task(mut dev: I2c<'static, Blocking, i2c::mode::MultiMaster>)
                     REG_PTR.store(p, Ordering::Relaxed);
                 }
             },
-            Err(e) => defmt::debug!("i2c1:listen {:?}", e),
+            Err(e) => defmt::info!("i2c1:listen {:?}", e),
         }
     }
 }

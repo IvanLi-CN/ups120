@@ -57,7 +57,7 @@ pub fn bump(_who: &str) {
 
 #[embassy_executor::task]
 pub async fn sleep_task() {
-    debug!("sleep: start (mode=SLEEP)");
+    info!("sleep: start (mode=SLEEP)");
     bump("start");
     let n = &NOTIFY;
     loop {

@@ -88,7 +88,7 @@ async fn execute_smart_battery_balancing<'a>(
             }
         }
         if max_v == i32::MIN || min_v == i32::MAX {
-            defmt::debug!("No valid cell voltages available for balancing");
+            defmt::info!("No valid cell voltages available for balancing");
             let _ = bq.set_cell_balancing(0).await;
             *active_cell = None;
             return;
@@ -142,7 +142,7 @@ async fn execute_smart_battery_balancing<'a>(
                 if let Some(prev) = *active_cell {
                     // Ensure single-cell-only: turn all off, wait deadtime, then enable new cell
                     let _ = bq.set_cell_balancing(0).await;
-                    debug!(
+                    info!(
                         "bal~ {}ms {}>{}",
                         BALANCE_SWITCH_DEADTIME_MS,
                         prev + 1,
@@ -150,7 +150,7 @@ async fn execute_smart_battery_balancing<'a>(
                     );
                     Timer::after(Duration::from_millis(BALANCE_SWITCH_DEADTIME_MS)).await;
                 }
-                debug!("bal+ c{} {} d{}", cell_idx + 1, v[cell_idx], spread);
+                info!("bal+ c{} {} d{}", cell_idx + 1, v[cell_idx], spread);
             }
             if let Err(_e) = bq.set_cell_balancing(mask).await {
                 error!("bal:en!");
@@ -159,33 +159,27 @@ async fn execute_smart_battery_balancing<'a>(
                 // Read-back verification
                 match bq.read_register(Register::CELLBAL1).await {
                     Ok(bits) => {
-                        if (bits as u16 & mask) == 0 {
-                            defmt::debug!("bal:vr w={} r={}", mask, bits);
-                        }
+                        if (bits as u16 & mask) == 0 { defmt::info!("bal:vr w={} r={}", mask, bits); }
                     }
                     Err(_e) => defmt::debug!("bal:vr err"),
                 }
             }
         } else {
             // No eligible local peak at global max; disable for now
-            if active_cell.is_some() {
-                debug!("bal:no-peak");
-            }
+            if active_cell.is_some() { info!("bal:no-peak"); }
             let _ = bq.set_cell_balancing(0).await;
             *active_cell = None;
             // Verify bits cleared
             match bq.read_register(Register::CELLBAL1).await {
                 Ok(bits) => {
-                    if bits != 0 {
-                        defmt::debug!("bal:vr0 r={}", bits);
-                    }
+                    if bits != 0 { defmt::info!("bal:vr0 r={}", bits); }
                 }
-                Err(_e) => defmt::debug!("bal:vr rd!"),
+                Err(_e) => defmt::info!("bal:vr rd!"),
             }
         }
     } else {
         if active_cell.is_some() {
-            debug!("bal:no-meas disable");
+            info!("bal:no-meas disable");
             let _ = bq.set_cell_balancing(0).await;
             *active_cell = None;
         }
@@ -582,16 +576,16 @@ pub async fn bq76920_task(
             charger_expected || charger_confirmed || ov_pause_active || imbalance_pause_active;
         let eval_period_secs: u32 = 1;
         if eval_period_secs != last_eval_period_secs {
-            debug!(
-                "bal:per={} ac={} chgph={}",
-                eval_period_secs, adapter_present, charging_phase
-            );
+                info!(
+                    "bal:per={} ac={} chgph={}",
+                    eval_period_secs, adapter_present, charging_phase
+                );
             last_eval_period_secs = eval_period_secs;
         }
 
         // Strict policy: if adapter is absent, balancing must not be active under any circumstance.
         if !adapter_present && last_cellbal_bits != 0 {
-            defmt::debug!("bal:stop no-ac hw=0x{:02X}", last_cellbal_bits);
+            defmt::info!("bal:stop no-ac hw=0x{:02X}", last_cellbal_bits);
             let _ = bq.set_cell_balancing(0).await;
             active_balancing_cell = None;
             last_cellbal_bits = 0;
@@ -646,7 +640,7 @@ pub async fn bq76920_task(
             && !imbalance_pause_active
         {
             if !adapter_lost_logged {
-                debug!("bal:lost-ac stop & withdraw CV");
+                info!("bal:lost-ac stop & withdraw CV");
                 adapter_lost_logged = true;
             }
             let _ = bq.set_cell_balancing(0).await;
@@ -699,7 +693,7 @@ pub async fn bq76920_task(
         // 当抑制计时刚好归零时，立刻执行一次快速评估，避免再等到下一周期
         if prev_holdoff > 0 && balance_retry_holdoff == 0 {
             if adapter_present && !TEST_FORCE_BQ_FETS_OFF {
-                debug!("bal:holdoff");
+                info!("bal:holdoff");
                 execute_smart_battery_balancing(
                     &mut bq,
                     &latest_core_measurements,

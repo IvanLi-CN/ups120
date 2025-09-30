@@ -1,5 +1,5 @@
 use bq769x0_async_rs::registers::SysStatFlags;
-use defmt::{debug, error};
+use defmt::{debug, error, info};
 use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
 use embassy_stm32::{gpio::Output, i2c::I2c};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
@@ -289,7 +289,7 @@ pub async fn sc8815_task(
 
             if pack_voltage_mv <= PACK_OUTPUT_CUTOFF_THRESHOLD_MV {
                 if charger_active {
-                    defmt::debug!("cutoff {}", pack_voltage_mv);
+                    defmt::info!("cutoff {}", pack_voltage_mv);
                 }
                 if sc8815_session.is_some() {
                     if let Some(sess) = sc8815_session.take() {
@@ -312,7 +312,7 @@ pub async fn sc8815_task(
                 drop_streak = 0;
             } else if pack_voltage_mv >= PACK_CHARGE_STOP_THRESHOLD_MV {
                 if !latest_bal_req.require_cv {
-                    debug!("stop vb>{} {}", PACK_CHARGE_STOP_THRESHOLD_MV, pack_voltage_mv);
+                    info!("stop vb>{} {}", PACK_CHARGE_STOP_THRESHOLD_MV, pack_voltage_mv);
                     if sc8815_session.is_some() {
                         if let Some(sess) = sc8815_session.take() {
                             let (ce_back, pstop_back, i2c_back) = sess.end().await;
@@ -334,11 +334,9 @@ pub async fn sc8815_task(
                     drop_streak = 0;
                 }
             } else if critical_fault {
-                if charger_active {
-                    defmt::debug!("blocking_fault {}", pack_voltage_mv);
-                }
+                if charger_active { defmt::info!("blocking_fault {}", pack_voltage_mv); }
                 // 打印阻断充电的故障原因
-                defmt::debug!("blk f=0x{:02x} vb={}", system_status_flags.bits(), pack_voltage_mv);
+                defmt::info!("blk f=0x{:02x} vb={}", system_status_flags.bits(), pack_voltage_mv);
                 // 针对不同故障设置不同冷却时间：OV 180s、UV 10s、OCD/SCD 30s
                 if ov_fault { ov_pause_secs = ov_pause_secs.max(180); }
                 if uv_fault { uv_pause_secs = uv_pause_secs.max(10); }
@@ -376,7 +374,7 @@ pub async fn sc8815_task(
                         let spread = max_v - min_v;
                         if !imbalance_pause_active && latest_bal_req.severe_imbalance {
                             imbalance_pause_active = true;
-                            defmt::debug!("pause:imb start");
+                            defmt::info!("pause:imb start");
                         }
                         if imbalance_pause_active && spread < 50 {
                             imbalance_pause_active = false;
@@ -426,7 +424,7 @@ pub async fn sc8815_task(
                                 if adapter_holdoff_secs < 5 {
                                     adapter_holdoff_secs = 5;
                                 }
-                                defmt::debug!("sc:backoff 5s");
+                                defmt::info!("sc:backoff 5s");
                                 continue;
                             }
                         }
@@ -437,7 +435,7 @@ pub async fn sc8815_task(
                         if let Some(sess) = sc8815_session.as_mut() {
                             sess.enable_power_stage();
                         }
-                        debug!("start vb={}", pack_voltage_mv);
+                        info!("start vb={}", pack_voltage_mv);
                         charger_active = true;
                         // leaving pause state → clear last pause report
                         last_pause_report = None;
@@ -502,7 +500,7 @@ pub async fn sc8815_task(
 
                         // EOC: terminate charging session immediately per device indication
                         if status.eoc {
-                            debug!("eoc");
+                            info!("eoc");
                             if let Some(sess) = sc8815_session.take() {
                                 let (ce_back, pstop_back, i2c_back) = sess.end().await;
                                 ce_pin_slot = Some(ce_back);
@@ -518,7 +516,7 @@ pub async fn sc8815_task(
                         }
 
                         if status.otp_fault || status.vbus_short_fault {
-                            defmt::debug!(
+                            defmt::info!(
                                 "sc:fault o={} v={}",
                                 status.otp_fault, status.vbus_short_fault
                             );
@@ -553,7 +551,7 @@ pub async fn sc8815_task(
                 },
                 None => {
                     // CE claimed enabled but no session exists; recover by disabling gates.
-                    defmt::debug!("sc_session_missing");
+                    defmt::info!("sc_session_missing");
                     if let Some(pin) = pstop_pin_slot.as_mut() {
                         pin.set_high();
                     }
@@ -595,12 +593,12 @@ pub async fn sc8815_task(
 
                             if !charge_confirmed && confirm_streak >= CHARGE_CONFIRMATION_SAMPLES {
                                 charge_confirmed = true;
-                                debug!("sc:chg_ok {}mA", ibat);
+                                info!("sc:chg_ok {}mA", ibat);
                             }
 
                             if charge_confirmed && drop_streak >= CHARGE_CONFIRMATION_SAMPLES {
                                 charge_confirmed = false;
-                                defmt::debug!("sc:chg_lost {}", ibat);
+                                defmt::info!("sc:chg_lost {}", ibat);
                             }
                         } else {
                             confirm_streak = 0;
