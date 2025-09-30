@@ -20,7 +20,7 @@ use embassy_executor::Spawner;
 use embassy_stm32::interrupt::typelevel::Interrupt as _;
 use embassy_stm32::{
     bind_interrupts,
-    gpio::{Level, Output, OutputOpenDrain, Speed},
+    gpio::{Level, Output, Speed},
     i2c::{self, Config as I2cConfig, I2c, SlaveAddrConfig},
     peripherals::{I2C1, I2C2},
     time::Hertz,
@@ -160,20 +160,20 @@ async fn main(_spawner: Spawner) {
             let sc8815_alerts_sub = _sc8815_alerts_chan
                 .subscriber()
                 .expect("Allocate SC8815 alerts subscriber for BQ task");
-            _spawner
-                .spawn(
-                    bq76920_task::bq76920_task(
-                        i2c_dev_runtime,
-                        ok,
-                        3,    // sense resistor mΩ
-                        None, // no NTC parameters provided
-                        bq76920_alerts_pub,
-                        bq76920_meas_pub,
-                        sc8815_alerts_sub,
-                        balancing_cv_pub,
-                    )
-                    .expect("bq token"),
-                );
+    _spawner
+        .spawn(
+            bq76920_task::bq76920_task(
+                i2c_dev_runtime,
+                ok,
+                3,    // sense resistor mΩ
+                None, // no NTC parameters provided
+                bq76920_alerts_pub,
+                bq76920_meas_pub,
+                sc8815_alerts_sub,
+                balancing_cv_pub,
+            )
+            .expect("bq token"),
+        );
             break ok;
         }
         // periodic retry with occasional wake pulse refresh
@@ -229,10 +229,10 @@ async fn main(_spawner: Spawner) {
     // Global state aggregator removed; LEDs derive locally to save flash
 
     // 启动 4‑LED 状态任务（PA5=Red, PA6=Yellow, PA7=Green, PB0=Blue）
-    let led_r = OutputOpenDrain::new(p.PA5, Level::High, Speed::Low);
-    let led_y = OutputOpenDrain::new(p.PA6, Level::High, Speed::Low);
-    let led_g = OutputOpenDrain::new(p.PA7, Level::High, Speed::Low);
-    let led_b = OutputOpenDrain::new(p.PB0, Level::High, Speed::Low);
+    let led_r = Output::new(p.PA5, Level::High, Speed::Low);
+    let led_y = Output::new(p.PA6, Level::High, Speed::Low);
+    let led_g = Output::new(p.PA7, Level::High, Speed::Low);
+    let led_b = Output::new(p.PB0, Level::High, Speed::Low);
     let led_bq_sub = bq76920_meas_chan
         .subscriber()
         .expect("Allocate BQ76920 measurements subscriber for 4-LED task");
@@ -257,16 +257,20 @@ async fn main(_spawner: Spawner) {
     );
 
     // 保留软件睡眠管理器（轻度 SLEEP 策略），由默认执行器 WFE 驱动。
-    _spawner.spawn(sleep_manager::sleep_task().expect("sleep-mgr token"));
+    _spawner
+        .spawn(sleep_manager::sleep_task().expect("sleep-mgr token"));
 
     // 电源静默策略改由 SC 路径直接更新至 failsafe，不再单独起调度任务
 
     // (Optional) EXTI for BQ ALERT can be enabled here if needed for additional wake sources.
 
     // Spawn I2C1 slave + snapshot mirror tasks for the external interface
-    _spawner.spawn(i2c1_slave::slave_task(i2c1_dev).expect("slave token"));
-    _spawner.spawn(i2c1_slave::sc_meas_mirror_task(sc8815_meas_chan).expect("sc-mirror token"));
-    _spawner.spawn(i2c1_slave::bq_meas_mirror_task(bq76920_meas_chan).expect("bq-mirror token"));
+    _spawner
+        .spawn(i2c1_slave::slave_task(i2c1_dev).expect("slave token"));
+    _spawner
+        .spawn(i2c1_slave::sc_meas_mirror_task(sc8815_meas_chan).expect("sc-mirror token"));
+    _spawner
+        .spawn(i2c1_slave::bq_meas_mirror_task(bq76920_meas_chan).expect("bq-mirror token"));
     // (omit gs_mirror_task to reduce flash)
 
     // Idle task: periodically yield; low-power executor controls STOP entry.

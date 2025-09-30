@@ -6,7 +6,7 @@
 //! Priorities per LED: dropout 1 Hz > fault 50% > base + pulses.
 //! Green additionally supports an async one-shot pulse on I2C1 activity.
 
-use embassy_stm32::gpio::OutputOpenDrain;
+use embassy_stm32::gpio::Output;
 use embassy_time::{Duration, Instant, Timer};
 
 use crate::shared::{
@@ -29,13 +29,13 @@ struct LedIntent {
 }
 
 pub struct LedPins {
-    pub red: OutputOpenDrain<'static>,
-    pub yellow: OutputOpenDrain<'static>,
-    pub green: OutputOpenDrain<'static>,
-    pub blue: OutputOpenDrain<'static>,
+    pub red: Output<'static>,
+    pub yellow: Output<'static>,
+    pub green: Output<'static>,
+    pub blue: Output<'static>,
 }
 
-fn apply_led(pin: &mut OutputOpenDrain<'static>, on: bool) {
+fn apply_led(pin: &mut Output<'static>, on: bool) {
     if on {
         pin.set_low();
     } else {
