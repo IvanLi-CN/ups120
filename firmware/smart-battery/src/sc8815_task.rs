@@ -222,10 +222,14 @@ pub async fn sc8815_task(
     let mut latest_bal_req: BalancingCvRequest = BalancingCvRequest::default();
     let mut _adapter_present: bool = false;
     let mut adapter_holdoff_secs: u8 = 0; // debounce before allowing restart
-    // OV cooldown (PSTOP gated, do not end session): 180 s
+    // Cooldowns (seconds): OV=180s, UV=10s, OC(OCD/SCD)=30s
     let mut ov_pause_secs: u16 = 0;
+    let mut uv_pause_secs: u16 = 0;
+    let mut oc_pause_secs: u16 = 0;
     // Severe imbalance pause (Δ>=100 mV) clear when Δ<50 mV
     let mut imbalance_pause_active: bool = false;
+    // 100ms tick accumulator → drive *_pause_secs at 1 Hz
+    let mut tick_100ms: u8 = 0;
 
     // Log de-noising latch for pause state changes only
     let mut last_pause_report: Option<(bool, bool)> = None; // (ov_pause_active, imbalance_pause_active)
@@ -277,10 +281,11 @@ pub async fn sc8815_task(
         if let Some(bq_meas) = latest_bq_measurements.as_ref() {
             let pack_voltage_mv = bq_meas.core_measurements.total_voltage_mv;
             let system_status_flags = bq_meas.core_measurements.system_status.0;
-            let _ov_fault = system_status_flags.contains(SysStatFlags::OV);
-            let critical_fault = system_status_flags.intersects(
-                SysStatFlags::OV | SysStatFlags::UV | SysStatFlags::SCD | SysStatFlags::OCD,
-            );
+            let ov_fault = system_status_flags.contains(SysStatFlags::OV);
+            let uv_fault = system_status_flags.contains(SysStatFlags::UV);
+            let scd_fault = system_status_flags.contains(SysStatFlags::SCD);
+            let ocd_fault = system_status_flags.contains(SysStatFlags::OCD);
+            let critical_fault = ov_fault || uv_fault || scd_fault || ocd_fault;
 
             if pack_voltage_mv <= PACK_OUTPUT_CUTOFF_THRESHOLD_MV {
                 if charger_active {
@@ -334,7 +339,11 @@ pub async fn sc8815_task(
                 }
                 // 打印阻断充电的故障原因
                 defmt::debug!("blk f=0x{:02x} vb={}", system_status_flags.bits(), pack_voltage_mv);
-                // For ANY BQ critical fault (OV/UV/SCD/OCD), gate power stage and keep session for timed recovery
+                // 针对不同故障设置不同冷却时间：OV 180s、UV 10s、OCD/SCD 30s
+                if ov_fault { ov_pause_secs = ov_pause_secs.max(180); }
+                if uv_fault { uv_pause_secs = uv_pause_secs.max(10); }
+                if scd_fault || ocd_fault { oc_pause_secs = oc_pause_secs.max(30); }
+                // 对任一故障：功率级停机，保持会话等待恢复
                 if let Some(sess) = sc8815_session.as_mut() {
                     sess.disable_power_stage();
                 } else if let Some(pin) = pstop_pin_slot.as_mut() {
@@ -424,7 +433,7 @@ pub async fn sc8815_task(
                     }
 
                     // Now that the chip is configured and ADC running, (conditionally) enable power stage
-                    if ov_pause_secs == 0 && !imbalance_pause_active {
+                    if ov_pause_secs == 0 && uv_pause_secs == 0 && oc_pause_secs == 0 && !imbalance_pause_active {
                         if let Some(sess) = sc8815_session.as_mut() {
                             sess.enable_power_stage();
                         }
@@ -439,11 +448,11 @@ pub async fn sc8815_task(
                             pin.set_high();
                         }
                         // log pause gating only when state (OV/IMB pair) changes
-                        let pause_sig = (ov_pause_secs > 0, imbalance_pause_active);
+                        let pause_sig = ((ov_pause_secs > 0 || uv_pause_secs > 0 || oc_pause_secs > 0), imbalance_pause_active);
                         if last_pause_report != Some(pause_sig) {
                             let mut b: u8 = 0; // bit0=LH, bit1=OV, bit2=IMB
                             b |= 1 << 0; // LH
-                            if ov_pause_secs > 0 {
+                            if ov_pause_secs > 0 || uv_pause_secs > 0 || oc_pause_secs > 0 {
                                 b |= 1 << 1;
                             }
                             if imbalance_pause_active {
@@ -622,7 +631,7 @@ pub async fn sc8815_task(
                     device_status: status,
                     expected_charging: charger_active,
                     charging_confirmed: charge_confirmed,
-                    ov_pause_active: ov_pause_secs > 0,
+                    ov_pause_active: (ov_pause_secs > 0) || (uv_pause_secs > 0) || (oc_pause_secs > 0),
                     imbalance_pause_active,
                 };
                 sc8815_alerts_publisher.publish_immediate(alerts_payload);
@@ -633,20 +642,20 @@ pub async fn sc8815_task(
                 device_status: SC8815Status::default(),
                 expected_charging: charger_active,
                 charging_confirmed: charge_confirmed,
-                ov_pause_active: ov_pause_secs > 0,
+                ov_pause_active: (ov_pause_secs > 0) || (uv_pause_secs > 0) || (oc_pause_secs > 0),
                 imbalance_pause_active,
             };
             sc8815_alerts_publisher.publish_immediate(alerts_payload);
         }
 
-        if adapter_holdoff_secs > 0 {
-            adapter_holdoff_secs = adapter_holdoff_secs.saturating_sub(1);
-        }
-        if ov_pause_secs > 0 {
-            ov_pause_secs = ov_pause_secs.saturating_sub(1);
-            if ov_pause_secs == 0 {
-                // ov cooldown done
-            }
+        // 100ms 节拍 → 每 1 秒递减 *_secs 计时器
+        if adapter_holdoff_secs > 0 { adapter_holdoff_secs = adapter_holdoff_secs.saturating_sub(1); }
+        tick_100ms = tick_100ms.wrapping_add(1);
+        if tick_100ms >= 10 {
+            tick_100ms = 0;
+            if ov_pause_secs > 0 { ov_pause_secs = ov_pause_secs.saturating_sub(1); }
+            if uv_pause_secs > 0 { uv_pause_secs = uv_pause_secs.saturating_sub(1); }
+            if oc_pause_secs > 0 { oc_pause_secs = oc_pause_secs.saturating_sub(1); }
         }
         Timer::after(Duration::from_millis(100)).await;
     }
