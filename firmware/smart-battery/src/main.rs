@@ -27,7 +27,7 @@ use embassy_stm32::{
 };
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex;
-use embassy_time::{Duration, Timer};
+use embassy_time::{Duration, Instant, Timer};
 use embassy_stm32::{exti::ExtiInput, gpio::Pull};
 use static_cell::StaticCell;
 
@@ -125,18 +125,70 @@ async fn main(_spawner: Spawner) {
         balancing_cv_chan,
     ) = shared::init_pubsubs();
 
-    // 先启动与 BQ 无关的任务：IRQ/LED/Sleep，使掉线状态也能被指示出来。
-    // SC8815 INT: per README mapping PB2 = INNER_INT (EXTI2)
+    // 先尝试初始化 BQ76920（总重试 ≤ 500 ms）
+    defmt::info!("bq:init");
+    let probe_start = Instant::now();
+    let probe_deadline = probe_start + Duration::from_millis(500);
+    let tried_addresses = [BQ76920_I2C_ADDR, 0x18u8];
+    let cfg_template = BatteryConfig {
+        overvoltage_trip: 3650,
+        undervoltage_trip: 2500,
+        protection_config: ProtectionConfig {
+            scd_limit: 15_000,
+            ocd_limit: 10_000,
+            ..BatteryConfig::default().protection_config
+        },
+        rsense: 3,
+        ..Default::default()
+    };
+
+    let mut bq_init_addr: Option<u8> = None;
+    'addr_loop: for addr in tried_addresses.iter().copied() {
+        if Instant::now() >= probe_deadline {
+            break;
+        }
+        defmt::debug!("bq:try=0x{:02x}", addr);
+        let i2c_dev_for_bq = I2cDevice::new(i2c_bus);
+        let mut probe: Bq769x0<_, BqCrcEnabled, 5> = Bq769x0::new(i2c_dev_for_bq, addr, 3, None);
+        if probe.try_apply_config(&cfg_template).await.is_ok() {
+            defmt::info!("bq:0x{:02x}", addr);
+            crate::failsafe::set_bq_online(true);
+            bq_init_addr = Some(addr);
+            break;
+        }
+
+        if Instant::now() >= probe_deadline {
+            break;
+        }
+        exit_shipmode.set_high();
+        Timer::after(Duration::from_millis(150)).await;
+        exit_shipmode.set_low();
+        if Instant::now() >= probe_deadline {
+            break;
+        }
+        let i2c_dev_for_bq = I2cDevice::new(i2c_bus);
+        let mut probe: Bq769x0<_, BqCrcEnabled, 5> = Bq769x0::new(i2c_dev_for_bq, addr, 3, None);
+        if probe.try_apply_config(&cfg_template).await.is_ok() {
+            defmt::info!("bq:0x{:02x}", addr);
+            crate::failsafe::set_bq_online(true);
+            bq_init_addr = Some(addr);
+            break 'addr_loop;
+        }
+    }
+    if bq_init_addr.is_none() {
+        crate::failsafe::set_bq_online(false);
+        defmt::warn!("bq:init failed within 500ms");
+    }
+
+    // 初始化完成后再启动相关任务（IRQ → LED → SC → BQ main）
     let sc_int = ExtiInput::new(p.PB2, p.EXTI2, Pull::Up);
     _spawner
         .spawn(sc8815_task::sc8815_irq_task(sc_int).expect("sc-int token"));
 
-    // BQ76920 ALERT: PB1 = ALERT (EXTI1). Datasheet: push-pull active-high → no pull.
     let bq_alert = ExtiInput::new(p.PB1, p.EXTI1, Pull::None);
     _spawner
         .spawn(bq76920_task::bq_alert_irq_task(bq_alert).expect("bq-int token"));
 
-    // 提前启动 4‑LED 状态任务（PA5=Red, PA6=Yellow, PA7=Green, PB0=Blue），以便掉线时也能闪烁。
     let led_r = Output::new(p.PA5, Level::High, Speed::Low);
     let led_y = Output::new(p.PA6, Level::High, Speed::Low);
     let led_g = Output::new(p.PA7, Level::High, Speed::Low);
@@ -164,8 +216,6 @@ async fn main(_spawner: Spawner) {
         .expect("led4 token"),
     );
 
-    // 提前启动 SC 任务（即使 BQ 未就绪，也可根据 AC 与暂停策略控制 PSTOP），
-    // BQ 测量订阅者在后续上线后会自然供数。
     let bq76920_meas_sub = bq76920_meas_chan
         .subscriber()
         .expect("Allocate BQ76920 measurements subscriber");
@@ -187,47 +237,18 @@ async fn main(_spawner: Spawner) {
         .expect("sc token"),
     );
 
-    // 最后再进行 BQ76920 初始化循环
-    defmt::info!("bq:init");
-    let mut retry_count: u32 = 0;
-    let _selected_bq_addr = loop {
-        // Try common fixed-address variants: 0x08 (03) then 0x18 (06)
-        let tried: [u8; 2] = [BQ76920_I2C_ADDR, 0x18u8];
-        let mut ok_addr: Option<u8> = None;
-        for addr in tried.iter().copied() {
-            defmt::debug!("bq:try=0x{:02x}", addr);
-            let cfg = BatteryConfig {
-            overvoltage_trip: 3650,  // 3.65V per cell
-            undervoltage_trip: 2500, // 2.50V per cell
-            protection_config: ProtectionConfig {
-                scd_limit: 15_000, // 15A short-circuit
-                ocd_limit: 10_000, // 10A overcurrent
-                ..BatteryConfig::default().protection_config
-            },
-            rsense: 3, // 3 mΩ sense resistor
-            ..Default::default()
-        };
-            let i2c_dev_for_bq = I2cDevice::new(i2c_bus);
-            let mut bq: Bq769x0<_, BqCrcEnabled, 5> = Bq769x0::new(i2c_dev_for_bq, addr, 3, None);
-            if bq.try_apply_config(&cfg).await.is_ok() {
-                ok_addr = Some(addr);
-                break;
-            }
-        }
-        if let Some(ok) = ok_addr {
-    defmt::info!("bq:0x{:02x}", ok);
-            // Spawn the continuous BQ76920 task now that init succeeded.
-            let i2c_dev_runtime = I2cDevice::new(i2c_bus);
-            let sc8815_alerts_sub = _sc8815_alerts_chan
-                .subscriber()
-                .expect("Allocate SC8815 alerts subscriber for BQ task");
+    let bq_runtime_addr = bq_init_addr.unwrap_or(BQ76920_I2C_ADDR);
+    let i2c_dev_runtime = I2cDevice::new(i2c_bus);
+    let sc8815_alerts_sub = _sc8815_alerts_chan
+        .subscriber()
+        .expect("Allocate SC8815 alerts subscriber for BQ task");
     _spawner
         .spawn(
             bq76920_task::bq76920_task(
                 i2c_dev_runtime,
-                ok,
-                3,    // sense resistor mΩ
-                None, // no NTC parameters provided
+                bq_runtime_addr,
+                3,
+                None,
                 bq76920_alerts_pub,
                 bq76920_meas_pub,
                 sc8815_alerts_sub,
@@ -235,22 +256,6 @@ async fn main(_spawner: Spawner) {
             )
             .expect("bq token"),
         );
-            break ok;
-        }
-        // periodic retry with occasional wake pulse refresh
-        retry_count = retry_count.wrapping_add(1);
-        if (retry_count % 3) == 0 {
-            defmt::info!("bq:wake+");
-            exit_shipmode.set_high();
-            Timer::after(Duration::from_millis(300)).await;
-            exit_shipmode.set_low();
-        }
-        if (retry_count % 5) == 0 {
-            defmt::info!("bq:r");
-        }
-        defmt::debug!("bq:retry");
-        Timer::after(Duration::from_secs(1)).await;
-    };
 
     // 保留软件睡眠管理器（轻度 SLEEP 策略），由默认执行器 WFE 驱动。
     _spawner

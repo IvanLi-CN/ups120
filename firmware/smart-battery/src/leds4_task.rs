@@ -86,8 +86,6 @@ pub async fn leds_task(
 
     // Latest sources
     let mut bq: Option<crate::data_types::Bq76920Measurements<5>> = None;
-    let mut bq_dropout = true;
-    let mut last_bq_meas: Option<Instant> = None;
     // sc_dropout computed per-loop from heartbeat
     // SC/BQ derived flags
     let mut sc_ac_present = false;
@@ -104,7 +102,6 @@ pub async fn leds_task(
         // Non-blocking drains
         if let Some(m) = bq_sub.try_next_message_pure() {
             bq = Some(m);
-            last_bq_meas = Some(now);
         }
         // Cache decoded flags for this iteration to avoid jitter and repeated reads
         let mut sc_vbus_short = false;
@@ -133,7 +130,7 @@ pub async fn leds_task(
         }
         // Dropout derived from online flags: device stays online after boot probe
         // and only turns offline on real communication timeout thereafter.
-        bq_dropout = !crate::failsafe::is_bq_online();
+        let bq_dropout = !crate::failsafe::is_bq_online();
         let sc_dropout = !crate::failsafe::is_sc_online();
 
         // Trigger async green pulse on I2C1 activity

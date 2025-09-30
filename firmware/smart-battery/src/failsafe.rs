@@ -30,10 +30,7 @@ pub fn sc_heartbeat_update(now_ms: u32) {
     SC_LAST_MS32.store(now_ms, Ordering::Relaxed);
 }
 
-#[inline]
-pub fn sc_last_ms() -> u32 {
-    SC_LAST_MS32.load(Ordering::Relaxed)
-}
+// Note: `sc_last_ms` accessor removed; online tracking relies on explicit flags now.
 
 #[inline]
 pub fn set_ac_present(ac: bool) {

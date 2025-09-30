@@ -238,8 +238,9 @@ pub async fn sc8815_task(
     // dropout counters omitted in this step to keep flash within limits
     // Boot probe: unconditionally attempt to initialize SC8815 once at power-up
     if sc8815_session.is_none() {
-        if let (Some(mut ce_tmp), Some(mut pstop_tmp)) = (ce_ctl_slot.take(), pstop_ctl_slot.take()) {
+        if let (Some(ce_tmp), Some(pstop_tmp)) = (ce_ctl_slot.take(), pstop_ctl_slot.take()) {
             // Ensure power stage is stopped during probe
+            let mut pstop_tmp = pstop_tmp;
             pstop_tmp.set_low();
             match ScSession::begin(ce_tmp, pstop_tmp, parked_i2c_device.take().expect("I2C missing"), address).await {
                 Ok(session) => {
