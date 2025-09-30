@@ -205,6 +205,7 @@ pub async fn sc8815_task(
     // Ensure charger is disabled until we explicitly start a session.
     ce_pin.set_high();
     pstop_pin.set_high();
+    info!("pstop_ctl=H (stop) at init");
 
     // Keep I2C device parked here; move into SC8815 only during an active session.
     let mut parked_i2c_device = Some(i2c_device);

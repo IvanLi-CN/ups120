@@ -23,11 +23,20 @@ This document is the single source of truth for the smart‑battery firmware des
 
 ## 2) SC8815 CE/PSTOP Control Inversion
 
-- Hardware: MCU drives SC8815 `CE` and `PSTOP` through N‑MOSFET isolation; MCU pin logic is inverted relative to the IC’s active levels.
-- Firmware semantics (always code against these):
-  - `CE_OUT`: low → enable charger; high → disable charger.
-  - `PSTOP_OUT`: low → power stage allowed; high → power stage stopped (active stop).
-- Safety: Any “stop” path (fault, dropout, pause‑charge, emergency) must end with `PSTOP_OUT = high`.
+- 硬件：MCU 通过 N 沟道 MOSFET 隔离驱动 SC8815 的 `CE` 与 `PSTOP`，故 MCU 侧电平与芯片侧有效电平相反。
+- 固件统一“网络名称”与语义如下（代码与文档一致）：
+  - `CE_CTL`：Low → 使能；High → 关闭。
+  - `PSTOP_CTL`：Low → 允许功率级；High → 停止功率级（主动停机）。
+- 真值表（MCU→芯片）
+
+  | MCU 引脚     | 语义          | 芯片脚含义   |
+  |--------------|---------------|--------------|
+  | CE_CTL = L   | 充电器使能    | CE = Active  |
+  | CE_CTL = H   | 充电器关闭    | CE = Inactive|
+  | PSTOP_CTL = L| 允许功率级    | PSTOP = Low  |
+  | PSTOP_CTL = H| 停止功率级    | PSTOP = High |
+
+- 安全规则：任一“停机/暂停/故障/掉线”路径都必须以 `PSTOP_CTL = H` 收尾。
 
 ## 3) 4‑LED Signaling Rules (3 s base cycle)
 
@@ -96,13 +105,13 @@ Notes: LED tasks do not synchronize phases across colors; each keeps its own 3 s
 - Outside balancing: do not sample cell metrics every second anymore.
 - During charging: sample cell voltages every 30 s to decide entering balancing and whether to pause charging.
 - During balancing: allow ~1 s cadence to control balancing switches and termination.
-- Pause‑charge semantics: keep the charging session/regs, but set `PSTOP_OUT = high` to stop the power stage. Resume based on state‑machine policy (temp, delta‑V, EOC, timers, etc.).
+- Pause‑charge semantics: keep the charging session/regs, but set `PSTOP_CTL = High` to stop the power stage. Resume based on state‑machine policy (temp, delta‑V, EOC, timers, etc.).
 
 ## 6) Dropouts & Safety
 
 - Accept dropouts: SC8815/BQ76920 I²C failures and absent I2C1 host.
 - Threshold: 3 consecutive I²C transaction failures for a device → dropout.
-- Mandatory action: if BQ76920 hits the threshold, ensure `PSTOP_OUT = high` (power stage stopped).
+- Mandatory action: if BQ76920 hits the threshold, ensure `PSTOP_CTL = High` (power stage stopped).
 - Indication: corresponding LED enters 1 Hz blink; state machine falls back to a conservative branch.
 
 ## 7) Event‑Driven Global State Machine
