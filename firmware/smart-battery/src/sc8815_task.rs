@@ -40,8 +40,8 @@ type I2cDev = I2cDevice<
 // Session struct encapsulating an active SC8815 instance and related resources.
 struct ScSession {
     sc: SC8815<I2cDev>,
-    ce_pin: Output<'static>,
-    pstop_pin: Output<'static>,
+    ce_ctl: Output<'static>,
+    pstop_ctl: Output<'static>,
 }
 
 // SC8815 INT → 事件通知（EXTI 边沿触发后唤醒本任务查询状态）
@@ -63,8 +63,8 @@ impl ScSession {
         i2c: I2cDev,
         address: u8,
     ) -> Result<Self, (Output<'static>, Output<'static>, I2cDev)> {
-        // Power-up sequence
-        ce_pin.set_low();
+        // Power-up sequence: CE_CTL=High (chip CE=Enable via inversion)
+        ce_pin.set_high();
         Timer::after(Duration::from_millis(100)).await;
 
         let mut sc = SC8815::new(i2c, address);
@@ -160,11 +160,7 @@ impl ScSession {
         // Print compact configuration summary
         // cfg summary
 
-        Ok(Self {
-            sc,
-            ce_pin,
-            pstop_pin,
-        })
+        Ok(Self { sc, ce_ctl: ce_pin, pstop_ctl: pstop_pin })
     }
 
     async fn end(mut self) -> (Output<'static>, Output<'static>, I2cDev) {
@@ -172,25 +168,28 @@ impl ScSession {
             error!("sc_adc_stop");
         }
         let i2c_back = self.sc.release();
-        self.ce_pin.set_high();
-        self.pstop_pin.set_high();
-        (self.ce_pin, self.pstop_pin, i2c_back)
+        // Keep charger disabled and power stage stopped on session end
+        self.ce_ctl.set_low();
+        self.pstop_ctl.set_low();
+        (self.ce_ctl, self.pstop_ctl, i2c_back)
     }
 
     fn enable_power_stage(&mut self) {
-        self.pstop_pin.set_low();
+        // Allow power stage (inverted control): PSTOP_CTL=High → chip PSTOP=Low
+        self.pstop_ctl.set_high();
     }
 
     fn disable_power_stage(&mut self) {
-        self.pstop_pin.set_high();
+        // Stop power stage: PSTOP_CTL=Low → chip PSTOP=High
+        self.pstop_ctl.set_low();
     }
 }
 
 /// Embassy task managing the SC8815 charger with safety gating.
 #[embassy_executor::task]
 pub async fn sc8815_task(
-    mut ce_pin: Output<'static>,
-    mut pstop_pin: Output<'static>,
+    mut ce_ctl: Output<'static>,
+    mut pstop_ctl: Output<'static>,
     i2c_device: I2cDevice<
         'static,
         CriticalSectionRawMutex,
@@ -202,17 +201,18 @@ pub async fn sc8815_task(
     mut bq76920_measurements_subscriber: Bq76920MeasurementsSubscriber<'static, 5>,
     mut balancing_cv_sub: BalancingCvRequestSubscriber<'static>,
 ) {
-    // Ensure charger is disabled until we explicitly start a session.
-    ce_pin.set_high();
-    pstop_pin.set_high();
-    info!("pstop_ctl=H (stop) at init");
+    // Ensure charger is disabled and power stage stopped before any session.
+    // Inverted control (MOSFET): CE_CTL High=enable, Low=disable; PSTOP_CTL Low=stop.
+    ce_ctl.set_low();
+    pstop_ctl.set_low();
+    info!("pstop_ctl=L (stop) at init");
 
     // Keep I2C device parked here; move into SC8815 only during an active session.
     let mut parked_i2c_device = Some(i2c_device);
     let mut sc8815_session: Option<ScSession> = None;
     // When no active session, pins stay here.
-    let mut ce_pin_slot: Option<Output<'static>> = Some(ce_pin);
-    let mut pstop_pin_slot: Option<Output<'static>> = Some(pstop_pin);
+    let mut ce_ctl_slot: Option<Output<'static>> = Some(ce_ctl);
+    let mut pstop_ctl_slot: Option<Output<'static>> = Some(pstop_ctl);
 
     let mut charger_active = false;
     let mut charge_confirmed = false;
@@ -235,14 +235,33 @@ pub async fn sc8815_task(
     let mut last_pause_report: Option<(bool, bool)> = None; // (ov_pause_active, imbalance_pause_active)
     // quiesce INT mode: no probe state needed
     // dropout counters omitted in this step to keep flash within limits
+    // Boot probe: unconditionally attempt to initialize SC8815 once at power-up
+    if sc8815_session.is_none() {
+        if let (Some(mut ce_tmp), Some(mut pstop_tmp)) = (ce_ctl_slot.take(), pstop_ctl_slot.take()) {
+            // Ensure power stage is stopped during probe
+            pstop_tmp.set_low();
+            match ScSession::begin(ce_tmp, pstop_tmp, parked_i2c_device.take().expect("I2C missing"), address).await {
+                Ok(session) => {
+                    sc8815_session = Some(session);
+                    info!("sc:probe ok");
+                }
+                Err((ce_back, pstop_back, i2c_back)) => {
+                    ce_ctl_slot = Some(ce_back);
+                    pstop_ctl_slot = Some(pstop_back);
+                    parked_i2c_device = Some(i2c_back);
+                    info!("sc:probe fail");
+                }
+            }
+        }
+    }
 
     loop {
         // 全局 fail-safe：一旦请求，强制功率级停机（PSTOP=高），直到 BQ 成功通信后清除
         if crate::failsafe::is_pstop_requested() {
             if let Some(sess) = sc8815_session.as_mut() {
                 sess.disable_power_stage();
-            } else if let Some(pin) = pstop_pin_slot.as_mut() {
-                pin.set_high();
+            } else if let Some(pin) = pstop_ctl_slot.as_mut() {
+                pin.set_low();
             }
             charger_active = false;
             charge_confirmed = false;
@@ -251,15 +270,15 @@ pub async fn sc8815_task(
         if crate::failsafe::is_quiesced() {
             if let Some(sess) = sc8815_session.take() {
                 let (ce_back, pstop_back, i2c_back) = sess.end().await;
-                ce_pin_slot = Some(ce_back);
-                pstop_pin_slot = Some(pstop_back);
+                ce_ctl_slot = Some(ce_back);
+                pstop_ctl_slot = Some(pstop_back);
                 parked_i2c_device = Some(i2c_back);
             } else {
-                if let Some(pin) = pstop_pin_slot.as_mut() {
-                    pin.set_high();
+                if let Some(pin) = pstop_ctl_slot.as_mut() {
+                    pin.set_low();
                 }
-                if let Some(pin) = ce_pin_slot.as_mut() {
-                    pin.set_low(); // 芯片在线，以便产生 INT
+                if let Some(pin) = ce_ctl_slot.as_mut() {
+                    pin.set_high(); // 芯片在线，以便产生 INT（反相控制）
                 }
             }
             charger_active = false;
@@ -294,16 +313,16 @@ pub async fn sc8815_task(
                 if sc8815_session.is_some() {
                     if let Some(sess) = sc8815_session.take() {
                         let (ce_back, pstop_back, i2c_back) = sess.end().await;
-                        ce_pin_slot = Some(ce_back);
-                        pstop_pin_slot = Some(pstop_back);
+                        ce_ctl_slot = Some(ce_back);
+                        pstop_ctl_slot = Some(pstop_back);
                         parked_i2c_device = Some(i2c_back);
                     }
                 } else {
-                    if let Some(pin) = pstop_pin_slot.as_mut() {
-                        pin.set_high();
+                    if let Some(pin) = pstop_ctl_slot.as_mut() {
+                        pin.set_low();
                     }
-                    if let Some(pin) = ce_pin_slot.as_mut() {
-                        pin.set_high();
+                    if let Some(pin) = ce_ctl_slot.as_mut() {
+                        pin.set_low();
                     }
                 }
                 charger_active = false;
@@ -316,16 +335,16 @@ pub async fn sc8815_task(
                     if sc8815_session.is_some() {
                         if let Some(sess) = sc8815_session.take() {
                             let (ce_back, pstop_back, i2c_back) = sess.end().await;
-                            ce_pin_slot = Some(ce_back);
-                            pstop_pin_slot = Some(pstop_back);
+                            ce_ctl_slot = Some(ce_back);
+                            pstop_ctl_slot = Some(pstop_back);
                             parked_i2c_device = Some(i2c_back);
                         }
                     } else {
-                        if let Some(pin) = pstop_pin_slot.as_mut() {
-                            pin.set_high();
+                        if let Some(pin) = pstop_ctl_slot.as_mut() {
+                            pin.set_low();
                         }
-                        if let Some(pin) = ce_pin_slot.as_mut() {
-                            pin.set_high();
+                        if let Some(pin) = ce_ctl_slot.as_mut() {
+                            pin.set_low();
                         }
                     }
                     charger_active = false;
@@ -344,7 +363,7 @@ pub async fn sc8815_task(
                 // 对任一故障：功率级停机，保持会话等待恢复
                 if let Some(sess) = sc8815_session.as_mut() {
                     sess.disable_power_stage();
-                } else if let Some(pin) = pstop_pin_slot.as_mut() {
+                } else if let Some(pin) = pstop_ctl_slot.as_mut() {
                     pin.set_high();
                 }
                 charger_active = false;
@@ -401,20 +420,20 @@ pub async fn sc8815_task(
                 if pol_start_cond {
                     // (edge latch removed)
                     if sc8815_session.is_none() {
-                        if let Some(pin) = pstop_pin_slot.as_mut() {
-                            pin.set_high();
+                        if let Some(pin) = pstop_ctl_slot.as_mut() {
+                            pin.set_low();
                         }
                         // Move pins into the session
-                        let ce_take = ce_pin_slot.take().expect("CE pin missing");
-                        let pstop_take = pstop_pin_slot.take().expect("PSTOP pin missing");
+                        let ce_take = ce_ctl_slot.take().expect("CE pin missing");
+                        let pstop_take = pstop_ctl_slot.take().expect("PSTOP pin missing");
                         let i2c_take = parked_i2c_device.take().expect("I2C missing");
                         match ScSession::begin(ce_take, pstop_take, i2c_take, address).await {
                             Ok(session) => {
                                 sc8815_session = Some(session);
                             }
                             Err((ce_back, pstop_back, i2c_back)) => {
-                                ce_pin_slot = Some(ce_back);
-                                pstop_pin_slot = Some(pstop_back);
+                                ce_ctl_slot = Some(ce_back);
+                                pstop_ctl_slot = Some(pstop_back);
                                 parked_i2c_device = Some(i2c_back);
                                 charger_active = false;
                                 charge_confirmed = false;
@@ -442,8 +461,8 @@ pub async fn sc8815_task(
                     } else {
                         if let Some(sess) = sc8815_session.as_mut() {
                             sess.disable_power_stage();
-                        } else if let Some(pin) = pstop_pin_slot.as_mut() {
-                            pin.set_high();
+                        } else if let Some(pin) = pstop_ctl_slot.as_mut() {
+                            pin.set_low();
                         }
                         // log pause gating only when state (OV/IMB pair) changes
                         let pause_sig = ((ov_pause_secs > 0 || uv_pause_secs > 0 || oc_pause_secs > 0), imbalance_pause_active);
@@ -482,8 +501,8 @@ pub async fn sc8815_task(
                             _adapter_present = false;
                             if let Some(sess) = sc8815_session.take() {
                                 let (ce_back, pstop_back, i2c_back) = sess.end().await;
-                                ce_pin_slot = Some(ce_back);
-                                pstop_pin_slot = Some(pstop_back);
+                                ce_ctl_slot = Some(ce_back);
+                                pstop_ctl_slot = Some(pstop_back);
                                 parked_i2c_device = Some(i2c_back);
                             }
                             charger_active = false;
@@ -503,8 +522,8 @@ pub async fn sc8815_task(
                             info!("eoc");
                             if let Some(sess) = sc8815_session.take() {
                                 let (ce_back, pstop_back, i2c_back) = sess.end().await;
-                                ce_pin_slot = Some(ce_back);
-                                pstop_pin_slot = Some(pstop_back);
+                                ce_ctl_slot = Some(ce_back);
+                                pstop_ctl_slot = Some(pstop_back);
                                 parked_i2c_device = Some(i2c_back);
                             }
                             charger_active = false;
@@ -522,8 +541,8 @@ pub async fn sc8815_task(
                             );
                             if let Some(sess) = sc8815_session.take() {
                                 let (ce_back, pstop_back, i2c_back) = sess.end().await;
-                                ce_pin_slot = Some(ce_back);
-                                pstop_pin_slot = Some(pstop_back);
+                                ce_ctl_slot = Some(ce_back);
+                                pstop_ctl_slot = Some(pstop_back);
                                 parked_i2c_device = Some(i2c_back);
                             }
                             charger_active = false;
@@ -539,8 +558,8 @@ pub async fn sc8815_task(
                         // err
                         if let Some(sess) = sc8815_session.take() {
                             let (ce_back, pstop_back, i2c_back) = sess.end().await;
-                            ce_pin_slot = Some(ce_back);
-                            pstop_pin_slot = Some(pstop_back);
+                            ce_ctl_slot = Some(ce_back);
+                            pstop_ctl_slot = Some(pstop_back);
                             parked_i2c_device = Some(i2c_back);
                         }
                         charger_active = false;
@@ -552,11 +571,11 @@ pub async fn sc8815_task(
                 None => {
                     // CE claimed enabled but no session exists; recover by disabling gates.
                     defmt::info!("sc_session_missing");
-                    if let Some(pin) = pstop_pin_slot.as_mut() {
-                        pin.set_high();
+                    if let Some(pin) = pstop_ctl_slot.as_mut() {
+                        pin.set_low();
                     }
-                    if let Some(pin) = ce_pin_slot.as_mut() {
-                        pin.set_high();
+                    if let Some(pin) = ce_ctl_slot.as_mut() {
+                        pin.set_low();
                     }
                     charger_active = false;
                     charge_confirmed = false;
