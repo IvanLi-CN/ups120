@@ -278,6 +278,7 @@ pub async fn bq76920_task(
     // have been written correctly by reading them back.
     match bq.try_apply_config(&battery_config).await {
         Ok(_) => {
+            crate::failsafe::set_bq_online(true);
             if TEST_FORCE_BQ_FETS_OFF {
                 debug!("test:force_fets_off:init");
                 let _ = bq.disable_discharging().await;
@@ -290,9 +291,11 @@ pub async fn bq76920_task(
         }
         Err(BQ769x0Error::ConfigVerificationFailed { .. }) => {
             error!("bq:cfg_verify");
+            crate::failsafe::set_bq_online(false);
         }
         Err(_e) => {
             error!("bq:cfg_apply");
+            crate::failsafe::set_bq_online(false);
         }
     }
 
@@ -537,6 +540,7 @@ pub async fn bq76920_task(
                 error!("bq:meas!");
                 latest_core_measurements = None;
                 fail_streak = fail_streak.saturating_add(1);
+                if fail_streak >= 3 { crate::failsafe::set_bq_online(false); }
                 if fail_streak >= 3 {
                     crate::failsafe::request_pstop();
                 }
@@ -553,6 +557,7 @@ pub async fn bq76920_task(
             core_measurements: latest_core_measurements.unwrap_or_default(),
         };
         bq76920_measurements_publisher.publish_immediate(bq76920_measurements_payload_for_main_pub);
+        if latest_core_measurements.is_some() { crate::failsafe::set_bq_online(true); fail_streak = 0; }
 
         cell_sample_elapsed = 0;
         } // end sample_due

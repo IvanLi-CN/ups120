@@ -131,10 +131,10 @@ pub async fn leds_task(
         if let Some(b) = bal_cv_sub.try_next_message_pure() {
             overlay_balancing = b.overlay;
         }
-        // bq_dropout derived from measurement staleness (≥3 s w/o frames)
-        if let Some(t) = last_bq_meas { bq_dropout = now - t >= Duration::from_secs(3); }
-        let last_ms = crate::failsafe::sc_last_ms();
-        let sc_dropout = if last_ms == 0 { true } else { (now.as_millis() as u32).wrapping_sub(last_ms) >= 3000 };
+        // Dropout derived from online flags: device stays online after boot probe
+        // and only turns offline on real communication timeout thereafter.
+        bq_dropout = !crate::failsafe::is_bq_online();
+        let sc_dropout = !crate::failsafe::is_sc_online();
 
         // Trigger async green pulse on I2C1 activity
         if crate::activity::I2C1_ACTIVITY_PULSE.load(core::sync::atomic::Ordering::Relaxed) {

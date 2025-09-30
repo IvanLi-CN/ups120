@@ -230,6 +230,7 @@ pub async fn sc8815_task(
     let mut imbalance_pause_active: bool = false;
     // 100ms tick accumulator → drive *_pause_secs at 1 Hz
     let mut tick_100ms: u8 = 0;
+    let mut sc_comm_fail_streak: u8 = 0;
 
     // Log de-noising latch for pause state changes only
     let mut last_pause_report: Option<(bool, bool)> = None; // (ov_pause_active, imbalance_pause_active)
@@ -244,12 +245,15 @@ pub async fn sc8815_task(
                 Ok(session) => {
                     sc8815_session = Some(session);
                     info!("sc:probe ok");
+                    crate::failsafe::set_sc_online(true);
                 }
                 Err((ce_back, pstop_back, i2c_back)) => {
                     ce_ctl_slot = Some(ce_back);
                     pstop_ctl_slot = Some(pstop_back);
                     parked_i2c_device = Some(i2c_back);
                     info!("sc:probe fail");
+                    // keep offline until a later success
+                    crate::failsafe::set_sc_online(false);
                 }
             }
         }
@@ -492,6 +496,8 @@ pub async fn sc8815_task(
                         // status fetched
                         // 更新 AC 静默策略
                         crate::failsafe::set_ac_present(status.ac_adapter_connected);
+                        crate::failsafe::set_sc_online(true);
+                        sc_comm_fail_streak = 0;
                         let now_ms = embassy_time::Instant::now().as_millis() as u32;
                         crate::failsafe::sc_heartbeat_update(now_ms);
                         // ok
@@ -566,6 +572,8 @@ pub async fn sc8815_task(
                         charge_confirmed = false;
                         confirm_streak = 0;
                         drop_streak = 0;
+                        sc_comm_fail_streak = sc_comm_fail_streak.saturating_add(1);
+                        if sc_comm_fail_streak >= 3 { crate::failsafe::set_sc_online(false); }
                     }
                 },
                 None => {
@@ -592,6 +600,8 @@ pub async fn sc8815_task(
                         }
                         let now_ms = embassy_time::Instant::now().as_millis() as u32;
                         crate::failsafe::sc_heartbeat_update(now_ms);
+                        crate::failsafe::set_sc_online(true);
+                        sc_comm_fail_streak = 0;
                         // ok
 
                         if charger_active {
@@ -636,6 +646,8 @@ pub async fn sc8815_task(
                         charge_confirmed = false;
                         confirm_streak = 0;
                         drop_streak = 0;
+                        sc_comm_fail_streak = sc_comm_fail_streak.saturating_add(1);
+                        if sc_comm_fail_streak >= 3 { crate::failsafe::set_sc_online(false); }
                     }
                 },
                 None => {
