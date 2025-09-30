@@ -125,9 +125,70 @@ async fn main(_spawner: Spawner) {
         balancing_cv_chan,
     ) = shared::init_pubsubs();
 
-    // Gate other tasks on successful BQ76920 initialization using fixed I2C address.
+    // 先启动与 BQ 无关的任务：IRQ/LED/Sleep，使掉线状态也能被指示出来。
+    // SC8815 INT: per README mapping PB2 = INNER_INT (EXTI2)
+    let sc_int = ExtiInput::new(p.PB2, p.EXTI2, Pull::Up);
+    _spawner
+        .spawn(sc8815_task::sc8815_irq_task(sc_int).expect("sc-int token"));
+
+    // BQ76920 ALERT: PB1 = ALERT (EXTI1). Datasheet: push-pull active-high → no pull.
+    let bq_alert = ExtiInput::new(p.PB1, p.EXTI1, Pull::None);
+    _spawner
+        .spawn(bq76920_task::bq_alert_irq_task(bq_alert).expect("bq-int token"));
+
+    // 提前启动 4‑LED 状态任务（PA5=Red, PA6=Yellow, PA7=Green, PB0=Blue），以便掉线时也能闪烁。
+    let led_r = Output::new(p.PA5, Level::High, Speed::Low);
+    let led_y = Output::new(p.PA6, Level::High, Speed::Low);
+    let led_g = Output::new(p.PA7, Level::High, Speed::Low);
+    let led_b = Output::new(p.PB0, Level::High, Speed::Low);
+    let led_bq_sub = bq76920_meas_chan
+        .subscriber()
+        .expect("Allocate BQ76920 measurements subscriber for 4-LED task");
+    let led_sc_alerts_sub = _sc8815_alerts_chan
+        .subscriber()
+        .expect("Allocate SC8815 alerts subscriber for 4-LED task");
+    let led_bq_alerts_sub = _bq76920_alerts_chan
+        .subscriber()
+        .expect("Allocate BQ76920 alerts subscriber for 4-LED task");
+    let led_bal_cv_sub = balancing_cv_chan
+        .subscriber()
+        .expect("Allocate BalancingCv subscriber for 4-LED task");
+    _spawner.spawn(
+        leds4_task::leds_task(
+            leds4_task::LedPins { red: led_r, yellow: led_y, green: led_g, blue: led_b },
+            led_bq_sub,
+            led_sc_alerts_sub,
+            led_bq_alerts_sub,
+            led_bal_cv_sub,
+        )
+        .expect("led4 token"),
+    );
+
+    // 提前启动 SC 任务（即使 BQ 未就绪，也可根据 AC 与暂停策略控制 PSTOP），
+    // BQ 测量订阅者在后续上线后会自然供数。
+    let bq76920_meas_sub = bq76920_meas_chan
+        .subscriber()
+        .expect("Allocate BQ76920 measurements subscriber");
+    let i2c_dev_for_sc = I2cDevice::new(i2c_bus);
+    let balancing_cv_sub = balancing_cv_chan
+        .subscriber()
+        .expect("Allocate BalancingCv subscriber for charger task");
+    _spawner.spawn(
+        sc8815_task::sc8815_task(
+            ce,
+            pstop,
+            i2c_dev_for_sc,
+            sc8815_task::SC8815_DEFAULT_ADDRESS,
+            sc8815_alerts_pub,
+            sc8815_meas_pub,
+            bq76920_meas_sub,
+            balancing_cv_sub,
+        )
+        .expect("sc token"),
+    );
+
+    // 最后再进行 BQ76920 初始化循环
     defmt::info!("bq:init");
-    // removed unused ship_mode_pulsed to reduce flash
     let mut retry_count: u32 = 0;
     let _selected_bq_addr = loop {
         // Try common fixed-address variants: 0x08 (03) then 0x18 (06)
@@ -190,71 +251,6 @@ async fn main(_spawner: Spawner) {
         defmt::debug!("bq:retry");
         Timer::after(Duration::from_secs(1)).await;
     };
-
-    // Create a subscriber for BQ76920 measurements to feed charger control logic.
-    let bq76920_meas_sub = bq76920_meas_chan
-        .subscriber()
-        .expect("Allocate BQ76920 measurements subscriber");
-
-    // Spawn SC8815 charger management task now that the protection IC is live.
-    let i2c_dev_for_sc = I2cDevice::new(i2c_bus);
-    let balancing_cv_sub = balancing_cv_chan
-        .subscriber()
-        .expect("Allocate BalancingCv subscriber for charger task");
-    _spawner.spawn(
-        sc8815_task::sc8815_task(
-            ce,
-            pstop,
-            exit_shipmode,
-            i2c_dev_for_sc,
-            sc8815_task::SC8815_DEFAULT_ADDRESS,
-            sc8815_alerts_pub,
-            sc8815_meas_pub,
-            bq76920_meas_sub,
-            balancing_cv_sub,
-        )
-        .expect("sc token"),
-    );
-
-    // SC8815 INT: per README mapping PB2 = INNER_INT (EXTI2)
-    let sc_int = ExtiInput::new(p.PB2, p.EXTI2, Pull::Up);
-    _spawner
-        .spawn(sc8815_task::sc8815_irq_task(sc_int).expect("sc-int token"));
-
-    // BQ76920 ALERT: PB1 = ALERT (EXTI1). Datasheet: push-pull active-high → no pull.
-    let bq_alert = ExtiInput::new(p.PB1, p.EXTI1, Pull::None);
-    _spawner
-        .spawn(bq76920_task::bq_alert_irq_task(bq_alert).expect("bq-int token"));
-
-    // Global state aggregator removed; LEDs derive locally to save flash
-
-    // 启动 4‑LED 状态任务（PA5=Red, PA6=Yellow, PA7=Green, PB0=Blue）
-    let led_r = Output::new(p.PA5, Level::High, Speed::Low);
-    let led_y = Output::new(p.PA6, Level::High, Speed::Low);
-    let led_g = Output::new(p.PA7, Level::High, Speed::Low);
-    let led_b = Output::new(p.PB0, Level::High, Speed::Low);
-    let led_bq_sub = bq76920_meas_chan
-        .subscriber()
-        .expect("Allocate BQ76920 measurements subscriber for 4-LED task");
-    let led_sc_alerts_sub = _sc8815_alerts_chan
-        .subscriber()
-        .expect("Allocate SC8815 alerts subscriber for 4-LED task");
-    let led_bq_alerts_sub = _bq76920_alerts_chan
-        .subscriber()
-        .expect("Allocate BQ76920 alerts subscriber for 4-LED task");
-    let led_bal_cv_sub = balancing_cv_chan
-        .subscriber()
-        .expect("Allocate BalancingCv subscriber for 4-LED task");
-    _spawner.spawn(
-        leds4_task::leds_task(
-            leds4_task::LedPins { red: led_r, yellow: led_y, green: led_g, blue: led_b },
-            led_bq_sub,
-            led_sc_alerts_sub,
-            led_bq_alerts_sub,
-            led_bal_cv_sub,
-        )
-        .expect("led4 token"),
-    );
 
     // 保留软件睡眠管理器（轻度 SLEEP 策略），由默认执行器 WFE 驱动。
     _spawner

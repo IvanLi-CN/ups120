@@ -191,7 +191,6 @@ impl ScSession {
 pub async fn sc8815_task(
     mut ce_pin: Output<'static>,
     mut pstop_pin: Output<'static>,
-    _exit_shipmode_pin: Output<'static>,
     i2c_device: I2cDevice<
         'static,
         CriticalSectionRawMutex,
