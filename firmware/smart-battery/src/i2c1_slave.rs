@@ -4,14 +4,13 @@ use defmt::*;
 use embassy_stm32::i2c::{self, I2c};
 use embassy_stm32::mode::Blocking;
 
-
-use crate::shared::{Bq76920MeasurementsChannelType, Sc8815MeasurementsChannelType};
 use crate::activity::poke_i2c1_activity;
+use crate::shared::{Bq76920MeasurementsChannelType, Sc8815MeasurementsChannelType};
+use crate::state_bits::{self, bits as sbits};
 
 // Mirror storage for future I2C1-slave responses (ISR 无关，传输层在 embassy 从机 API 中实现)
 static VBAT_MV: AtomicU16 = AtomicU16::new(0);
 static IBAT_MA: AtomicI16 = AtomicI16::new(0);
-static ADAPTER_PRESENT: AtomicBool = AtomicBool::new(false);
 static CELLS_PRESENT: AtomicU16 = AtomicU16::new(5);
 static CHG_ENABLE_REQ: AtomicBool = AtomicBool::new(false);
 static CHG_CURRENT_LIMIT_MA: AtomicU16 = AtomicU16::new(0);
@@ -35,6 +34,7 @@ fn crc8(mut c: u8, byte: u8) -> u8 {
 }
 
 fn read_reg(addr: u8) -> u8 {
+    let snap = state_bits::snapshot();
     match addr {
         0x00 => b'S',
         0x01 => b'B',
@@ -43,13 +43,38 @@ fn read_reg(addr: u8) -> u8 {
         0x04 => 1, // FW_VER_MINOR placeholder
         0x05 => 0, // FW_VER_PATCH placeholder
         0x06 => 0,
-        0x07 => 0b0001_0111, // basic sys status
+        0x07 => {
+            let mut bits: u8 = 0;
+            if (snap.flags & sbits::AC_PRESENT) != 0 {
+                bits |= 1 << 0;
+            }
+            if (snap.flags & sbits::CHARGING) != 0 {
+                bits |= 1 << 1;
+            }
+            if (snap.flags & sbits::CHG_PAUSED) != 0 {
+                bits |= 1 << 2;
+            }
+            if (snap.flags & sbits::FULL) != 0 {
+                bits |= 1 << 3;
+            }
+            if (snap.flags & sbits::BALANCING) != 0 {
+                bits |= 1 << 4;
+            }
+            if (snap.flags & (sbits::FAULT_BQ | sbits::FAULT_SC)) != 0 {
+                bits |= 1 << 5;
+            }
+            if (snap.flags & sbits::PREPARING) != 0 {
+                bits |= 1 << 6;
+            }
+            bits
+        }
         0x10 => (VBAT_MV.load(Ordering::Relaxed) & 0xFF) as u8,
         0x11 => (VBAT_MV.load(Ordering::Relaxed) >> 8) as u8,
         0x12 => (IBAT_MA.load(Ordering::Relaxed) as u16 & 0xFF) as u8,
         0x13 => ((IBAT_MA.load(Ordering::Relaxed) as u16) >> 8) as u8,
-        0x1E => ADAPTER_PRESENT.load(Ordering::Relaxed) as u8,
+        0x1E => ((snap.flags & sbits::AC_PRESENT) != 0) as u8,
         0x1F => CELLS_PRESENT.load(Ordering::Relaxed) as u8,
+        0x20 => snap.blue_code,
         0x30 => CHG_ENABLE_REQ.load(Ordering::Relaxed) as u8,
         0x31 => CHG_ENABLE_REQ.load(Ordering::Relaxed) as u8,
         0x32 => (CHG_CURRENT_LIMIT_MA.load(Ordering::Relaxed) & 0xFF) as u8,
@@ -161,7 +186,6 @@ pub async fn sc_meas_mirror_task(ch: &'static Sc8815MeasurementsChannelType) {
         let m = sub.next_message_pure().await;
         VBAT_MV.store(m.adc_measurements.vbat_mv as u16, Ordering::Relaxed);
         IBAT_MA.store(m.adc_measurements.ibat_ma as i16, Ordering::Relaxed);
-        // ADAPTER_PRESENT 由全局状态镜像任务维护，避免在 SC 任务静默时误判
     }
 }
 

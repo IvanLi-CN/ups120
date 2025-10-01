@@ -13,6 +13,7 @@ use crate::shared::{
     BalancingCvRequestSubscriber, Bq76920AlertsSubscriber, Bq76920MeasurementsSubscriber,
     Sc8815AlertsSubscriber,
 };
+use crate::state_bits::{self, bits as sbits};
 
 // Timing (3 s base cycle; pulses are 120 ms wide with 120 ms gaps)
 const CYCLE_MS: u32 = 3000;
@@ -22,8 +23,8 @@ const PULSE_GAP_MS: u32 = 120;
 
 #[derive(Clone, Copy, Default)]
 struct LedIntent {
-    base_on: bool,   // true → LED ON (low level)
-    pulses: u8,      // 0..=8 pulses at cycle start
+    base_on: bool, // true → LED ON (low level)
+    pulses: u8,    // 0..=8 pulses at cycle start
     fault_blink: bool,
     dropout_blink: bool, // reserved; to be driven by dropout counters
 }
@@ -57,7 +58,9 @@ fn compose_with_pulses(base_on: bool, pulses: u8, phase_ms: u32) -> bool {
     base_on
 }
 
-fn bq_fets_both_on<const N: usize>(bq_opt: &Option<crate::data_types::Bq76920Measurements<N>>) -> bool {
+fn bq_fets_both_on<const N: usize>(
+    bq_opt: &Option<crate::data_types::Bq76920Measurements<N>>,
+) -> bool {
     if let Some(bq) = bq_opt.as_ref() {
         use bq769x0_async_rs::registers::SysCtrl2Flags;
         let m = bq.core_measurements.mos_status.0;
@@ -120,10 +123,18 @@ pub async fn leds_task(
         if let Some(ba) = bq_alerts_sub.try_next_message_pure() {
             use bq769x0_async_rs::registers::SysStatFlags;
             let f = ba.system_status.0;
-            if f.contains(SysStatFlags::SCD) { red_pulse_severity = red_pulse_severity.max(3); }
-            if f.contains(SysStatFlags::OCD) { red_pulse_severity = red_pulse_severity.max(4); }
-            if f.intersects(SysStatFlags::UV | SysStatFlags::OV) { red_pulse_severity = red_pulse_severity.max(2); }
-            bq_fault = f.intersects(SysStatFlags::UV | SysStatFlags::OV | SysStatFlags::SCD | SysStatFlags::OCD);
+            if f.contains(SysStatFlags::SCD) {
+                red_pulse_severity = red_pulse_severity.max(3);
+            }
+            if f.contains(SysStatFlags::OCD) {
+                red_pulse_severity = red_pulse_severity.max(4);
+            }
+            if f.intersects(SysStatFlags::UV | SysStatFlags::OV) {
+                red_pulse_severity = red_pulse_severity.max(2);
+            }
+            bq_fault = f.intersects(
+                SysStatFlags::UV | SysStatFlags::OV | SysStatFlags::SCD | SysStatFlags::OCD,
+            );
         }
         if let Some(b) = bal_cv_sub.try_next_message_pure() {
             overlay_balancing = b.overlay;
@@ -135,7 +146,8 @@ pub async fn leds_task(
 
         // Trigger async green pulse on I2C1 activity
         if crate::activity::I2C1_ACTIVITY_PULSE.load(core::sync::atomic::Ordering::Relaxed) {
-            crate::activity::I2C1_ACTIVITY_PULSE.store(false, core::sync::atomic::Ordering::Relaxed);
+            crate::activity::I2C1_ACTIVITY_PULSE
+                .store(false, core::sync::atomic::Ordering::Relaxed);
             green_pulse_until = Some(Instant::now() + Duration::from_millis(PULSE_W_MS as u64));
         }
 
@@ -153,28 +165,44 @@ pub async fn leds_task(
         if bq_fault {
             red.fault_blink = true;
         }
-        if bq_dropout { red.dropout_blink = true; }
+        if bq_dropout {
+            red.dropout_blink = true;
+        }
         // Pulse code（severity）：3=SCD，4=OCD，2=UV/OV，其次 1=均衡叠加
-        if red_pulse_severity > 0 { red.pulses = red.pulses.max(red_pulse_severity); }
-        if overlay_balancing { red.pulses = red.pulses.max(1); }
+        if red_pulse_severity > 0 {
+            red.pulses = red.pulses.max(red_pulse_severity);
+        }
+        if overlay_balancing {
+            red.pulses = red.pulses.max(1);
+        }
 
         // Yellow (SC8815)
         let mut yellow = LedIntent::default();
         // charging: 期望或已确认均视为“在充电会话中”
         yellow.base_on = sc_ac_present && (sc_expected || sc_confirmed);
-        if sc_fault { yellow.fault_blink = true; }
-        if sc_dropout { yellow.dropout_blink = true; }
+        if sc_fault {
+            yellow.fault_blink = true;
+        }
+        if sc_dropout {
+            yellow.dropout_blink = true;
+        }
         // Yellow pulses：
         // - 2 = 适配器异常（VBUS short）
         // - 4 = 过温
         // - 1 = preparing（需要充电但 AC 不在）
         if !sc_ac_present {
             if let Some(m) = bq.as_ref() {
-                if m.core_measurements.total_voltage_mv < 17_000 { yellow.pulses = yellow.pulses.max(1); }
+                if m.core_measurements.total_voltage_mv < 17_000 {
+                    yellow.pulses = yellow.pulses.max(1);
+                }
             }
         }
-        if sc_vbus_short { yellow.pulses = yellow.pulses.max(2); }
-        if sc_otp { yellow.pulses = yellow.pulses.max(4); }
+        if sc_vbus_short {
+            yellow.pulses = yellow.pulses.max(2);
+        }
+        if sc_otp {
+            yellow.pulses = yellow.pulses.max(4);
+        }
 
         // Green (Comm + Sleep)
         let mut green = LedIntent::default();
@@ -183,20 +211,26 @@ pub async fn leds_task(
 
         // Blue (Global)
         let mut blue = LedIntent::default();
-        // Must not be pulse-less; if no pulse applies, show OFF
         blue.base_on = false;
-        // Suggested codebook mapping（简化但语义一致）
-        if bq_fault || sc_fault {
-            blue.pulses = blue.pulses.max(6);
-        } else if overlay_balancing {
-            blue.pulses = blue.pulses.max(4);
-        } else if sc_pause_ov || sc_pause_imb {
-            blue.pulses = blue.pulses.max(3);
-        } else if sc_ac_present && (sc_expected || sc_confirmed) {
-            blue.pulses = blue.pulses.max(2);
+        let state_flags = state_bits::flags();
+        let fault_bits = sbits::FAULT_BQ | sbits::FAULT_SC;
+        let blue_code: u8 = if (state_flags & fault_bits) != 0 || bq_fault || sc_fault {
+            6
+        } else if (state_flags & sbits::BALANCING) != 0 || overlay_balancing {
+            4
+        } else if sc_pause_ov || sc_pause_imb || (state_flags & sbits::CHG_PAUSED) != 0 {
+            3
+        } else if (state_flags & sbits::FULL) != 0 {
+            5
+        } else if (state_flags & sbits::CHARGING) != 0
+            || (sc_ac_present && (sc_expected || sc_confirmed))
+        {
+            2
         } else {
-            blue.pulses = blue.pulses.max(1);
-        }
+            1
+        };
+        blue.pulses = blue_code;
+        state_bits::set_blue_code(blue_code);
 
         // Drive pins with priority
         // RED
@@ -223,7 +257,11 @@ pub async fn leds_task(
         // GREEN (with async pulse overlay)
         let mut green_on = compose_with_pulses(green.base_on, green.pulses, p_green);
         if let Some(until) = green_pulse_until {
-            if now < until { green_on = !green_on; } else { green_pulse_until = None; }
+            if now < until {
+                green_on = !green_on;
+            } else {
+                green_pulse_until = None;
+            }
         }
         apply_led(&mut pins.green, green_on);
 

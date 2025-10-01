@@ -14,6 +14,7 @@ use crate::shared::{
     BalancingCvRequestSubscriber, Bq76920MeasurementsSubscriber, Sc8815AlertsPublisher,
     Sc8815MeasurementsPublisher,
 };
+use crate::state_bits::{self, bits as sbits};
 use embassy_stm32::exti::ExtiInput;
 use portable_atomic::AtomicBool;
 
@@ -25,6 +26,9 @@ const PACK_OUTPUT_CUTOFF_THRESHOLD_MV: i32 = 12_500;
 const MIN_EFFECTIVE_IBAT_MA: u16 = 100;
 const IBAT_RELEASE_MARGIN_MA: u16 = 20;
 const CHARGE_CONFIRMATION_SAMPLES: u8 = 3;
+const ITERM_EXIT_MULTIPLIER_X10: u16 = 12;
+const FULL_ENTER_SECS: u32 = 60;
+const FULL_EXIT_SECS: u32 = 10;
 
 // Logging/diagnostics verbosity for SC8815 task
 const ENABLE_SC8815_DIAG: bool = false;
@@ -160,7 +164,11 @@ impl ScSession {
         // Print compact configuration summary
         // cfg summary
 
-        Ok(Self { sc, ce_ctl: ce_pin, pstop_ctl: pstop_pin })
+        Ok(Self {
+            sc,
+            ce_ctl: ce_pin,
+            pstop_ctl: pstop_pin,
+        })
     }
 
     async fn end(mut self) -> (Output<'static>, Output<'static>, I2cDev) {
@@ -183,6 +191,39 @@ impl ScSession {
         // Stop power stage: PSTOP_CTL=Low → chip PSTOP=High
         self.pstop_ctl.set_low();
     }
+}
+
+#[inline(always)]
+fn refresh_state_flags(
+    ac_present: bool,
+    charger_active: bool,
+    charge_confirmed: bool,
+    pause_active: bool,
+    imbalance_pause_active: bool,
+    full_latched: bool,
+    sc_fault: bool,
+) {
+    let paused = ac_present && (pause_active || imbalance_pause_active);
+    let charging = charger_active || charge_confirmed || paused;
+    const MASK: u16 =
+        sbits::AC_PRESENT | sbits::CHARGING | sbits::CHG_PAUSED | sbits::FULL | sbits::FAULT_SC;
+    let mut value: u16 = 0;
+    if ac_present {
+        value |= sbits::AC_PRESENT;
+    }
+    if charging {
+        value |= sbits::CHARGING;
+    }
+    if paused {
+        value |= sbits::CHG_PAUSED;
+    }
+    if full_latched {
+        value |= sbits::FULL;
+    }
+    if sc_fault {
+        value |= sbits::FAULT_SC;
+    }
+    state_bits::update_flags(MASK, value);
 }
 
 /// Embassy task managing the SC8815 charger with safety gating.
@@ -231,6 +272,11 @@ pub async fn sc8815_task(
     // 100ms tick accumulator → drive *_pause_secs at 1 Hz
     let mut tick_100ms: u8 = 0;
     let mut sc_comm_fail_streak: u8 = 0;
+    let mut sc_fault_flag: bool = false;
+    let mut last_status_eoc: bool = false;
+    let mut full_enter_ms: u32 = 0;
+    let mut full_exit_ms: u32 = 0;
+    let mut full_latched: bool = false;
 
     // Log de-noising latch for pause state changes only
     let mut last_pause_report: Option<(bool, bool)> = None; // (ov_pause_active, imbalance_pause_active)
@@ -242,7 +288,14 @@ pub async fn sc8815_task(
             // Ensure power stage is stopped during probe
             let mut pstop_tmp = pstop_tmp;
             pstop_tmp.set_low();
-            match ScSession::begin(ce_tmp, pstop_tmp, parked_i2c_device.take().expect("I2C missing"), address).await {
+            match ScSession::begin(
+                ce_tmp,
+                pstop_tmp,
+                parked_i2c_device.take().expect("I2C missing"),
+                address,
+            )
+            .await
+            {
                 Ok(session) => {
                     sc8815_session = Some(session);
                     info!("sc:probe ok");
@@ -290,6 +343,19 @@ pub async fn sc8815_task(
             charge_confirmed = false;
             confirm_streak = 0;
             drop_streak = 0;
+            _adapter_present = false;
+            full_latched = false;
+            full_enter_ms = 0;
+            full_exit_ms = 0;
+            refresh_state_flags(
+                false,
+                charger_active,
+                charge_confirmed,
+                ov_pause_secs > 0 || uv_pause_secs > 0 || oc_pause_secs > 0,
+                imbalance_pause_active,
+                full_latched,
+                sc_fault_flag,
+            );
             // 短等待：允许由 IRQ 唤醒，无状态轮询
             Timer::after(Duration::from_millis(100)).await;
             continue;
@@ -336,7 +402,10 @@ pub async fn sc8815_task(
                 drop_streak = 0;
             } else if pack_voltage_mv >= PACK_CHARGE_STOP_THRESHOLD_MV {
                 if !latest_bal_req.require_cv {
-                    info!("stop vb>{} {}", PACK_CHARGE_STOP_THRESHOLD_MV, pack_voltage_mv);
+                    info!(
+                        "stop vb>{} {}",
+                        PACK_CHARGE_STOP_THRESHOLD_MV, pack_voltage_mv
+                    );
                     if sc8815_session.is_some() {
                         if let Some(sess) = sc8815_session.take() {
                             let (ce_back, pstop_back, i2c_back) = sess.end().await;
@@ -358,13 +427,25 @@ pub async fn sc8815_task(
                     drop_streak = 0;
                 }
             } else if critical_fault {
-                if charger_active { defmt::info!("blocking_fault {}", pack_voltage_mv); }
+                if charger_active {
+                    defmt::info!("blocking_fault {}", pack_voltage_mv);
+                }
                 // 打印阻断充电的故障原因
-                defmt::info!("blk f=0x{:02x} vb={}", system_status_flags.bits(), pack_voltage_mv);
+                defmt::info!(
+                    "blk f=0x{:02x} vb={}",
+                    system_status_flags.bits(),
+                    pack_voltage_mv
+                );
                 // 针对不同故障设置不同冷却时间：OV 180s、UV 10s、OCD/SCD 30s
-                if ov_fault { ov_pause_secs = ov_pause_secs.max(180); }
-                if uv_fault { uv_pause_secs = uv_pause_secs.max(10); }
-                if scd_fault || ocd_fault { oc_pause_secs = oc_pause_secs.max(30); }
+                if ov_fault {
+                    ov_pause_secs = ov_pause_secs.max(180);
+                }
+                if uv_fault {
+                    uv_pause_secs = uv_pause_secs.max(10);
+                }
+                if scd_fault || ocd_fault {
+                    oc_pause_secs = oc_pause_secs.max(30);
+                }
                 // 对任一故障：功率级停机，保持会话等待恢复
                 if let Some(sess) = sc8815_session.as_mut() {
                     sess.disable_power_stage();
@@ -455,7 +536,11 @@ pub async fn sc8815_task(
                     }
 
                     // Now that the chip is configured and ADC running, (conditionally) enable power stage
-                    if ov_pause_secs == 0 && uv_pause_secs == 0 && oc_pause_secs == 0 && !imbalance_pause_active {
+                    if ov_pause_secs == 0
+                        && uv_pause_secs == 0
+                        && oc_pause_secs == 0
+                        && !imbalance_pause_active
+                    {
                         if let Some(sess) = sc8815_session.as_mut() {
                             sess.enable_power_stage();
                         }
@@ -470,7 +555,10 @@ pub async fn sc8815_task(
                             pin.set_low();
                         }
                         // log pause gating only when state (OV/IMB pair) changes
-                        let pause_sig = ((ov_pause_secs > 0 || uv_pause_secs > 0 || oc_pause_secs > 0), imbalance_pause_active);
+                        let pause_sig = (
+                            (ov_pause_secs > 0 || uv_pause_secs > 0 || oc_pause_secs > 0),
+                            imbalance_pause_active,
+                        );
                         if last_pause_report != Some(pause_sig) {
                             let mut b: u8 = 0; // bit0=LH, bit1=OV, bit2=IMB
                             b |= 1 << 0; // LH
@@ -480,7 +568,7 @@ pub async fn sc8815_task(
                             if imbalance_pause_active {
                                 b |= 1 << 2;
                             }
-                        let _ = b; // shrink log
+                            let _ = b; // shrink log
                             last_pause_report = Some(pause_sig);
                         }
                         charger_active = false;
@@ -494,6 +582,8 @@ pub async fn sc8815_task(
             match sc8815_session.as_mut() {
                 Some(sess) => match sess.sc.get_device_status().await {
                     Ok(status) => {
+                        sc_fault_flag = status.otp_fault || status.vbus_short_fault;
+                        last_status_eoc = status.eoc;
                         // status fetched
                         // 更新 AC 静默策略
                         crate::failsafe::set_ac_present(status.ac_adapter_connected);
@@ -517,6 +607,18 @@ pub async fn sc8815_task(
                             confirm_streak = 0;
                             drop_streak = 0;
                             adapter_holdoff_secs = adapter_holdoff_secs.max(5);
+                            full_latched = false;
+                            full_enter_ms = 0;
+                            full_exit_ms = 0;
+                            refresh_state_flags(
+                                false,
+                                charger_active,
+                                charge_confirmed,
+                                ov_pause_secs > 0 || uv_pause_secs > 0 || oc_pause_secs > 0,
+                                imbalance_pause_active,
+                                full_latched,
+                                sc_fault_flag,
+                            );
                             _latest_status_for_alerts = Some(status);
                             // Skip further work in this tick when adapter just lost
                             continue;
@@ -537,6 +639,18 @@ pub async fn sc8815_task(
                             charge_confirmed = false;
                             confirm_streak = 0;
                             drop_streak = 0;
+                            full_latched = true;
+                            full_exit_ms = 0;
+                            full_enter_ms = FULL_ENTER_SECS * 1000;
+                            refresh_state_flags(
+                                _adapter_present,
+                                charger_active,
+                                charge_confirmed,
+                                ov_pause_secs > 0 || uv_pause_secs > 0 || oc_pause_secs > 0,
+                                imbalance_pause_active,
+                                full_latched,
+                                sc_fault_flag,
+                            );
                             _latest_status_for_alerts = Some(status);
                             continue;
                         }
@@ -544,7 +658,8 @@ pub async fn sc8815_task(
                         if status.otp_fault || status.vbus_short_fault {
                             defmt::info!(
                                 "sc:fault o={} v={}",
-                                status.otp_fault, status.vbus_short_fault
+                                status.otp_fault,
+                                status.vbus_short_fault
                             );
                             if let Some(sess) = sc8815_session.take() {
                                 let (ce_back, pstop_back, i2c_back) = sess.end().await;
@@ -556,6 +671,15 @@ pub async fn sc8815_task(
                             charge_confirmed = false;
                             confirm_streak = 0;
                             drop_streak = 0;
+                            refresh_state_flags(
+                                _adapter_present,
+                                charger_active,
+                                charge_confirmed,
+                                ov_pause_secs > 0 || uv_pause_secs > 0 || oc_pause_secs > 0,
+                                imbalance_pause_active,
+                                full_latched,
+                                sc_fault_flag,
+                            );
                             continue;
                         }
                         _latest_status_for_alerts = Some(status);
@@ -574,7 +698,9 @@ pub async fn sc8815_task(
                         confirm_streak = 0;
                         drop_streak = 0;
                         sc_comm_fail_streak = sc_comm_fail_streak.saturating_add(1);
-                        if sc_comm_fail_streak >= 3 { crate::failsafe::set_sc_online(false); }
+                        if sc_comm_fail_streak >= 3 {
+                            crate::failsafe::set_sc_online(false);
+                        }
                     }
                 },
                 None => {
@@ -604,6 +730,57 @@ pub async fn sc8815_task(
                         crate::failsafe::set_sc_online(true);
                         sc_comm_fail_streak = 0;
                         // ok
+
+                        let last_vbat_mv = measurements.vbat_mv as i32;
+                        if _adapter_present {
+                            if last_status_eoc {
+                                full_latched = true;
+                                full_exit_ms = 0;
+                            }
+                            let enter_ok = last_vbat_mv >= PACK_CHARGE_STOP_THRESHOLD_MV
+                                && measurements.ibat_ma <= MIN_EFFECTIVE_IBAT_MA;
+                            if !full_latched {
+                                if enter_ok {
+                                    full_enter_ms =
+                                        (full_enter_ms + 100).min((FULL_ENTER_SECS + 1) * 1000);
+                                } else {
+                                    full_enter_ms = 0;
+                                }
+                                if full_enter_ms >= FULL_ENTER_SECS * 1000 {
+                                    full_latched = true;
+                                    full_exit_ms = 0;
+                                }
+                            } else {
+                                let exit_current_threshold = ((MIN_EFFECTIVE_IBAT_MA as u32
+                                    * ITERM_EXIT_MULTIPLIER_X10 as u32
+                                    + 9)
+                                    / 10)
+                                    as u16;
+                                let exit_by_current =
+                                    measurements.ibat_ma >= exit_current_threshold;
+                                let exit_by_voltage = last_vbat_mv < PACK_CHARGE_START_THRESHOLD_MV;
+                                let pause_active =
+                                    (ov_pause_secs > 0 || uv_pause_secs > 0 || oc_pause_secs > 0)
+                                        || imbalance_pause_active;
+                                let charging_flags = charger_active
+                                    || charge_confirmed
+                                    || (pause_active && _adapter_present);
+                                if exit_by_current || exit_by_voltage || !charging_flags {
+                                    full_exit_ms =
+                                        (full_exit_ms + 100).min((FULL_EXIT_SECS + 1) * 1000);
+                                } else {
+                                    full_exit_ms = 0;
+                                }
+                                if full_exit_ms >= FULL_EXIT_SECS * 1000 {
+                                    full_latched = false;
+                                    full_enter_ms = 0;
+                                }
+                            }
+                        } else {
+                            full_latched = false;
+                            full_enter_ms = 0;
+                            full_exit_ms = 0;
+                        }
 
                         if charger_active {
                             let ibat = measurements.ibat_ma;
@@ -648,7 +825,9 @@ pub async fn sc8815_task(
                         confirm_streak = 0;
                         drop_streak = 0;
                         sc_comm_fail_streak = sc_comm_fail_streak.saturating_add(1);
-                        if sc_comm_fail_streak >= 3 { crate::failsafe::set_sc_online(false); }
+                        if sc_comm_fail_streak >= 3 {
+                            crate::failsafe::set_sc_online(false);
+                        }
                     }
                 },
                 None => {
@@ -661,7 +840,9 @@ pub async fn sc8815_task(
                     device_status: status,
                     expected_charging: charger_active,
                     charging_confirmed: charge_confirmed,
-                    ov_pause_active: (ov_pause_secs > 0) || (uv_pause_secs > 0) || (oc_pause_secs > 0),
+                    ov_pause_active: (ov_pause_secs > 0)
+                        || (uv_pause_secs > 0)
+                        || (oc_pause_secs > 0),
                     imbalance_pause_active,
                 };
                 sc8815_alerts_publisher.publish_immediate(alerts_payload);
@@ -679,14 +860,32 @@ pub async fn sc8815_task(
         }
 
         // 100ms 节拍 → 每 1 秒递减 *_secs 计时器
-        if adapter_holdoff_secs > 0 { adapter_holdoff_secs = adapter_holdoff_secs.saturating_sub(1); }
+        if adapter_holdoff_secs > 0 {
+            adapter_holdoff_secs = adapter_holdoff_secs.saturating_sub(1);
+        }
         tick_100ms = tick_100ms.wrapping_add(1);
         if tick_100ms >= 10 {
             tick_100ms = 0;
-            if ov_pause_secs > 0 { ov_pause_secs = ov_pause_secs.saturating_sub(1); }
-            if uv_pause_secs > 0 { uv_pause_secs = uv_pause_secs.saturating_sub(1); }
-            if oc_pause_secs > 0 { oc_pause_secs = oc_pause_secs.saturating_sub(1); }
+            if ov_pause_secs > 0 {
+                ov_pause_secs = ov_pause_secs.saturating_sub(1);
+            }
+            if uv_pause_secs > 0 {
+                uv_pause_secs = uv_pause_secs.saturating_sub(1);
+            }
+            if oc_pause_secs > 0 {
+                oc_pause_secs = oc_pause_secs.saturating_sub(1);
+            }
         }
+        let pause_active = (ov_pause_secs > 0) || (uv_pause_secs > 0) || (oc_pause_secs > 0);
+        refresh_state_flags(
+            _adapter_present,
+            charger_active,
+            charge_confirmed,
+            pause_active,
+            imbalance_pause_active,
+            full_latched,
+            sc_fault_flag,
+        );
         Timer::after(Duration::from_millis(100)).await;
     }
 }
