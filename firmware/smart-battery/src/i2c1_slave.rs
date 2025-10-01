@@ -75,6 +75,16 @@ fn read_reg(addr: u8) -> u8 {
         0x1E => ((snap.flags & sbits::AC_PRESENT) != 0) as u8,
         0x1F => CELLS_PRESENT.load(Ordering::Relaxed) as u8,
         0x20 => snap.blue_code,
+        0x21 => {
+            let mut bits = 0u8;
+            if (snap.flags & sbits::ACTIVE_SC) != 0 {
+                bits |= 1 << 0;
+            }
+            if (snap.flags & sbits::ACTIVE_BQ) != 0 {
+                bits |= 1 << 1;
+            }
+            bits
+        }
         0x30 => CHG_ENABLE_REQ.load(Ordering::Relaxed) as u8,
         0x31 => CHG_ENABLE_REQ.load(Ordering::Relaxed) as u8,
         0x32 => (CHG_CURRENT_LIMIT_MA.load(Ordering::Relaxed) & 0xFF) as u8,

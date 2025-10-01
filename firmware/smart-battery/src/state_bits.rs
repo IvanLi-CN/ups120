@@ -12,6 +12,8 @@ pub mod bits {
     pub const BALANCING: u16 = 1 << 5;
     pub const FAULT_BQ: u16 = 1 << 6;
     pub const FAULT_SC: u16 = 1 << 7;
+    pub const ACTIVE_SC: u16 = 1 << 8;
+    pub const ACTIVE_BQ: u16 = 1 << 9;
 }
 
 static STATE_FLAGS: AtomicU16 = AtomicU16::new(0);

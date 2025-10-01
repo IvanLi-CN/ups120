@@ -196,6 +196,7 @@ impl ScSession {
 #[inline(always)]
 fn refresh_state_flags(
     ac_present: bool,
+    sc_active: bool,
     charger_active: bool,
     charge_confirmed: bool,
     pause_active: bool,
@@ -205,8 +206,12 @@ fn refresh_state_flags(
 ) {
     let paused = ac_present && (pause_active || imbalance_pause_active);
     let charging = charger_active || charge_confirmed || paused;
-    const MASK: u16 =
-        sbits::AC_PRESENT | sbits::CHARGING | sbits::CHG_PAUSED | sbits::FULL | sbits::FAULT_SC;
+    const MASK: u16 = sbits::AC_PRESENT
+        | sbits::CHARGING
+        | sbits::CHG_PAUSED
+        | sbits::FULL
+        | sbits::FAULT_SC
+        | sbits::ACTIVE_SC;
     let mut value: u16 = 0;
     if ac_present {
         value |= sbits::AC_PRESENT;
@@ -222,6 +227,9 @@ fn refresh_state_flags(
     }
     if sc_fault {
         value |= sbits::FAULT_SC;
+    }
+    if sc_active {
+        value |= sbits::ACTIVE_SC;
     }
     state_bits::update_flags(MASK, value);
 }
@@ -348,6 +356,7 @@ pub async fn sc8815_task(
             full_enter_ms = 0;
             full_exit_ms = 0;
             refresh_state_flags(
+                false,
                 false,
                 charger_active,
                 charge_confirmed,
@@ -612,6 +621,7 @@ pub async fn sc8815_task(
                             full_exit_ms = 0;
                             refresh_state_flags(
                                 false,
+                                false,
                                 charger_active,
                                 charge_confirmed,
                                 ov_pause_secs > 0 || uv_pause_secs > 0 || oc_pause_secs > 0,
@@ -644,6 +654,7 @@ pub async fn sc8815_task(
                             full_enter_ms = FULL_ENTER_SECS * 1000;
                             refresh_state_flags(
                                 _adapter_present,
+                                false,
                                 charger_active,
                                 charge_confirmed,
                                 ov_pause_secs > 0 || uv_pause_secs > 0 || oc_pause_secs > 0,
@@ -673,6 +684,7 @@ pub async fn sc8815_task(
                             drop_streak = 0;
                             refresh_state_flags(
                                 _adapter_present,
+                                false,
                                 charger_active,
                                 charge_confirmed,
                                 ov_pause_secs > 0 || uv_pause_secs > 0 || oc_pause_secs > 0,
@@ -877,8 +889,10 @@ pub async fn sc8815_task(
             }
         }
         let pause_active = (ov_pause_secs > 0) || (uv_pause_secs > 0) || (oc_pause_secs > 0);
+        let sc_active_flag = _adapter_present && (charger_active || charge_confirmed);
         refresh_state_flags(
             _adapter_present,
+            sc_active_flag,
             charger_active,
             charge_confirmed,
             pause_active,

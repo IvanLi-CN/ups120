@@ -45,8 +45,8 @@ const BALANCE_SWITCH_DEADTIME_MS: u64 = 40;
 static BQ_ALERT_PENDING: AtomicBool = AtomicBool::new(false);
 
 #[inline(always)]
-fn update_bq_state(preparing: bool, balancing_active: bool, fault_bq: bool) {
-    const MASK: u16 = sbits::PREPARING | sbits::BALANCING | sbits::FAULT_BQ;
+fn update_bq_state(preparing: bool, balancing_active: bool, fault_bq: bool, active: bool) {
+    const MASK: u16 = sbits::PREPARING | sbits::BALANCING | sbits::FAULT_BQ | sbits::ACTIVE_BQ;
     let mut value = 0u16;
     if preparing {
         value |= sbits::PREPARING;
@@ -56,6 +56,9 @@ fn update_bq_state(preparing: bool, balancing_active: bool, fault_bq: bool) {
     }
     if fault_bq {
         value |= sbits::FAULT_BQ;
+    }
+    if active {
+        value |= sbits::ACTIVE_BQ;
     }
     state_bits::update_flags(MASK, value);
 }
@@ -393,7 +396,7 @@ pub async fn bq76920_task(
             adapter_present = false;
             let full_flag = (state_bits::flags() & sbits::FULL) != 0;
             let preparing = !full_flag && last_pack_voltage_mv < PACK_CHARGE_START_THRESHOLD_MV;
-            update_bq_state(preparing, false, fault_bq_flag);
+            update_bq_state(preparing, false, fault_bq_flag, false);
             embassy_time::Timer::after(embassy_time::Duration::from_millis(100)).await;
             continue;
         }
@@ -421,6 +424,7 @@ pub async fn bq76920_task(
         } else {
             60
         };
+        let bq_active_flag = period_secs < 60;
         let mut sample_due = cell_sample_elapsed >= period_secs;
         let alert_due_now = BQ_ALERT_PENDING.swap(false, portable_atomic::Ordering::Relaxed);
         if alert_due_now {
@@ -771,7 +775,7 @@ pub async fn bq76920_task(
         let preparing =
             !adapter_present && !full_flag && last_pack_voltage_mv < PACK_CHARGE_START_THRESHOLD_MV;
         let balancing_flag = last_cellbal_bits != 0 || active_balancing_cell.is_some();
-        update_bq_state(preparing, balancing_flag, fault_bq_flag);
+        update_bq_state(preparing, balancing_flag, fault_bq_flag, bq_active_flag);
 
         // Update edge tracking
         prev_adapter_present = adapter_present;

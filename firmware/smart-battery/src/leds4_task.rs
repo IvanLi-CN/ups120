@@ -156,11 +156,13 @@ pub async fn leds_task(
         let p_green = (now - epoch_green).as_millis() as u32 % CYCLE_MS;
         let p_blue = (now - epoch_blue).as_millis() as u32 % CYCLE_MS;
 
+        let state_flags = state_bits::flags();
+
         // Red (BQ FET/Protection)
         let mut red = LedIntent::default();
-        // Base: both CHG & DSG ON => OFF; else ON
         let both_on = bq_fets_both_on(&bq);
-        red.base_on = !both_on;
+        let red_active = (state_flags & sbits::ACTIVE_BQ) != 0;
+        red.base_on = red_active;
         // Fault blink mapping：电池故障 → 50% 闪烁；并按严重度分配脉冲数（越严重脉冲数越大）
         if bq_fault {
             red.fault_blink = true;
@@ -175,11 +177,14 @@ pub async fn leds_task(
         if overlay_balancing {
             red.pulses = red.pulses.max(1);
         }
+        if !both_on {
+            red.pulses = red.pulses.max(5);
+        }
 
         // Yellow (SC8815)
         let mut yellow = LedIntent::default();
-        // charging: 期望或已确认均视为“在充电会话中”
-        yellow.base_on = sc_ac_present && (sc_expected || sc_confirmed);
+        let yellow_active = (state_flags & sbits::ACTIVE_SC) != 0;
+        yellow.base_on = yellow_active;
         if sc_fault {
             yellow.fault_blink = true;
         }
@@ -212,7 +217,6 @@ pub async fn leds_task(
         // Blue (Global)
         let mut blue = LedIntent::default();
         blue.base_on = false;
-        let state_flags = state_bits::flags();
         let fault_bits = sbits::FAULT_BQ | sbits::FAULT_SC;
         let blue_code: u8 = if (state_flags & fault_bits) != 0 || bq_fault || sc_fault {
             6
