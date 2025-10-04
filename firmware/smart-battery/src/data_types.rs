@@ -24,7 +24,6 @@ impl<const N: usize> Default for Bq76920Measurements<N> {
 
 /// BQ76920 安全告警信息
 #[derive(Debug, Copy, Clone, PartialEq)]
-
 pub struct Bq76920Alerts {
     pub system_status: SystemStatus,
 }
@@ -37,8 +36,8 @@ impl Default for Bq76920Alerts {
     }
 }
 /// INA226 测量数据
-#[derive(Debug, Copy, Clone, PartialEq, defmt::Format)]
-
+#[allow(dead_code)]
+#[derive(Debug, Copy, Clone, PartialEq)]
 pub struct Ina226Measurements {
     pub voltage: f32,
     pub current: f32,
@@ -56,7 +55,7 @@ impl Default for Ina226Measurements {
 }
 
 /// SC8815 测量数据
-#[derive(Debug, Copy, Clone, PartialEq, defmt::Format)]
+#[derive(Debug, Copy, Clone, PartialEq)]
 pub struct Sc8815Measurements {
     pub adc_measurements: Sc8815AdcMeasurements,
 }

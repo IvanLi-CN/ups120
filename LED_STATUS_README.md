@@ -1,4 +1,8 @@
-# LED状态指示实现
+# [已更新] 多灯指示规范已迁移
+
+本文件为“单灯”原型说明，已被新版四色 LED 与状态机规范取代。请参考：`firmware/smart-battery/SOFTWARE_DESIGN.md`。
+
+# LED状态指示实现（旧版，仅存档）
 
 ## 概述
 

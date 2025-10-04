@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 authors = ["Ivan Li<ivanli2048@gmail.com>"]
 
+
 [dependencies]
 embassy-stm32 = { path = "../../embassy/embassy-stm32", features = [
   "defmt",
@@ -11,7 +12,6 @@ embassy-stm32 = { path = "../../embassy/embassy-stm32", features = [
   "stm32l051c8",
   "memory-x",
   "exti",
-  "unstable-pac",
 ] }
 embassy-sync = { path = "../../embassy/embassy-sync", features = ["defmt"] }
 embassy-executor = { path = "../../embassy/embassy-executor", features = [

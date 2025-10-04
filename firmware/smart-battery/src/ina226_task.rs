@@ -15,13 +15,13 @@ pub async fn ina226_task(
     address: u8,
     ina226_measurements_publisher: Ina226MeasurementsPublisher<'static>,
 ) {
-    info!("INA226 task started.");
+    debug!("ina226:start");
     // Create temporary I2cDevice instance for each operation
     let mut ina226 = INA226::new(i2c_bus, address); // Use the passed address
 
     // Resistance 10mOhm, Max 10A
     if let Err(_) = ina226.callibrate(0.01, 10.0).await {
-        defmt::error!("INA226: Failed to calibrate INA226");
+        defmt::error!("ina226:calib");
     }
 
     loop {
@@ -44,7 +44,7 @@ pub async fn ina226_task(
             power: power_mw_f64 as f32,
         };
         ina226_measurements_publisher.publish_immediate(ina226_measurements);
-        info!(
+        defmt::debug!(
             "INA226 Measurements: Voltage: {}mV, Current: {}mA, Power: {}mW",
             ina226_measurements.voltage, ina226_measurements.current, ina226_measurements.power
         );

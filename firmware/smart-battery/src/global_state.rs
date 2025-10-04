@@ -7,10 +7,12 @@
 use defmt::*;
 use embassy_time::{Duration, Instant, Timer};
 
-use crate::data_types::{BalancingCvRequest, Bq76920Alerts, Sc8815Alerts, Sc8815Measurements};
+use crate::data_types::{
+    BalancingCvRequest, Bq76920Alerts, Bq76920Measurements, Sc8815Alerts, Sc8815Measurements,
+};
 use crate::shared::{
-    BalancingCvRequestSubscriber, Bq76920AlertsSubscriber, GlobalStatePublisher,
-    Sc8815AlertsSubscriber, Sc8815MeasurementsSubscriber,
+    BalancingCvRequestSubscriber, Bq76920AlertsSubscriber, Bq76920MeasurementsSubscriber,
+    GlobalStatePublisher, Sc8815AlertsSubscriber, Sc8815MeasurementsSubscriber,
 };
 use bq769x0_async_rs::registers::SysStatFlags;
 
@@ -23,7 +25,7 @@ const FULL_ENTER_SECS: u32 = 60;
 const FULL_EXIT_SECS: u32 = 10;
 
 /// Derived, compact system state for UI/LED/logging.
-#[derive(Debug, Copy, Clone, PartialEq, defmt::Format)]
+#[derive(Debug, Copy, Clone, PartialEq)]
 pub struct BatteryGlobalState {
     pub ac_present: bool,
     pub charging: bool,         // include paused-as-charging phase
@@ -33,6 +35,7 @@ pub struct BatteryGlobalState {
     pub balancing_active: bool, // HW balancing active (overlay indicator)
     pub fault_battery: bool, // BQ OV/UV/SCD/OCD
     pub fault_charger: bool, // SC8815 OTP/VBUS short
+    // Dropout flags are not part of compact state (LED derives locally when needed)
 }
 
 impl Default for BatteryGlobalState {
@@ -65,14 +68,16 @@ pub async fn global_state_task(
     mut sc_meas_sub: Sc8815MeasurementsSubscriber<'static>,
     mut bq_alerts_sub: Bq76920AlertsSubscriber<'static>,
     mut bal_cv_sub: BalancingCvRequestSubscriber<'static>,
+    mut bq_meas_sub: Bq76920MeasurementsSubscriber<'static, 5>,
     state_pub: GlobalStatePublisher<'static>,
 ) {
-    info!("global_state: start");
+    debug!("gs:start");
 
     // Latest inputs (non-blocking sampling)
     let mut latest_sc_alerts: Option<Sc8815Alerts> = None;
     let mut latest_sc_meas: Option<Sc8815Measurements> = None;
     let mut latest_bq_alerts: Option<Bq76920Alerts> = None;
+    let mut latest_bq_meas: Option<Bq76920Measurements<5>> = None;
     let mut latest_bal: BalancingCvRequest = BalancingCvRequest::default();
 
     // Full-state hysteresis latches
@@ -93,6 +98,9 @@ pub async fn global_state_task(
         }
         if let Some(a) = bq_alerts_sub.try_next_message_pure() {
             latest_bq_alerts = Some(a);
+        }
+        if let Some(m) = bq_meas_sub.try_next_message_pure() {
+            latest_bq_meas = Some(m);
         }
         if let Some(b) = bal_cv_sub.try_next_message_pure() {
             latest_bal = b;
@@ -128,6 +136,16 @@ pub async fn global_state_task(
                     >= ((ITERM_MA as u32 * ITERM_EXIT_MULTIPLIER_X10 as u32 + 9) / 10) as u16;
                 let exit_by_voltage = vbat_mv < PACK_CHARGE_START_THRESHOLD_MV;
 
+                // 满电判据：SC EOC 或 BQ 迟滞（二者任一即可）
+                let sc_eoc = latest_sc_alerts
+                    .as_ref()
+                    .map(|a| a.device_status.eoc)
+                    .unwrap_or(false);
+                if sc_eoc {
+                    is_full_latched = true;
+                    full_exit_acc_ms = 0;
+                }
+
                 if !is_full_latched {
                     if enter_ok {
                         full_enter_acc_ms =
@@ -138,7 +156,7 @@ pub async fn global_state_task(
                     if full_enter_acc_ms >= FULL_ENTER_SECS * 1000 {
                         is_full_latched = true;
                         full_exit_acc_ms = 0;
-                        info!("global_state: full_latched");
+                        debug!("full=1");
                     }
                 } else {
                     if exit_by_current || exit_by_voltage || !charging_flags {
@@ -149,7 +167,7 @@ pub async fn global_state_task(
                     if full_exit_acc_ms >= FULL_EXIT_SECS * 1000 {
                         is_full_latched = false;
                         full_enter_acc_ms = 0;
-                        info!("global_state: full_released");
+                        debug!("full=0");
                     }
                 }
             }
@@ -160,10 +178,16 @@ pub async fn global_state_task(
             full_exit_acc_ms = 0;
         }
 
-        // Preparing-to-charge: no AC but pack below start threshold, and not already full
+        // Preparing-to-charge: 无 AC 时若电压低于启动阈值则提示。
+        // 优先使用 BQ 测量（低功耗、始终在线），若无则退回 SC 测量。
         if !ac_present {
-            if let Some(meas) = latest_sc_meas.as_ref() {
-                let vbat_mv = meas.adc_measurements.vbat_mv as i32;
+            let mut vbat_mv_opt: Option<i32> = None;
+            if let Some(bq) = latest_bq_meas.as_ref() {
+                vbat_mv_opt = Some(bq.core_measurements.total_voltage_mv);
+            } else if let Some(sc) = latest_sc_meas.as_ref() {
+                vbat_mv_opt = Some(sc.adc_measurements.vbat_mv as i32);
+            }
+            if let Some(vbat_mv) = vbat_mv_opt {
                 preparing = vbat_mv < PACK_CHARGE_START_THRESHOLD_MV && !is_full_latched;
             }
         }
@@ -180,23 +204,20 @@ pub async fn global_state_task(
         };
 
         if first_pub || new_state != last_published {
-            info!(
-                "state_changed ac={} chg={} paused={} prep={} full={} bal={} batt_fault={} chg_fault={}",
-                new_state.ac_present,
-                new_state.charging,
-                new_state.charging_paused,
-                new_state.preparing,
-                new_state.full,
-                new_state.balancing_active,
-                new_state.fault_battery,
-                new_state.fault_charger
-            );
+            // snapshot omitted to save flash; state is visible via I2C + event logs
             state_pub.publish_immediate(new_state);
             last_published = new_state;
             first_pub = false;
         }
 
-        // Evaluate every 10ms; also avoid burning CPU
+        // 当 AC 缺失时，保持低频评估而不是完全阻塞，
+        // 以便能够吸收来自 SC8815 的“适配器插入”提示并发布新全局状态。
+        if crate::failsafe::is_quiesced() {
+            Timer::after(Duration::from_millis(250)).await;
+            continue;
+        }
+
+        // AC present: evaluate every 10 ms for responsive UI/LED and latching logic.
         let now = Instant::now();
         let _ = now;
         let _ = last_eval; // reserved if later needed

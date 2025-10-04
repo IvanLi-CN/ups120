@@ -4,8 +4,10 @@ use defmt::*;
 use embassy_time::{Duration, Timer};
 
 use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
+use embassy_stm32::exti::ExtiInput;
 use embassy_stm32::i2c::I2c;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use portable_atomic::AtomicBool;
 
 use bq769x0_async_rs::ProtectionConfig;
 use bq769x0_async_rs::{
@@ -18,8 +20,10 @@ use crate::shared::{
     BalancingCvRequestPublisher, Bq76920AlertsPublisher, Bq76920MeasurementsPublisher,
     Sc8815AlertsSubscriber,
 };
+use crate::state_bits::{self, bits as sbits};
 
 const PACK_CHARGE_STOP_THRESHOLD_MV: i32 = 18_500;
+const PACK_CHARGE_START_THRESHOLD_MV: i32 = 17_000;
 const PACK_OUTPUT_CUTOFF_THRESHOLD_MV: i32 = 12_500;
 // New balancing policy thresholds
 // Start balancing during charging when pack spread (max-min) exceeds 10 mV.
@@ -29,7 +33,7 @@ const LOCAL_PEAK_MARGIN_MV: i32 = 1;
 
 // Logging verbosity toggles for BQ76920 task
 const VERBOSE_BQ_LOG: bool = false; // set true for full register-by-register dumps
-const SNAP_BQ_EVERY_SEC: u32 = 1; // one-line snapshot interval (seconds)
+// snapshot disabled to save flash
 
 // Test knob: force both CHG/DSG FETs off for charger-path diagnostics.
 // Default false for normal operation; set true only for lab diagnostics.
@@ -37,10 +41,46 @@ const TEST_FORCE_BQ_FETS_OFF: bool = false;
 // Interlock deadtime when switching balancing target cells (safety)
 const BALANCE_SWITCH_DEADTIME_MS: u64 = 40;
 
+// Wake-on-ALERT pending flag for BQ (set by EXTI task)
+static BQ_ALERT_PENDING: AtomicBool = AtomicBool::new(false);
+
+#[inline(always)]
+fn update_bq_state(preparing: bool, balancing_active: bool, fault_bq: bool, active: bool) {
+    const MASK: u16 = sbits::PREPARING | sbits::BALANCING | sbits::FAULT_BQ | sbits::ACTIVE_BQ;
+    let mut value = 0u16;
+    if preparing {
+        value |= sbits::PREPARING;
+    }
+    if balancing_active {
+        value |= sbits::BALANCING;
+    }
+    if fault_bq {
+        value |= sbits::FAULT_BQ;
+    }
+    if active {
+        value |= sbits::ACTIVE_BQ;
+    }
+    state_bits::update_flags(MASK, value);
+}
+
+#[embassy_executor::task]
+pub async fn bq_alert_irq_task(mut int_pin: ExtiInput<'static>) {
+    loop {
+        // ALERT is active-high per datasheet: trigger on rising edges.
+        int_pin.wait_for_rising_edge().await;
+        BQ_ALERT_PENDING.store(true, portable_atomic::Ordering::Relaxed);
+        crate::sleep_manager::bump("bq-int");
+    }
+}
+
 // Smart cell balancing logic based on charging status and voltage thresholds
 async fn execute_smart_battery_balancing<'a>(
     bq: &'a mut Bq769x0<
-        I2cDevice<'static, CriticalSectionRawMutex, I2c<'static, embassy_stm32::mode::Async, embassy_stm32::i2c::mode::Master>>,
+        I2cDevice<
+            'static,
+            CriticalSectionRawMutex,
+            I2c<'static, embassy_stm32::mode::Async, embassy_stm32::i2c::mode::Master>,
+        >,
         bq769x0_async_rs::Enabled,
         5,
     >,
@@ -69,7 +109,7 @@ async fn execute_smart_battery_balancing<'a>(
             }
         }
         if max_v == i32::MIN || min_v == i32::MAX {
-            warn!("No valid cell voltages available for balancing");
+            defmt::info!("No valid cell voltages available for balancing");
             let _ = bq.set_cell_balancing(0).await;
             *active_cell = None;
             return;
@@ -88,10 +128,7 @@ async fn execute_smart_battery_balancing<'a>(
         }
         if all_adjacent_within_margin {
             if active_cell.is_some() {
-                info!(
-                    "Stopping balancing: all adjacent diffs <= {} mV",
-                    LOCAL_PEAK_MARGIN_MV
-                );
+                debug!("bal:stop adj<= {}mV", LOCAL_PEAK_MARGIN_MV);
             }
             let _ = bq.set_cell_balancing(0).await;
             *active_cell = None;
@@ -127,41 +164,33 @@ async fn execute_smart_battery_balancing<'a>(
                     // Ensure single-cell-only: turn all off, wait deadtime, then enable new cell
                     let _ = bq.set_cell_balancing(0).await;
                     info!(
-                        "Balancing switch deadtime {}ms ({} -> {} )",
+                        "bal~ {}ms {}>{}",
                         BALANCE_SWITCH_DEADTIME_MS,
                         prev + 1,
                         cell_idx + 1
                     );
                     Timer::after(Duration::from_millis(BALANCE_SWITCH_DEADTIME_MS)).await;
                 }
-                info!(
-                    "Starting balancing on cell {} ({} mV, spread {} mV)",
-                    cell_idx + 1,
-                    v[cell_idx],
-                    spread
-                );
+                info!("bal+ c{} {} d{}", cell_idx + 1, v[cell_idx], spread);
             }
-            if let Err(e) = bq.set_cell_balancing(mask).await {
-                error!("Failed to enable cell balancing: {:?}", e);
+            if let Err(_e) = bq.set_cell_balancing(mask).await {
+                error!("bal:en!");
             } else {
                 *active_cell = Some(cell_idx);
                 // Read-back verification
                 match bq.read_register(Register::CELLBAL1).await {
                     Ok(bits) => {
                         if (bits as u16 & mask) == 0 {
-                            warn!(
-                                "BAL verify mismatch: wrote 0x{:04X} but CELLBAL1=0x{:02X}",
-                                mask, bits
-                            );
+                            defmt::info!("bal:vr w={} r={}", mask, bits);
                         }
                     }
-                    Err(e) => warn!("BAL verify read failed: {:?}", e),
+                    Err(_e) => defmt::debug!("bal:vr err"),
                 }
             }
         } else {
             // No eligible local peak at global max; disable for now
             if active_cell.is_some() {
-                info!("No eligible local peak at max; disabling balancing");
+                info!("bal:no-peak");
             }
             let _ = bq.set_cell_balancing(0).await;
             *active_cell = None;
@@ -169,18 +198,15 @@ async fn execute_smart_battery_balancing<'a>(
             match bq.read_register(Register::CELLBAL1).await {
                 Ok(bits) => {
                     if bits != 0 {
-                        warn!(
-                            "BAL verify mismatch: expected 0 but CELLBAL1=0x{:02X}",
-                            bits
-                        );
+                        defmt::info!("bal:vr0 r={}", bits);
                     }
                 }
-                Err(e) => warn!("BAL verify read failed: {:?}", e),
+                Err(_e) => defmt::info!("bal:vr rd!"),
             }
         }
     } else {
         if active_cell.is_some() {
-            info!("No measurements available, disabling balancing as a precaution");
+            info!("bal:no-meas disable");
             let _ = bq.set_cell_balancing(0).await;
             *active_cell = None;
         }
@@ -217,7 +243,11 @@ async fn execute_smart_battery_balancing<'a>(
 ///   The const generic `5` indicates the number of cells, matching the `N` for `Bq769x0`.
 #[embassy_executor::task]
 pub async fn bq76920_task(
-    i2c_bus: I2cDevice<'static, CriticalSectionRawMutex, I2c<'static, embassy_stm32::mode::Async, embassy_stm32::i2c::mode::Master>>,
+    i2c_bus: I2cDevice<
+        'static,
+        CriticalSectionRawMutex,
+        I2c<'static, embassy_stm32::mode::Async, embassy_stm32::i2c::mode::Master>,
+    >,
     address: u8,
     sense_resistor_m_ohm: u32, // Added: Sense resistor value in mOhms
     ntc_params: Option<NtcParameters>, // Added: NTC parameters
@@ -226,11 +256,15 @@ pub async fn bq76920_task(
     mut sc8815_alerts_subscriber: Sc8815AlertsSubscriber<'static>,
     balancing_cv_publisher: BalancingCvRequestPublisher<'static>,
 ) {
-    info!("TEST_FORCE_BQ_FETS_OFF={}", TEST_FORCE_BQ_FETS_OFF);
+    // dbg: test_fets_off
     // Initialize the BQ769x0 driver instance with CRC enabled and for 5 cells.
     // sense_resistor_m_ohm and ntc_params are now passed as arguments to this task.
     let mut bq: Bq769x0<
-        I2cDevice<'static, CriticalSectionRawMutex, I2c<'static, embassy_stm32::mode::Async, embassy_stm32::i2c::mode::Master>>,
+        I2cDevice<
+            'static,
+            CriticalSectionRawMutex,
+            I2c<'static, embassy_stm32::mode::Async, embassy_stm32::i2c::mode::Master>,
+        >,
         bq769x0_async_rs::Enabled,
         5,
     > = Bq769x0::new(i2c_bus, address, sense_resistor_m_ohm, ntc_params);
@@ -240,6 +274,8 @@ pub async fn bq76920_task(
     let mut latest_core_measurements: Option<
         bq769x0_async_rs::data_types::Bq76920Measurements<5>,
     > = None;
+
+    // use top-level BQ_ALERT_PENDING (set by IRQ task)
 
     // --- BQ76920 Initialization Sequence ---
 
@@ -269,8 +305,9 @@ pub async fn bq76920_task(
     // have been written correctly by reading them back.
     match bq.try_apply_config(&battery_config).await {
         Ok(_) => {
+            crate::failsafe::set_bq_online(true);
             if TEST_FORCE_BQ_FETS_OFF {
-                info!("TEST: Forcing BQ76920 FETs OFF after config (init phase)");
+                debug!("test:force_fets_off:init");
                 let _ = bq.disable_discharging().await;
                 let _ = bq.disable_charging().await;
             } else {
@@ -279,31 +316,13 @@ pub async fn bq76920_task(
                 let _ = bq.enable_discharging().await;
             }
         }
-        Err(BQ769x0Error::ConfigVerificationFailed {
-            register,
-            expected,
-            actual,
-        }) => {
-            // This is a CRITICAL error. Configuration did not write correctly.
-            // FETs will NOT be enabled to prevent potentially unsafe operation
-            // with incorrect protection settings.
-            error!("CRITICAL: BQ76920 CONFIGURATION VERIFICATION FAILED!");
-            error!("  Register: {:?}", register);
-            error!("  Expected: {:#04x}", expected);
-            error!("  Actual:   {:#04x}", actual);
-            error!(
-                "FETs will NOT be enabled due to this configuration error. System may be unsafe."
-            );
-            // Depending on system requirements, this might warrant a panic or a safe shutdown procedure.
+        Err(BQ769x0Error::ConfigVerificationFailed { .. }) => {
+            error!("bq:cfg_verify");
+            crate::failsafe::set_bq_online(false);
         }
-        Err(e) => {
-            // Handles other errors from try_apply_config, such as I2C communication errors.
-            // Also a CRITICAL failure scenario.
-            error!(
-                "CRITICAL: Failed to apply BQ76920 configuration due to other error: {:?}",
-                e
-            );
-            error!("FETs will NOT be enabled. System may be unsafe.");
+        Err(_e) => {
+            error!("bq:cfg_apply");
+            crate::failsafe::set_bq_online(false);
         }
     }
 
@@ -312,6 +331,7 @@ pub async fn bq76920_task(
 
     // Main loop for continuous data acquisition and publishing.
     let mut balance_timer_counter: u32 = 0; // Counter for battery balancing frequency
+    let mut cell_sample_elapsed: u32 = 0; // Cell measurement scheduler (seconds)
     let mut active_balancing_cell: Option<usize> = None;
     let mut adapter_present: bool = false;
     let mut charger_expected: bool = false;
@@ -323,6 +343,10 @@ pub async fn bq76920_task(
     let mut balancing_needed_by_delta: bool = false;
     let mut prev_balancing_needed_by_delta: bool = false;
     let mut snap_tick: u32 = 0;
+    let mut fail_streak: u8 = 0; // BQ 连续通信失败计数（最小实现）
+    let mut fault_bq_flag: bool = false;
+    let mut last_pack_voltage_mv: i32 = PACK_CHARGE_START_THRESHOLD_MV;
+    // Dropout counters omitted in this step to keep flash within limits
     let mut adapter_lost_logged: bool = false;
     // Fast-evaluation triggers tracking
     let mut prev_adapter_present: bool = false;
@@ -330,6 +354,52 @@ pub async fn bq76920_task(
     let mut last_eval_period_secs: u32 = 3600;
 
     loop {
+        if crate::failsafe::is_quiesced() {
+            // Minimal maintenance: ensure balancing off
+            if let Some(_cell) = active_balancing_cell.take() {
+                let _ = bq.set_cell_balancing(0).await;
+            }
+            // Wake-on-ALERT: if IRQ flagged, do a quick status/measurements read and publish
+            if BQ_ALERT_PENDING.swap(false, portable_atomic::Ordering::Relaxed) {
+                match bq.read_all_measurements().await {
+                    Ok(core_meas) => {
+                        latest_core_measurements = Some(core_meas);
+                        // 成功则清空 fail-safe
+                        fail_streak = 0;
+                        crate::failsafe::clear_pstop();
+                        let alerts = crate::data_types::Bq76920Alerts {
+                            system_status: core_meas.system_status,
+                        };
+                        bq76920_alerts_publisher.publish_immediate(alerts);
+                        let meas_payload = crate::data_types::Bq76920Measurements {
+                            core_measurements: core_meas,
+                        };
+                        bq76920_measurements_publisher.publish_immediate(meas_payload);
+                        let flags_to_clear = core_meas.system_status.0.bits();
+                        if flags_to_clear != 0 {
+                            let _ = bq.clear_status_flags(flags_to_clear).await;
+                        }
+                    }
+                    Err(_e) => {
+                        // 失败计数，达到阈值后提出 fail-safe 请求
+                        fail_streak = fail_streak.saturating_add(1);
+                        if fail_streak >= 3 {
+                            crate::failsafe::request_pstop();
+                        }
+                        let alerts = crate::data_types::Bq76920Alerts {
+                            system_status: Default::default(),
+                        };
+                        bq76920_alerts_publisher.publish_immediate(alerts);
+                    }
+                }
+            }
+            adapter_present = false;
+            let full_flag = (state_bits::flags() & sbits::FULL) != 0;
+            let preparing = !full_flag && last_pack_voltage_mv < PACK_CHARGE_START_THRESHOLD_MV;
+            update_bq_state(preparing, false, fault_bq_flag, false);
+            embassy_time::Timer::after(embassy_time::Duration::from_millis(100)).await;
+            continue;
+        }
         // This task focuses on reading data from the BQ76920 itself.
         // Communication with other chips (like BQ25730 charger) is handled in their respective tasks.
 
@@ -342,291 +412,222 @@ pub async fn bq76920_task(
             let _ = bq.set_cell_balancing(0).await;
         }
 
-        if VERBOSE_BQ_LOG {
-            info!("BQ read: begin");
-        }
-
-        // Read ADC calibration values (not used in current logging but kept for potential future use)
-        let (_adc_gain_uv_per_lsb, _adc_offset_mv) = match bq.read_adc_calibration().await {
-            Ok(cal) => cal,
-            Err(e) => {
-                error!("Failed to read ADC calibration: {:?}", e);
-                // Use default calibration values if reading fails
-                (365, 0) // Default values from datasheet
-            }
+        // 采样调度：均衡期间 1s，其余按阶段 30/60s；ALERT 立即采样
+        let hw_balancing_active_now =
+            last_cellbal_bits != 0 || active_balancing_cell.is_some() || balancing_needed_by_delta;
+        let charging_phase =
+            charger_expected || charger_confirmed || ov_pause_active || imbalance_pause_active;
+        let period_secs: u32 = if hw_balancing_active_now {
+            1
+        } else if charging_phase {
+            30
+        } else {
+            60
         };
-
-        // Read and display cell balancing status
-        let cellbal1_register = bq.read_register(Register::CELLBAL1).await.unwrap_or(0);
-        if VERBOSE_BQ_LOG {
-            info!("Cell Balancing Status:");
-            info!(
-                "  CELLBAL1 register: 0b{:08b} (0x{:02X})",
-                cellbal1_register, cellbal1_register
-            );
+        let bq_active_flag = period_secs < 60;
+        let mut sample_due = cell_sample_elapsed >= period_secs;
+        let alert_due_now = BQ_ALERT_PENDING.swap(false, portable_atomic::Ordering::Relaxed);
+        if alert_due_now {
+            sample_due = true;
         }
 
-        // Display which cells are enabled for balancing
-        let mut balancing_cells = [0u8; 5];
-        let mut balancing_count = 0;
-        for i in 0..5 {
-            if (cellbal1_register & (1 << i)) != 0 {
-                balancing_cells[balancing_count] = (i + 1) as u8;
-                balancing_count += 1;
+        if sample_due {
+            // dbg: read begin
+
+            // Read ADC calibration values (not used in current logging but kept for potential future use)
+            let (_adc_gain_uv_per_lsb, _adc_offset_mv) = match bq.read_adc_calibration().await {
+                Ok(cal) => cal,
+                Err(_e) => {
+                    error!("bq:adc_cal");
+                    // Use default calibration values if reading fails
+                    (365, 0) // Default values from datasheet
+                }
+            };
+
+            // Read and display cell balancing status
+            let cellbal1_register = bq.read_register(Register::CELLBAL1).await.unwrap_or(0);
+            if VERBOSE_BQ_LOG {
+                debug!(
+                    "bal:stat 0b{:08b}(0x{:02X})",
+                    cellbal1_register, cellbal1_register
+                );
             }
-        }
 
-        if cellbal1_register != last_cellbal_bits {
-            if balancing_count == 0 {
-                info!("BQ bal: none");
-            } else {
-                info!("BQ bal: cells={:?}", &balancing_cells[..balancing_count]);
+            // Display which cells are enabled for balancing
+            let mut balancing_cells = [0u8; 5];
+            let mut balancing_count = 0;
+            for i in 0..5 {
+                if (cellbal1_register & (1 << i)) != 0 {
+                    balancing_cells[balancing_count] = (i + 1) as u8;
+                    balancing_count += 1;
+                }
             }
-            last_cellbal_bits = cellbal1_register;
-        }
 
-        // Read all measurements from BQ76920. These are now in physical units.
-        match bq.read_all_measurements().await {
-            Ok(core_meas) => {
-                latest_core_measurements = Some(core_meas);
-
-                // Detailed BQ76920 measurements (optional verbose)
-                if VERBOSE_BQ_LOG {
-                    info!("Cell Voltages:");
-                    for i in 0..5 {
-                        let voltage_mv = core_meas.cell_voltages.voltages[i];
-                        info!("  Cell {}: {} mV", i + 1, voltage_mv);
-                    }
-                    info!("Pack Voltage: {} mV", core_meas.total_voltage_mv);
-                    info!("Current: {} mA", core_meas.current_ma);
-                    info!("Temperatures (0.01°C):");
-                    info!(
-                        "  TS1: {} ({}°C)",
-                        core_meas.temperatures.ts1,
-                        core_meas.temperatures.ts1 as f32 / 100.0
-                    );
-                    if let Some(ts2) = core_meas.temperatures.ts2 {
-                        info!("  TS2: {} ({}°C)", ts2, ts2 as f32 / 100.0);
-                    }
-                    if let Some(ts3) = core_meas.temperatures.ts3 {
-                        info!("  TS3: {} ({}°C)", ts3, ts3 as f32 / 100.0);
-                    }
-                    info!(
-                        "System Status (SYS_STAT register: 0x{:02X})",
-                        core_meas.system_status.0.bits()
-                    );
-                    info!(
-                        "MOS Status: CHG_ON={} DSG_ON={} CC_EN={} CC_ONESHOT={} DELAY_DIS={}",
-                        core_meas.mos_status.0.contains(SysCtrl2Flags::CHG_ON),
-                        core_meas.mos_status.0.contains(SysCtrl2Flags::DSG_ON),
-                        core_meas.mos_status.0.contains(SysCtrl2Flags::CC_EN),
-                        core_meas.mos_status.0.contains(SysCtrl2Flags::CC_ONESHOT),
-                        core_meas.mos_status.0.contains(SysCtrl2Flags::DELAY_DIS)
-                    );
-                }
-
-                // One-line snapshot (always enabled for quick diagnostics)
-                if snap_tick % SNAP_BQ_EVERY_SEC == 0 {
-                    let chg_on = core_meas.mos_status.0.contains(SysCtrl2Flags::CHG_ON);
-                    let dsg_on = core_meas.mos_status.0.contains(SysCtrl2Flags::DSG_ON);
-                    let cells = core_meas.cell_voltages.voltages;
-                    // TS1 is in 0.01°C units; avoid floats in no_std
-                    let ts1_centi = core_meas.temperatures.ts1;
-                    let ts1_i = ts1_centi / 100;
-                    let mut ts1_f = ts1_centi % 100;
-                    if ts1_f < 0 {
-                        ts1_f = -ts1_f;
-                    }
-                    // Critical fault summary (mask out non-fault bits like CC_READY)
-                    let fault_mask = (SysStatFlags::UV
-                        | SysStatFlags::OV
-                        | SysStatFlags::SCD
-                        | SysStatFlags::OCD)
-                        .bits();
-                    let faults = core_meas.system_status.0.bits() & fault_mask;
-                    // Derive current balancing cell number (0 if none)
-                    let mut bal_cell_num: u8 = 0;
-                    if last_cellbal_bits != 0 {
-                        for i in 0..5 {
-                            if (last_cellbal_bits & (1 << i)) != 0 {
-                                bal_cell_num = (i + 1) as u8;
-                                break;
-                            }
-                        }
-                    }
-                    // Build a human-readable fault list
-                    let mut faults_str: heapless::String<24> = heapless::String::new();
-                    if faults == 0 {
-                        let _ = core::fmt::Write::write_str(&mut faults_str, "none");
-                    } else {
-                        let mut first = true;
-                        let append = |s: &str, out: &mut heapless::String<24>, first: &mut bool| {
-                            if !*first {
-                                let _ = core::fmt::Write::write_str(out, "|");
-                            }
-                            let _ = core::fmt::Write::write_str(out, s);
-                            *first = false;
-                        };
-                        if (faults & SysStatFlags::UV.bits()) != 0 {
-                            append("UV", &mut faults_str, &mut first);
-                        }
-                        if (faults & SysStatFlags::OV.bits()) != 0 {
-                            append("OV", &mut faults_str, &mut first);
-                        }
-                        if (faults & SysStatFlags::OCD.bits()) != 0 {
-                            append("OCD", &mut faults_str, &mut first);
-                        }
-                        if (faults & SysStatFlags::SCD.bits()) != 0 {
-                            append("SCD", &mut faults_str, &mut first);
-                        }
-                    }
-                    info!(
-                        "BQ snap: pack={}mV curr={}mA ts1={}.{}C chg={} dsg={} faults=0x{:02X}({}) bal_cell={} cells=[{},{},{},{},{}]mV",
-                        core_meas.total_voltage_mv,
-                        core_meas.current_ma,
-                        ts1_i,
-                        ts1_f,
-                        chg_on,
-                        dsg_on,
-                        faults,
-                        faults_str.as_str(),
-                        bal_cell_num,
-                        cells[0],
-                        cells[1],
-                        cells[2],
-                        cells[3],
-                        cells[4]
-                    );
-                }
-
-                // Evaluate pack-level conditions
-                let pack_voltage_mv = core_meas.total_voltage_mv;
-                let uv_fault = core_meas.system_status.0.contains(SysStatFlags::UV);
-                let ov_fault = core_meas.system_status.0.contains(SysStatFlags::OV);
-                let scd_fault = core_meas.system_status.0.contains(SysStatFlags::SCD);
-                let ocd_fault = core_meas.system_status.0.contains(SysStatFlags::OCD);
-                let protection_allows_discharge = !uv_fault && !scd_fault && !ocd_fault;
-
-                let mut should_enable_discharge = protection_allows_discharge;
-
-                if pack_voltage_mv <= PACK_OUTPUT_CUTOFF_THRESHOLD_MV {
-                    info!(
-                        "BQ dsg: off reason Vpack {}<= {} mV",
-                        pack_voltage_mv, PACK_OUTPUT_CUTOFF_THRESHOLD_MV
-                    );
-                    should_enable_discharge = false;
-                }
-
-                let is_discharge_currently_on =
-                    core_meas.mos_status.0.contains(SysCtrl2Flags::DSG_ON);
-
-                if TEST_FORCE_BQ_FETS_OFF {
-                    if is_discharge_currently_on {
-                        let _ = bq.disable_discharging().await;
-                    }
+            if cellbal1_register != last_cellbal_bits {
+                if balancing_count == 0 {
+                    debug!("bal:none");
                 } else {
-                    if should_enable_discharge && !is_discharge_currently_on {
-                        let _ = bq.enable_discharging().await;
-                    } else if !should_enable_discharge && is_discharge_currently_on {
-                        let _ = bq.disable_discharging().await;
-                    }
+                    debug!("bal:{:?}", &balancing_cells[..balancing_count]);
                 }
+                last_cellbal_bits = cellbal1_register;
+            }
 
-                // Compute whether balancing is needed by pack spread threshold (start condition)
-                balancing_needed_by_delta = false;
-                if let Some(meas) = latest_core_measurements.as_ref() {
-                    let mut min_v = i32::MAX;
-                    let mut max_v = i32::MIN;
-                    for &v in meas.cell_voltages.voltages.iter() {
-                        if v > 0 {
-                            if v < min_v {
-                                min_v = v;
-                            }
-                            if v > max_v {
-                                max_v = v;
-                            }
-                        }
+            // Read all measurements from BQ76920. These are now in physical units.
+            match bq.read_all_measurements().await {
+                Ok(core_meas) => {
+                    latest_core_measurements = Some(core_meas);
+                    fail_streak = 0;
+                    crate::failsafe::clear_pstop();
+
+                    // Detailed BQ76920 measurements (optional verbose)
+                    // dbg: verbose block removed to save flash
+
+                    // snapshot disabled to save flash
+
+                    // Evaluate pack-level conditions
+                    let pack_voltage_mv = core_meas.total_voltage_mv;
+                    let uv_fault = core_meas.system_status.0.contains(SysStatFlags::UV);
+                    let ov_fault = core_meas.system_status.0.contains(SysStatFlags::OV);
+                    let scd_fault = core_meas.system_status.0.contains(SysStatFlags::SCD);
+                    let ocd_fault = core_meas.system_status.0.contains(SysStatFlags::OCD);
+                    fault_bq_flag = uv_fault || ov_fault || scd_fault || ocd_fault;
+                    last_pack_voltage_mv = pack_voltage_mv;
+                    let protection_allows_discharge = !uv_fault && !scd_fault && !ocd_fault;
+
+                    let mut should_enable_discharge = protection_allows_discharge;
+
+                    if pack_voltage_mv <= PACK_OUTPUT_CUTOFF_THRESHOLD_MV {
+                        debug!(
+                            "dsg:off {}<={}",
+                            pack_voltage_mv, PACK_OUTPUT_CUTOFF_THRESHOLD_MV
+                        );
+                        should_enable_discharge = false;
                     }
-                    if max_v != i32::MIN && min_v != i32::MAX {
-                        let spread = max_v - min_v;
-                        if spread >= BALANCE_START_SPREAD_MV {
-                            balancing_needed_by_delta = true;
+
+                    let is_discharge_currently_on =
+                        core_meas.mos_status.0.contains(SysCtrl2Flags::DSG_ON);
+
+                    if TEST_FORCE_BQ_FETS_OFF {
+                        if is_discharge_currently_on {
+                            let _ = bq.disable_discharging().await;
                         }
-                        if balancing_needed_by_delta != prev_balancing_needed_by_delta {
-                            info!(
-                                "bal_eval: spread={}mV need_by_delta={} (start_threshold={}mV)",
-                                spread, balancing_needed_by_delta, BALANCE_START_SPREAD_MV
-                            );
-                            prev_balancing_needed_by_delta = balancing_needed_by_delta;
-                        }
-                    }
-                }
-
-                // Preview whether CV hold is required (balancing not complete)
-                // Use current active cell, any HW balancing bits, or spread-based need (computed below).
-                let hw_balancing_bits_active = last_cellbal_bits != 0;
-                let require_cv_preview = adapter_present
-                    && (active_balancing_cell.is_some()
-                        || hw_balancing_bits_active
-                        || balancing_needed_by_delta);
-
-                let mut should_enable_charging = !ov_fault && !scd_fault && !ocd_fault && !uv_fault;
-
-                if (pack_voltage_mv >= PACK_CHARGE_STOP_THRESHOLD_MV && !require_cv_preview)
-                    || pack_voltage_mv <= PACK_OUTPUT_CUTOFF_THRESHOLD_MV
-                {
-                    should_enable_charging = false;
-                }
-
-                if TEST_FORCE_BQ_FETS_OFF {
-                    let _ = bq.disable_charging().await;
-                    info!("TEST: Forcing BQ76920 CHG/DSG OFF (runtime)");
-                } else {
-                    if should_enable_charging {
-                        let _ = bq.enable_charging().await;
                     } else {
+                        if should_enable_discharge && !is_discharge_currently_on {
+                            let _ = bq.enable_discharging().await;
+                        } else if !should_enable_discharge && is_discharge_currently_on {
+                            let _ = bq.disable_discharging().await;
+                        }
+                    }
+
+                    // Compute whether balancing is needed by pack spread threshold (start condition)
+                    balancing_needed_by_delta = false;
+                    if let Some(meas) = latest_core_measurements.as_ref() {
+                        let mut min_v = i32::MAX;
+                        let mut max_v = i32::MIN;
+                        for &v in meas.cell_voltages.voltages.iter() {
+                            if v > 0 {
+                                if v < min_v {
+                                    min_v = v;
+                                }
+                                if v > max_v {
+                                    max_v = v;
+                                }
+                            }
+                        }
+                        if max_v != i32::MIN && min_v != i32::MAX {
+                            let spread = max_v - min_v;
+                            if spread >= BALANCE_START_SPREAD_MV {
+                                balancing_needed_by_delta = true;
+                            }
+                            if balancing_needed_by_delta != prev_balancing_needed_by_delta {
+                                debug!("bal:e s={} n={}", spread, balancing_needed_by_delta);
+                                prev_balancing_needed_by_delta = balancing_needed_by_delta;
+                            }
+                        }
+                    }
+
+                    // Preview whether CV hold is required (balancing not complete)
+                    // Use current active cell, any HW balancing bits, or spread-based need (computed below).
+                    let hw_balancing_bits_active = last_cellbal_bits != 0;
+                    let require_cv_preview = adapter_present
+                        && (active_balancing_cell.is_some()
+                            || hw_balancing_bits_active
+                            || balancing_needed_by_delta);
+
+                    let mut should_enable_charging =
+                        !ov_fault && !scd_fault && !ocd_fault && !uv_fault;
+
+                    if (pack_voltage_mv >= PACK_CHARGE_STOP_THRESHOLD_MV && !require_cv_preview)
+                        || pack_voltage_mv <= PACK_OUTPUT_CUTOFF_THRESHOLD_MV
+                    {
+                        should_enable_charging = false;
+                    }
+
+                    if TEST_FORCE_BQ_FETS_OFF {
                         let _ = bq.disable_charging().await;
-                    }
-                }
-
-                // Publish BQ76920 alert information (derived from system status).
-                let alerts = crate::data_types::Bq76920Alerts {
-                    system_status: core_meas.system_status,
-                };
-                bq76920_alerts_publisher.publish_immediate(alerts);
-
-                // It's important to clear any set status flags after reading them,
-                // so that new events can be detected. Writing '1' to a bit clears it.
-                let flags_to_clear = core_meas.system_status.0.bits();
-                if flags_to_clear != 0 {
-                    if let Err(e_clear) = bq.clear_status_flags(flags_to_clear).await {
-                        error!("Failed to clear BQ76920 status flags: {:?}", e_clear);
+                        debug!("TEST: Forcing BQ76920 CHG/DSG OFF (runtime)");
                     } else {
-                        info!("Cleared BQ76920 status flags: {:#010b}", flags_to_clear);
+                        if should_enable_charging {
+                            let _ = bq.enable_charging().await;
+                        } else {
+                            let _ = bq.disable_charging().await;
+                        }
+                    }
+
+                    // Publish BQ76920 alert information (derived from system status).
+                    let alerts = crate::data_types::Bq76920Alerts {
+                        system_status: core_meas.system_status,
+                    };
+                    bq76920_alerts_publisher.publish_immediate(alerts);
+
+                    // It's important to clear any set status flags after reading them,
+                    // so that new events can be detected. Writing '1' to a bit clears it.
+                    let flags_to_clear = core_meas.system_status.0.bits();
+                    if flags_to_clear != 0 {
+                        if let Err(_e_clear) = bq.clear_status_flags(flags_to_clear).await {
+                            error!("bq:clr_err");
+                        } else { /* dbg clr */
+                        }
                     }
                 }
+                Err(_e) => {
+                    error!("bq:meas!");
+                    latest_core_measurements = None;
+                    fail_streak = fail_streak.saturating_add(1);
+                    if fail_streak >= 3 {
+                        crate::failsafe::set_bq_online(false);
+                    }
+                    if fail_streak >= 3 {
+                        crate::failsafe::request_pstop();
+                    }
+                    // Optionally publish default/error state for alerts if needed
+                    let alerts = crate::data_types::Bq76920Alerts {
+                        system_status: Default::default(),
+                    };
+                    bq76920_alerts_publisher.publish_immediate(alerts);
+                }
             }
-            Err(e) => {
-                error!("Failed to read BQ76920 measurements: {:?}", e);
-                latest_core_measurements = None;
-                // Optionally publish default/error state for alerts if needed
-                let alerts = crate::data_types::Bq76920Alerts::default();
-                bq76920_alerts_publisher.publish_immediate(alerts);
-            }
-        }
 
-        // last_cellbal_bits already updated earlier on change; keep it as snapshot
+            // last_cellbal_bits already updated earlier on change; keep it as snapshot
+
+            // 发布测量（即便失败也发布默认值，便于外设镜像）
+            let bq76920_measurements_payload_for_main_pub =
+                crate::data_types::Bq76920Measurements {
+                    core_measurements: latest_core_measurements.unwrap_or_default(),
+                };
+            bq76920_measurements_publisher
+                .publish_immediate(bq76920_measurements_payload_for_main_pub);
+            if latest_core_measurements.is_some() {
+                crate::failsafe::set_bq_online(true);
+                fail_streak = 0;
+            }
+
+            cell_sample_elapsed = 0;
+        } // end sample_due
 
         // (spread re-evaluated earlier within the OK-measurements branch)
 
-        // Construct the BQ76920 measurements payload for the main `AllMeasurements` publisher.
-        // If read_all_measurements failed, use default values.
-        let bq76920_measurements_payload_for_main_pub = crate::data_types::Bq76920Measurements {
-            core_measurements: latest_core_measurements.unwrap_or_default(),
-        };
-
-        // Publish the collected BQ76920 measurements (which are now wrapped in the main project's type).
-        bq76920_measurements_publisher.publish_immediate(bq76920_measurements_payload_for_main_pub);
+        // （按需）其余逻辑基于最新一次有效测量
 
         // Pull latest charger/adapter alerts
         if let Some(sc_alerts) = sc8815_alerts_subscriber.try_next_message_pure() {
@@ -644,7 +645,7 @@ pub async fn bq76920_task(
         let eval_period_secs: u32 = 1;
         if eval_period_secs != last_eval_period_secs {
             info!(
-                "bal_eval: schedule period={}s (ac={} charging_phase={})",
+                "bal:per={} ac={} chgph={}",
                 eval_period_secs, adapter_present, charging_phase
             );
             last_eval_period_secs = eval_period_secs;
@@ -652,10 +653,7 @@ pub async fn bq76920_task(
 
         // Strict policy: if adapter is absent, balancing must not be active under any circumstance.
         if !adapter_present && last_cellbal_bits != 0 {
-            info!(
-                "adapter_absent_stop_balancing(strict) hw=0x{:02X}",
-                last_cellbal_bits
-            );
+            defmt::info!("bal:stop no-ac hw=0x{:02X}", last_cellbal_bits);
             let _ = bq.set_cell_balancing(0).await;
             active_balancing_cell = None;
             last_cellbal_bits = 0;
@@ -710,7 +708,7 @@ pub async fn bq76920_task(
             && !imbalance_pause_active
         {
             if !adapter_lost_logged {
-                info!("BQ warn: adapter_lost during balancing → stop balancing & withdraw CV");
+                info!("bal:lost-ac stop & withdraw CV");
                 adapter_lost_logged = true;
             }
             let _ = bq.set_cell_balancing(0).await;
@@ -749,13 +747,12 @@ pub async fn bq76920_task(
             severe_imbalance: severe_imbalance_flag,
         });
 
-        if VERBOSE_BQ_LOG {
-            info!("BQ read: end");
-        }
+        // dbg: read end
 
         // Wait for a defined interval before the next cycle of readings.
         Timer::after(Duration::from_secs(1)).await;
         balance_timer_counter += 1;
+        cell_sample_elapsed = cell_sample_elapsed.saturating_add(1);
         snap_tick = snap_tick.wrapping_add(1);
         let prev_holdoff = balance_retry_holdoff;
         if balance_retry_holdoff > 0 {
@@ -764,7 +761,7 @@ pub async fn bq76920_task(
         // 当抑制计时刚好归零时，立刻执行一次快速评估，避免再等到下一周期
         if prev_holdoff > 0 && balance_retry_holdoff == 0 {
             if adapter_present && !TEST_FORCE_BQ_FETS_OFF {
-                info!("Balancing holdoff expired → immediate eval");
+                info!("bal:holdoff");
                 execute_smart_battery_balancing(
                     &mut bq,
                     &latest_core_measurements,
@@ -773,6 +770,12 @@ pub async fn bq76920_task(
                 .await;
             }
         }
+
+        let full_flag = (state_bits::flags() & sbits::FULL) != 0;
+        let preparing =
+            !adapter_present && !full_flag && last_pack_voltage_mv < PACK_CHARGE_START_THRESHOLD_MV;
+        let balancing_flag = last_cellbal_bits != 0 || active_balancing_cell.is_some();
+        update_bq_state(preparing, balancing_flag, fault_bq_flag, bq_active_flag);
 
         // Update edge tracking
         prev_adapter_present = adapter_present;

@@ -9,4 +9,3 @@ fn main() {
         .as_secs();
     println!("cargo:rustc-env=SB_BUILD_TS={}", ts);
 }
-

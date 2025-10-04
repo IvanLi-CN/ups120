@@ -1,4 +1,151 @@
-# Smart Battery Firmware – Protection & Charger Bring-up Design
+# Smart Battery Software Design (LED/State Machine/Low Power)
+
+Version: 2025-09-29
+
+This document is the single source of truth for the smart‑battery firmware design, consolidating charger control inversion (CE/PSTOP), 4‑LED signaling, dropout handling, sampling cadence, event‑driven global state machine, and the low‑power Sleep mode. It supersedes earlier LED drafts and scattered notes.
+
+## 1) Pin Map (from `smart-battery.ioc`)
+
+- Charger control
+  - `PA10` = `CE_CTL` (GPIO Output)
+  - `PA9`  = `PSTOP_CTL` (GPIO Output)
+- Alert/INT lines
+  - `PB1`  = `ALERT` (EXTI1)
+  - `PB2`  = `INNER_INT` (EXTI2)
+- I²C
+  - I2C2 (INNER): `PB10=SCL`, `PB11=SDA` (BQ76920 @0x08, SC8815 @0x11)
+  - I2C1 (OUTER, slave): `PB6=SCL`, `PB7=SDA`, `PB5=SMBA`
+- LED (4 pcs, 1→4 = Red, Yellow, Green, Blue) — all as plain GPIO outputs (no timers)
+  - LED1 (Red)   → `PA5`  (`LEDK1`, GPIO Out)  ← change `.ioc` from `S_TIM2_CH1` to `GPIO Output`
+  - LED2 (Yellow)→ `PA6`  (`LEDK2`, GPIO Out)
+  - LED3 (Green) → `PA7`  (`LEDK3`, GPIO Out)
+  - LED4 (Blue)  → `PB0`  (`LEDK4`, GPIO Out)
+
+## 2) SC8815 CE/PSTOP Control Inversion
+
+- Hardware: MCU drives SC8815 `CE` and `PSTOP` through N‑MOSFET isolation; the MCU pin level is inverted relative to the IC’s active level.
+- Unified net names and semantics (used consistently in code and docs):
+  - `CE_CTL`: Low → enable charger; High → disable charger.
+  - `PSTOP_CTL`: Low → power stage allowed; High → power stage stopped (active stop).
+- SC8815 pin-level semantics (non-inverted, for absolute clarity):
+  - `PSTOP = High` → power stage stopped.
+  - `PSTOP = Low`  → power stage allowed.
+- Truth table (MCU → chip):
+
+  | MCU pin       | Semantic            | Chip pin meaning |
+  |---------------|---------------------|------------------|
+  | CE_CTL = Low  | Charger enabled     | CE = Active      |
+  | CE_CTL = High | Charger disabled    | CE = Inactive    |
+  | PSTOP_CTL = Low | Power allowed     | PSTOP = Low      |
+  | PSTOP_CTL = High | Power stopped    | PSTOP = High     |
+
+- Safety rule: any stop/pause/fault/dropout path must end with `PSTOP_CTL = High`.
+
+## 3) 4‑LED Signaling Rules (3 s base cycle)
+
+- Cycle: Unless stated otherwise, each LED uses a 3‑second indication cycle.
+- Base/Background: When there are no pulses, the LED shows its base on/off. Pulses at the start of each cycle convey details.
+- Pulse definition: width 120 ms, gap 120 ms; pulses are “inverted flash” relative to the base.
+- Severity: Higher severity → more pulses (except explicitly defined 1‑pulse cases).
+- Per‑LED priority (within a single LED, high→low):
+  1) 1 Hz dropout blink (500 ms on / 500 ms off) — overrides everything on that LED.
+  2) Fault 50% blink + pulse code.
+  3) Base on/off + pulse code.
+  4) Asynchronous one‑shot pulse (only Green for I2C1 traffic).
+
+Notes: LED tasks do not synchronize phases across colors; each keeps its own 3 s epoch.
+
+### 3.1 Green (Communication + Low Power)
+
+- Base: normal run = ON; Sleep = OFF.
+- Async pulse: whenever I2C1 (slave) is accessed, emit 1 immediate pulse (does not wait for the 3 s boundary).
+- During Sleep: keep the same 3 s rhythm policy (no slow period change), i.e., still eligible for base/pulse behavior; however base is OFF in Sleep per spec.
+
+### 3.2 Yellow (SC8815 Charging/Fault)
+
+- Dropout: if SC8815 hits consecutive I²C failures threshold → 1 Hz blink (overrides others on Yellow).
+- Base: not charging = OFF; charging = ON.
+- Fault blink: strictly 50% over the 3‑second cycle: 1.5 s ON + 1.5 s OFF.
+- Pulse codes (applied at cycle start):
+  - 1 pulse: Charging conditions met but AC absent (still “not charging”, thus 1 pulse every 3 s).
+  - 2 pulses: VBUS OVP / adapter abnormal.
+  - 3 pulses: BAT OVP / end‑of‑charge abnormal.
+  - 4 pulses: OTP / NTC abnormal temperature.
+  - 5 pulses: IBUS/charge over‑current/short‑related protection.
+
+### 3.3 Red (BQ76920 FET/Protection/Balancing)
+
+- Dropout: if BQ76920 hits consecutive I²C failures threshold → 1 Hz blink (overrides others on Red).
+- Base: both CHG & DSG FETs ON → OFF; any side disabled → ON.
+- Pulse codes (at cycle start):
+  - 1 pulse: Balancing active.
+  - 2 pulses: UV/OV protection latched (FETs disabled).
+  - 3 pulses: SCD (short‑circuit discharge).
+  - 4 pulses: OCD (over‑current discharge).
+  - 5 pulses: AFE internal temp/reference abnormal or other major unclassified fault.
+
+### 3.4 Blue (Global State)
+
+- Constraint: Blue must never be pulse‑less; if no pulse applies, Blue shows OFF.
+- Sleep: keep the standard 3 s cycle (no slow cycle during development phase).
+- Suggested codebook (can be aligned to HW naming later):
+  - 1 pulse: Idle / Standby.
+  - 2 pulses: Charging Active.
+  - 3 pulses: Charging Paused (session kept, power stage stopped).
+  - 4 pulses: Balancing.
+  - 5 pulses: Charge Done.
+  - 6 pulses: Global Fault.
+  - 7 pulses: Safe Shutdown / Shipping.
+
+## 4) Arbitration & Timing Composition
+
+- Per‑LED priority: Dropout 1 Hz > Fault 50% (1.5 s/1.5 s) + pulses > Base + pulses.
+- Green’s I2C pulse is asynchronous and can briefly override for ~30–240 ms without changing the 3 s phase.
+- Driver layer composes modes; semantic layer only decides “base + pulses / 50% blink / 1 Hz blink”.
+
+## 5) Sampling Cadence, Balancing, Pause‑Charge
+
+- Outside balancing: do not sample cell metrics every second anymore.
+- During charging: sample cell voltages every 30 s to decide entering balancing and whether to pause charging.
+- During balancing: allow ~1 s cadence to control balancing switches and termination.
+- Pause‑charge semantics: keep the charging session/regs, but set `PSTOP_CTL = High` to stop the power stage. Resume based on state‑machine policy (temp, delta‑V, EOC, timers, etc.).
+
+## 6) Dropouts & Safety
+
+- Accept dropouts: SC8815/BQ76920 I²C failures and absent I2C1 host.
+- Threshold: 3 consecutive I²C transaction failures for a device → dropout.
+- Mandatory action: if BQ76920 hits the threshold, ensure `PSTOP_CTL = High` (power stage stopped).
+- Indication: corresponding LED enters 1 Hz blink; state machine falls back to a conservative branch.
+
+## 7) Event‑Driven Global State Machine
+
+- Event sources
+  - BQ76920: OV/UV/OCD/SCD/temperature protection interrupts, balancing status, FET states.
+  - SC8815: EOC, VBUS/BAT OVP, OTP, over‑current/short, adapter plug/unplug.
+  - I2C1 (slave): host accesses (wake + Green pulse only; not a safety event).
+- States (mapped to Blue codes): Idle → Charging Active → Charging Paused → Balancing → Charge Done → Idle. Can enter Global Fault or Safe Shutdown anytime. Sleep overlays as an energy mode.
+- Transitions (examples)
+  - Adapter present + conditions OK → Charging Active.
+  - Large cell delta‑V → Balancing; pause‑charge if needed (stop power stage).
+  - SC8815 EOC or BQ OVP → end/pause charging and update state.
+  - BQ/SC dropout → stop power stage and enter dropout indication + conservative branch.
+
+## 8) Low‑Power Mode (Sleep)
+
+- Implement Sleep (not STOP) for now. Keep I2C1 Sleep‑clock gate (`APB1SMENR.I2C1SMEN=1`).
+- Wake on I2C1 events/errors; process transaction; fall back to Sleep after idle timeout.
+- LED policy in Sleep: Green base OFF, async pulse on traffic; Yellow/Red/Blue keep the standard 3‑second cycle.
+
+## 9) Implementation Notes
+
+- Provide a semantic API for charger control (e.g., `enable_power_stage(bool)`, `pause_power_stage()`) to hide inverted GPIO levels.
+- Separate semantic vs. driver layers for LED logic; add a common helper to arbitrate dropout/fault/base across all LEDs.
+- Align Yellow/Red fault codebooks with SC8815/BQ76920 register names and priorities when integrating the drivers.
+- LEDs are plain GPIO outputs; implement all flashes/pulses in software (no TIM/PWM dependency). Ensure `PA5` (`LEDK1`) is configured as GPIO Output in the `.ioc`.
+
+## 10) Document Status
+
+This document replaces prior LED drafts and the earlier bring‑up write‑up as the authoritative design. Legacy files remain only as historical context and should link here for current behavior.
 
 > 中文要点（外设通信/I2C 对外协议）
 >
