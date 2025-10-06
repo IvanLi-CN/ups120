@@ -205,6 +205,21 @@ struct StateFlagsCtx {
     sc_fault: bool,
 }
 
+pub struct Sc8815TaskArgs {
+    pub ce_ctl: Output<'static>,
+    pub pstop_ctl: Output<'static>,
+    pub i2c_device: I2cDevice<
+        'static,
+        CriticalSectionRawMutex,
+        I2c<'static, embassy_stm32::mode::Async, embassy_stm32::i2c::mode::Master>,
+    >,
+    pub address: u8,
+    pub sc8815_alerts_publisher: Sc8815AlertsPublisher<'static>,
+    pub sc8815_measurements_publisher: Sc8815MeasurementsPublisher<'static>,
+    pub bq76920_measurements_subscriber: Bq76920MeasurementsSubscriber<'static, 5>,
+    pub balancing_cv_sub: BalancingCvRequestSubscriber<'static>,
+}
+
 #[inline(always)]
 fn refresh_state_flags(ctx: StateFlagsCtx) {
     let paused = ctx.ac_present && (ctx.pause_active || ctx.imbalance_pause_active);
@@ -239,20 +254,17 @@ fn refresh_state_flags(ctx: StateFlagsCtx) {
 
 /// Embassy task managing the SC8815 charger with safety gating.
 #[embassy_executor::task]
-pub async fn sc8815_task(
-    mut ce_ctl: Output<'static>,
-    mut pstop_ctl: Output<'static>,
-    i2c_device: I2cDevice<
-        'static,
-        CriticalSectionRawMutex,
-        I2c<'static, embassy_stm32::mode::Async, embassy_stm32::i2c::mode::Master>,
-    >,
-    address: u8,
-    sc8815_alerts_publisher: Sc8815AlertsPublisher<'static>,
-    sc8815_measurements_publisher: Sc8815MeasurementsPublisher<'static>,
-    mut bq76920_measurements_subscriber: Bq76920MeasurementsSubscriber<'static, 5>,
-    mut balancing_cv_sub: BalancingCvRequestSubscriber<'static>,
-) {
+pub async fn sc8815_task(args: Sc8815TaskArgs) {
+    let Sc8815TaskArgs {
+        mut ce_ctl,
+        mut pstop_ctl,
+        i2c_device,
+        address,
+        sc8815_alerts_publisher,
+        sc8815_measurements_publisher,
+        mut bq76920_measurements_subscriber,
+        mut balancing_cv_sub,
+    } = args;
     // Ensure charger is disabled and power stage stopped before any session.
     // Inverted control (MOSFET): CE_CTL High=enable, Low=disable; PSTOP_CTL Low=stop.
     ce_ctl.set_low();
@@ -294,32 +306,32 @@ pub async fn sc8815_task(
     // quiesce INT mode: no probe state needed
     // dropout counters omitted in this step to keep flash within limits
     // Boot probe: unconditionally attempt to initialize SC8815 once at power-up
-    if sc8815_session.is_none() {
-        if let (Some(ce_tmp), Some(pstop_tmp)) = (ce_ctl_slot.take(), pstop_ctl_slot.take()) {
-            // Ensure power stage is stopped during probe
-            let mut pstop_tmp = pstop_tmp;
-            pstop_tmp.set_low();
-            match ScSession::begin(
-                ce_tmp,
-                pstop_tmp,
-                parked_i2c_device.take().expect("I2C missing"),
-                address,
-            )
-            .await
-            {
-                Ok(session) => {
-                    sc8815_session = Some(session);
-                    info!("sc:probe ok");
-                    crate::failsafe::set_sc_online(true);
-                }
-                Err((ce_back, pstop_back, i2c_back)) => {
-                    ce_ctl_slot = Some(ce_back);
-                    pstop_ctl_slot = Some(pstop_back);
-                    parked_i2c_device = Some(i2c_back);
-                    info!("sc:probe fail");
-                    // keep offline until a later success
-                    crate::failsafe::set_sc_online(false);
-                }
+    if sc8815_session.is_none()
+        && let (Some(ce_tmp), Some(pstop_tmp)) = (ce_ctl_slot.take(), pstop_ctl_slot.take())
+    {
+        // Ensure power stage is stopped during probe
+        let mut pstop_tmp = pstop_tmp;
+        pstop_tmp.set_low();
+        match ScSession::begin(
+            ce_tmp,
+            pstop_tmp,
+            parked_i2c_device.take().expect("I2C missing"),
+            address,
+        )
+        .await
+        {
+            Ok(session) => {
+                sc8815_session = Some(session);
+                info!("sc:probe ok");
+                crate::failsafe::set_sc_online(true);
+            }
+            Err((ce_back, pstop_back, i2c_back)) => {
+                ce_ctl_slot = Some(ce_back);
+                pstop_ctl_slot = Some(pstop_back);
+                parked_i2c_device = Some(i2c_back);
+                info!("sc:probe fail");
+                // keep offline until a later success
+                crate::failsafe::set_sc_online(false);
             }
         }
     }
@@ -657,16 +669,18 @@ pub async fn sc8815_task(
                             full_latched = true;
                             full_exit_ms = 0;
                             full_enter_ms = FULL_ENTER_SECS * 1000;
-                            refresh_state_flags(
-                                _adapter_present,
-                                false,
+                            refresh_state_flags(StateFlagsCtx {
+                                ac_present: _adapter_present,
+                                sc_active: false,
                                 charger_active,
                                 charge_confirmed,
-                                ov_pause_secs > 0 || uv_pause_secs > 0 || oc_pause_secs > 0,
+                                pause_active: ov_pause_secs > 0
+                                    || uv_pause_secs > 0
+                                    || oc_pause_secs > 0,
                                 imbalance_pause_active,
                                 full_latched,
-                                sc_fault_flag,
-                            );
+                                sc_fault: sc_fault_flag,
+                            });
                             _latest_status_for_alerts = Some(status);
                             continue;
                         }
@@ -687,16 +701,18 @@ pub async fn sc8815_task(
                             charge_confirmed = false;
                             confirm_streak = 0;
                             drop_streak = 0;
-                            refresh_state_flags(
-                                _adapter_present,
-                                false,
+                            refresh_state_flags(StateFlagsCtx {
+                                ac_present: _adapter_present,
+                                sc_active: false,
                                 charger_active,
                                 charge_confirmed,
-                                ov_pause_secs > 0 || uv_pause_secs > 0 || oc_pause_secs > 0,
+                                pause_active: ov_pause_secs > 0
+                                    || uv_pause_secs > 0
+                                    || oc_pause_secs > 0,
                                 imbalance_pause_active,
                                 full_latched,
-                                sc_fault_flag,
-                            );
+                                sc_fault: sc_fault_flag,
+                            });
                             continue;
                         }
                         _latest_status_for_alerts = Some(status);

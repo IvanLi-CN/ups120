@@ -200,7 +200,7 @@ pub async fn leds_task(
         if !sc_ac_present
             && bq
                 .as_ref()
-                .map_or(false, |m| m.core_measurements.total_voltage_mv < 17_000)
+                .is_some_and(|m| m.core_measurements.total_voltage_mv < 17_000)
         {
             yellow.pulses = yellow.pulses.max(1);
         }
@@ -212,7 +212,7 @@ pub async fn leds_task(
         }
 
         // Green (Comm + Sleep)
-        let mut green = LedIntent {
+        let green = LedIntent {
             base_on: !crate::sleep_manager::is_sleeping(),
             ..Default::default()
         };
