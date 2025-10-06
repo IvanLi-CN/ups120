@@ -72,9 +72,6 @@ fn update_bq_state(preparing: bool, balancing_active: bool, fault_bq: bool, acti
     state_bits::update_flags(MASK, value);
 }
 
-<<<<<<< HEAD
-// Note: args wrapper struct removed to keep the task signature stable (positional args)
-=======
 pub struct Bq76920TaskArgs {
     pub i2c_bus: I2cDevice<
         'static,
@@ -89,7 +86,6 @@ pub struct Bq76920TaskArgs {
     pub sc8815_alerts_subscriber: Sc8815AlertsSubscriber<'static>,
     pub balancing_cv_publisher: BalancingCvRequestPublisher<'static>,
 }
->>>>>>> origin/main
 
 #[embassy_executor::task]
 pub async fn bq_alert_irq_task(mut int_pin: ExtiInput<'static>) {

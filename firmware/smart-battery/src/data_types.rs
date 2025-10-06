@@ -73,7 +73,6 @@ pub struct BalancingCvRequest {
     pub temp_pause: bool,
 }
 
-<<<<<<< HEAD
 impl Default for BalancingCvRequest {
     fn default() -> Self {
         Self {
@@ -84,9 +83,6 @@ impl Default for BalancingCvRequest {
         }
     }
 }
-
-=======
->>>>>>> origin/main
 /// 聚合所有设备的测量数据
 #[derive(Debug, Copy, Clone, PartialEq)]
 

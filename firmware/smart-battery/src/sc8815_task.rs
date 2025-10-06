@@ -377,11 +377,8 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                 sc_active: false,
                 charger_active,
                 charge_confirmed,
-<<<<<<< HEAD
-                (ov_pause_secs > 0 || uv_pause_secs > 0 || oc_pause_secs > 0) || temp_pause_cmd,
-=======
-                pause_active: ov_pause_secs > 0 || uv_pause_secs > 0 || oc_pause_secs > 0,
->>>>>>> origin/main
+                pause_active: (ov_pause_secs > 0 || uv_pause_secs > 0 || oc_pause_secs > 0)
+                    || temp_pause_cmd,
                 imbalance_pause_active,
                 full_latched,
                 sc_fault: sc_fault_flag,
@@ -648,14 +645,10 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                                 sc_active: false,
                                 charger_active,
                                 charge_confirmed,
-<<<<<<< HEAD
-                                (ov_pause_secs > 0 || uv_pause_secs > 0 || oc_pause_secs > 0)
-                                    || temp_pause_cmd,
-=======
-                                pause_active: ov_pause_secs > 0
+                                pause_active: (ov_pause_secs > 0
                                     || uv_pause_secs > 0
-                                    || oc_pause_secs > 0,
->>>>>>> origin/main
+                                    || oc_pause_secs > 0)
+                                    || temp_pause_cmd,
                                 imbalance_pause_active,
                                 full_latched,
                                 sc_fault: sc_fault_flag,
