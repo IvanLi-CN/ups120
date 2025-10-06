@@ -193,8 +193,8 @@ impl ScSession {
     }
 }
 
-#[inline(always)]
-fn refresh_state_flags(
+#[derive(Copy, Clone)]
+struct StateFlagsCtx {
     ac_present: bool,
     sc_active: bool,
     charger_active: bool,
@@ -203,9 +203,12 @@ fn refresh_state_flags(
     imbalance_pause_active: bool,
     full_latched: bool,
     sc_fault: bool,
-) {
-    let paused = ac_present && (pause_active || imbalance_pause_active);
-    let charging = charger_active || charge_confirmed || paused;
+}
+
+#[inline(always)]
+fn refresh_state_flags(ctx: StateFlagsCtx) {
+    let paused = ctx.ac_present && (ctx.pause_active || ctx.imbalance_pause_active);
+    let charging = ctx.charger_active || ctx.charge_confirmed || paused;
     const MASK: u16 = sbits::AC_PRESENT
         | sbits::CHARGING
         | sbits::CHG_PAUSED
@@ -213,7 +216,7 @@ fn refresh_state_flags(
         | sbits::FAULT_SC
         | sbits::ACTIVE_SC;
     let mut value: u16 = 0;
-    if ac_present {
+    if ctx.ac_present {
         value |= sbits::AC_PRESENT;
     }
     if charging {
@@ -222,13 +225,13 @@ fn refresh_state_flags(
     if paused {
         value |= sbits::CHG_PAUSED;
     }
-    if full_latched {
+    if ctx.full_latched {
         value |= sbits::FULL;
     }
-    if sc_fault {
+    if ctx.sc_fault {
         value |= sbits::FAULT_SC;
     }
-    if sc_active {
+    if ctx.sc_active {
         value |= sbits::ACTIVE_SC;
     }
     state_bits::update_flags(MASK, value);
@@ -355,16 +358,16 @@ pub async fn sc8815_task(
             full_latched = false;
             full_enter_ms = 0;
             full_exit_ms = 0;
-            refresh_state_flags(
-                false,
-                false,
+            refresh_state_flags(StateFlagsCtx {
+                ac_present: false,
+                sc_active: false,
                 charger_active,
                 charge_confirmed,
-                ov_pause_secs > 0 || uv_pause_secs > 0 || oc_pause_secs > 0,
+                pause_active: ov_pause_secs > 0 || uv_pause_secs > 0 || oc_pause_secs > 0,
                 imbalance_pause_active,
                 full_latched,
-                sc_fault_flag,
-            );
+                sc_fault: sc_fault_flag,
+            });
             // 短等待：允许由 IRQ 唤醒，无状态轮询
             Timer::after(Duration::from_millis(100)).await;
             continue;
@@ -619,16 +622,18 @@ pub async fn sc8815_task(
                             full_latched = false;
                             full_enter_ms = 0;
                             full_exit_ms = 0;
-                            refresh_state_flags(
-                                false,
-                                false,
+                            refresh_state_flags(StateFlagsCtx {
+                                ac_present: false,
+                                sc_active: false,
                                 charger_active,
                                 charge_confirmed,
-                                ov_pause_secs > 0 || uv_pause_secs > 0 || oc_pause_secs > 0,
+                                pause_active: ov_pause_secs > 0
+                                    || uv_pause_secs > 0
+                                    || oc_pause_secs > 0,
                                 imbalance_pause_active,
                                 full_latched,
-                                sc_fault_flag,
-                            );
+                                sc_fault: sc_fault_flag,
+                            });
                             _latest_status_for_alerts = Some(status);
                             // Skip further work in this tick when adapter just lost
                             continue;
@@ -763,10 +768,9 @@ pub async fn sc8815_task(
                                     full_exit_ms = 0;
                                 }
                             } else {
-                                let exit_current_threshold = ((MIN_EFFECTIVE_IBAT_MA as u32
-                                    * ITERM_EXIT_MULTIPLIER_X10 as u32
-                                    + 9)
-                                    / 10)
+                                let exit_current_threshold = (MIN_EFFECTIVE_IBAT_MA as u32)
+                                    .saturating_mul(ITERM_EXIT_MULTIPLIER_X10 as u32)
+                                    .div_ceil(10)
                                     as u16;
                                 let exit_by_current =
                                     measurements.ibat_ma >= exit_current_threshold;
@@ -890,16 +894,16 @@ pub async fn sc8815_task(
         }
         let pause_active = (ov_pause_secs > 0) || (uv_pause_secs > 0) || (oc_pause_secs > 0);
         let sc_active_flag = _adapter_present && (charger_active || charge_confirmed);
-        refresh_state_flags(
-            _adapter_present,
-            sc_active_flag,
+        refresh_state_flags(StateFlagsCtx {
+            ac_present: _adapter_present,
+            sc_active: sc_active_flag,
             charger_active,
             charge_confirmed,
             pause_active,
             imbalance_pause_active,
             full_latched,
-            sc_fault_flag,
-        );
+            sc_fault: sc_fault_flag,
+        });
         Timer::after(Duration::from_millis(100)).await;
     }
 }

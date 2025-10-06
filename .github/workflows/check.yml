@@ -43,9 +43,9 @@ jobs:
         working-directory: firmware/smart-battery
         run: cargo fmt -- --check
 
-      - name: Run clippy (warnings allowed)
+      - name: Run clippy (deny warnings)
         working-directory: firmware/smart-battery
-        run: cargo clippy --bins --examples --no-deps --target thumbv6m-none-eabi
+        run: cargo clippy --bins --examples --no-deps --target thumbv6m-none-eabi -- -D warnings
 
       - name: Build main binary (release)
         working-directory: firmware/smart-battery

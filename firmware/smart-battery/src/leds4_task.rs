@@ -48,7 +48,7 @@ fn compose_with_pulses(base_on: bool, pulses: u8, phase_ms: u32) -> bool {
     if pulses == 0 {
         return base_on;
     }
-    let window_ms = (PULSE_W_MS + PULSE_GAP_MS) as u32;
+    let window_ms = PULSE_W_MS + PULSE_GAP_MS;
     let slot = (phase_ms / window_ms) as u8;
     if slot < pulses {
         // inside pulse band
@@ -182,9 +182,11 @@ pub async fn leds_task(
         }
 
         // Yellow (SC8815)
-        let mut yellow = LedIntent::default();
         let yellow_active = (state_flags & sbits::ACTIVE_SC) != 0;
-        yellow.base_on = yellow_active;
+        let mut yellow = LedIntent {
+            base_on: yellow_active,
+            ..Default::default()
+        };
         if sc_fault {
             yellow.fault_blink = true;
         }
@@ -195,12 +197,12 @@ pub async fn leds_task(
         // - 2 = 适配器异常（VBUS short）
         // - 4 = 过温
         // - 1 = preparing（需要充电但 AC 不在）
-        if !sc_ac_present {
-            if let Some(m) = bq.as_ref() {
-                if m.core_measurements.total_voltage_mv < 17_000 {
-                    yellow.pulses = yellow.pulses.max(1);
-                }
-            }
+        if !sc_ac_present
+            && bq
+                .as_ref()
+                .map_or(false, |m| m.core_measurements.total_voltage_mv < 17_000)
+        {
+            yellow.pulses = yellow.pulses.max(1);
         }
         if sc_vbus_short {
             yellow.pulses = yellow.pulses.max(2);
@@ -210,13 +212,17 @@ pub async fn leds_task(
         }
 
         // Green (Comm + Sleep)
-        let mut green = LedIntent::default();
-        green.base_on = !crate::sleep_manager::is_sleeping();
+        let mut green = LedIntent {
+            base_on: !crate::sleep_manager::is_sleeping(),
+            ..Default::default()
+        };
         // async pulse handled after composition
 
         // Blue (Global)
-        let mut blue = LedIntent::default();
-        blue.base_on = false;
+        let mut blue = LedIntent {
+            base_on: false,
+            ..Default::default()
+        };
         let fault_bits = sbits::FAULT_BQ | sbits::FAULT_SC;
         let blue_code: u8 = if (state_flags & fault_bits) != 0 || bq_fault || sc_fault {
             6
@@ -240,7 +246,7 @@ pub async fn leds_task(
         // RED
         let red_on = if red.dropout_blink {
             // 1 Hz blink (reserve; not set yet)
-            (p_red / 500) % 2 == 0
+            ((p_red / 500) & 1) == 0
         } else if red.fault_blink {
             p_red < FAULT_ON_MS
         } else {
@@ -250,7 +256,7 @@ pub async fn leds_task(
 
         // YELLOW
         let yellow_on = if yellow.dropout_blink {
-            (p_yellow / 500) % 2 == 0
+            ((p_yellow / 500) & 1) == 0
         } else if yellow.fault_blink {
             p_yellow < FAULT_ON_MS
         } else {
@@ -271,7 +277,7 @@ pub async fn leds_task(
 
         // BLUE
         let blue_on = if blue.dropout_blink {
-            (p_blue / 500) % 2 == 0
+            ((p_blue / 500) & 1) == 0
         } else if blue.fault_blink {
             p_blue < FAULT_ON_MS
         } else {

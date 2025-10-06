@@ -71,7 +71,7 @@ pub async fn sleep_task() {
         let forbid_until = unsafe { FORBID_SLEEP_UNTIL_MS };
         if now < forbid_until {
             let remain = forbid_until - now;
-            let need = (SLEEP_REENTER_IDLE_MS.saturating_sub(elapsed)) as u64;
+            let need = SLEEP_REENTER_IDLE_MS.saturating_sub(elapsed);
             let wait_ms = remain.max(need);
             Timer::after(Duration::from_millis(wait_ms)).await;
             continue;
@@ -104,7 +104,7 @@ pub async fn sleep_task() {
             }
             continue;
         }
-        let wait_ms = (SLEEP_REENTER_IDLE_MS - elapsed) as u64;
+        let wait_ms = SLEEP_REENTER_IDLE_MS.saturating_sub(elapsed);
         Timer::after(Duration::from_millis(wait_ms)).await;
     }
 }
