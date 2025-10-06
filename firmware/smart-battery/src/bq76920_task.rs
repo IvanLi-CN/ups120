@@ -365,15 +365,31 @@ pub async fn bq76920_task(
                         latest_core_measurements = Some(core_meas);
                         fail_streak = 0;
                         crate::failsafe::clear_pstop();
-                        bq76920_alerts_publisher.publish_immediate(crate::data_types::Bq76920Alerts { system_status: core_meas.system_status });
-                        bq76920_measurements_publisher.publish_immediate(crate::data_types::Bq76920Measurements { core_measurements: core_meas });
+                        bq76920_alerts_publisher.publish_immediate(
+                            crate::data_types::Bq76920Alerts {
+                                system_status: core_meas.system_status,
+                            },
+                        );
+                        bq76920_measurements_publisher.publish_immediate(
+                            crate::data_types::Bq76920Measurements {
+                                core_measurements: core_meas,
+                            },
+                        );
                         let flags_to_clear = core_meas.system_status.0.bits();
-                        if flags_to_clear != 0 { let _ = bq.clear_status_flags(flags_to_clear).await; }
+                        if flags_to_clear != 0 {
+                            let _ = bq.clear_status_flags(flags_to_clear).await;
+                        }
                     }
                     Err(_e) => {
                         fail_streak = fail_streak.saturating_add(1);
-                        if fail_streak >= 3 { crate::failsafe::request_pstop(); }
-                        bq76920_alerts_publisher.publish_immediate(crate::data_types::Bq76920Alerts { system_status: Default::default() });
+                        if fail_streak >= 3 {
+                            crate::failsafe::request_pstop();
+                        }
+                        bq76920_alerts_publisher.publish_immediate(
+                            crate::data_types::Bq76920Alerts {
+                                system_status: Default::default(),
+                            },
+                        );
                     }
                 }
             }

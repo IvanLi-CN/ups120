@@ -8,4 +8,3 @@ pub static I2C1_ACTIVITY_PULSE: AtomicBool = AtomicBool::new(false);
 pub fn poke_i2c1_activity() {
     I2C1_ACTIVITY_PULSE.store(true, Ordering::Relaxed);
 }
-
