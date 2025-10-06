@@ -127,6 +127,7 @@ async fn main(_spawner: Spawner) {
     ) = shared::init_pubsubs();
 
     // 先尝试初始化 BQ76920（总重试 ≤ 500 ms）
+    defmt::info!("fw:boot smart-battery");
     defmt::info!("bq:init");
     let probe_start = Instant::now();
     let probe_deadline = probe_start + Duration::from_millis(500);
