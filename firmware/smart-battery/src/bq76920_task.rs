@@ -42,7 +42,7 @@ const TEST_FORCE_BQ_FETS_OFF: bool = false;
 const BALANCE_SWITCH_DEADTIME_MS: u64 = 40;
 // Temperature protection thresholds (0.01°C units)
 const TEMP_PAUSE_HIGH_001C: i32 = 50_00; // > +50.00°C → request SC pause (no CHG action)
-const TEMP_PAUSE_LOW_001C: i32 = 0;      // <  +0.00°C → request SC pause (no CHG action)
+const TEMP_PAUSE_LOW_001C: i32 = 0; // <  +0.00°C → request SC pause (no CHG action)
 const TEMP_CHG_GATE_HIGH_001C: i32 = 60_00; // > +60.00°C → gate CHG (with 5°C hysteresis)
 const TEMP_CUTOFF_HIGH_001C: i32 = 70_00; // > +70.00°C → cut output (DSG off), 5°C hysteresis
 const TEMP_CUTOFF_LOW_001C: i32 = -10_00; // < -10.00°C → cut output (DSG off), 5°C hysteresis
@@ -384,17 +384,34 @@ pub async fn bq76920_task(
                     Ok(core_meas) => {
                         latest_core_measurements = Some(core_meas);
                         crate::failsafe::set_bq_online(true);
+                        defmt::info!("bq:online=1(silent)");
                         fail_streak = 0;
                         crate::failsafe::clear_pstop();
-                        bq76920_alerts_publisher.publish_immediate(crate::data_types::Bq76920Alerts { system_status: core_meas.system_status });
-                        bq76920_measurements_publisher.publish_immediate(crate::data_types::Bq76920Measurements { core_measurements: core_meas });
+                        bq76920_alerts_publisher.publish_immediate(
+                            crate::data_types::Bq76920Alerts {
+                                system_status: core_meas.system_status,
+                            },
+                        );
+                        bq76920_measurements_publisher.publish_immediate(
+                            crate::data_types::Bq76920Measurements {
+                                core_measurements: core_meas,
+                            },
+                        );
                         let flags_to_clear = core_meas.system_status.0.bits();
-                        if flags_to_clear != 0 { let _ = bq.clear_status_flags(flags_to_clear).await; }
+                        if flags_to_clear != 0 {
+                            let _ = bq.clear_status_flags(flags_to_clear).await;
+                        }
                     }
                     Err(_e) => {
                         fail_streak = fail_streak.saturating_add(1);
-                        if fail_streak >= 3 { crate::failsafe::request_pstop(); }
-                        bq76920_alerts_publisher.publish_immediate(crate::data_types::Bq76920Alerts { system_status: Default::default() });
+                        if fail_streak >= 3 {
+                            crate::failsafe::request_pstop();
+                        }
+                        bq76920_alerts_publisher.publish_immediate(
+                            crate::data_types::Bq76920Alerts {
+                                system_status: Default::default(),
+                            },
+                        );
                     }
                 }
             }
@@ -416,11 +433,13 @@ pub async fn bq76920_task(
             let _ = bq.set_cell_balancing(0).await;
         }
 
-        // 采样调度：均衡期间 1s，其余按阶段 30/60s；ALERT 立即采样
-        let hw_balancing_active_now =
-            last_cellbal_bits != 0 || active_balancing_cell.is_some() || balancing_needed_by_delta;
+        // 采样调度："实际均衡活跃"或"充电相位"时 1s；其余按阶段 30/60s；ALERT 立即采样
+        // 注：仅“需要均衡（Δcell≥阈值）”而未处于充电相位时，不再将周期强制为 1s，避免 AC 不在时的高频打点。
         let charging_phase =
             charger_expected || charger_confirmed || ov_pause_active || imbalance_pause_active;
+        let hw_balancing_active_now = last_cellbal_bits != 0
+            || active_balancing_cell.is_some()
+            || (balancing_needed_by_delta && charging_phase);
         let period_secs: u32 = if hw_balancing_active_now {
             1
         } else if charging_phase {
@@ -628,7 +647,8 @@ pub async fn bq76920_task(
                     } else {
                         // ema = ema*(1-a) + x*a; all in 0.01°C integer domain
                         let a = TEMP_EMA_ALPHA_PCT;
-                        temp_ema_001c = (temp_ema_001c * (100 - a) + i32::from(raw_t_001c) * a + 50) / 100;
+                        temp_ema_001c =
+                            (temp_ema_001c * (100 - a) + i32::from(raw_t_001c) * a + 50) / 100;
                     }
                     used_t_001c = temp_ema_001c as i16;
                     defmt::info!("bq:t= {} (ema) raw={} (0.01C)", used_t_001c, raw_t_001c);
@@ -644,25 +664,39 @@ pub async fn bq76920_task(
                         buf[2] = t3;
                     }
                     // sort 3 values to get median
-                    if buf[0] > buf[1] { buf.swap(0,1); }
-                    if buf[1] > buf[2] { buf.swap(1,2); }
-                    if buf[0] > buf[1] { buf.swap(0,1); }
+                    if buf[0] > buf[1] {
+                        buf.swap(0, 1);
+                    }
+                    if buf[1] > buf[2] {
+                        buf.swap(1, 2);
+                    }
+                    if buf[0] > buf[1] {
+                        buf.swap(0, 1);
+                    }
                     used_t_001c = buf[1];
                     // keep EMA aligned to latest value when inactive
                     temp_ema_001c = i32::from(used_t_001c);
                     temp_ema_inited = true;
-                    defmt::info!("bq:t= {} (med3) r0={} r1={} r2={} (0.01C)", used_t_001c, buf[0], buf[1], buf[2]);
+                    defmt::info!(
+                        "bq:t= {} (med3) r0={} r1={} r2={} (0.01C)",
+                        used_t_001c,
+                        buf[0],
+                        buf[1],
+                        buf[2]
+                    );
                 }
 
                 // Temperature-based protections
                 let used_i32 = i32::from(used_t_001c);
-                let pause_needed = used_i32 > TEMP_PAUSE_HIGH_001C || used_i32 < TEMP_PAUSE_LOW_001C;
+                let pause_needed =
+                    used_i32 > TEMP_PAUSE_HIGH_001C || used_i32 < TEMP_PAUSE_LOW_001C;
                 // CHG gate with hysteresis around 60°C
                 let chg_gate_enter = used_i32 > TEMP_CHG_GATE_HIGH_001C;
-                let chg_gate_exit  = used_i32 <= (TEMP_CHG_GATE_HIGH_001C - TEMP_HYST_001C);
+                let chg_gate_exit = used_i32 <= (TEMP_CHG_GATE_HIGH_001C - TEMP_HYST_001C);
                 // DSG cutoff with hysteresis around ±70/−10°C
-                let cutoff_enter = used_i32 > TEMP_CUTOFF_HIGH_001C || used_i32 < TEMP_CUTOFF_LOW_001C;
-                let cutoff_exit  = (used_i32 <= (TEMP_CUTOFF_HIGH_001C - TEMP_HYST_001C))
+                let cutoff_enter =
+                    used_i32 > TEMP_CUTOFF_HIGH_001C || used_i32 < TEMP_CUTOFF_LOW_001C;
+                let cutoff_exit = (used_i32 <= (TEMP_CUTOFF_HIGH_001C - TEMP_HYST_001C))
                     && (used_i32 >= (TEMP_CUTOFF_LOW_001C + TEMP_HYST_001C));
 
                 // Cutoff dominates pause

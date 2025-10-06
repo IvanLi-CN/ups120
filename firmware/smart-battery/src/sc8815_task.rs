@@ -357,16 +357,16 @@ pub async fn sc8815_task(
             full_latched = false;
             full_enter_ms = 0;
             full_exit_ms = 0;
-                            refresh_state_flags(
-                                false,
-                                false,
-                                charger_active,
-                                charge_confirmed,
-                                (ov_pause_secs > 0 || uv_pause_secs > 0 || oc_pause_secs > 0) || temp_pause_cmd,
-                                imbalance_pause_active,
-                                full_latched,
-                                sc_fault_flag,
-                            );
+            refresh_state_flags(
+                false,
+                false,
+                charger_active,
+                charge_confirmed,
+                (ov_pause_secs > 0 || uv_pause_secs > 0 || oc_pause_secs > 0) || temp_pause_cmd,
+                imbalance_pause_active,
+                full_latched,
+                sc_fault_flag,
+            );
             // 短等待：允许由 IRQ 唤醒，无状态轮询
             Timer::after(Duration::from_millis(100)).await;
             continue;
@@ -501,7 +501,9 @@ pub async fn sc8815_task(
                 }
 
                 // If in pause (OV or imbalance) and charger is active, gate power stage
-                if ((ov_pause_secs > 0 || imbalance_pause_active) || temp_pause_cmd) && charger_active {
+                if ((ov_pause_secs > 0 || imbalance_pause_active) || temp_pause_cmd)
+                    && charger_active
+                {
                     if let Some(sess) = sc8815_session.as_mut() {
                         sess.disable_power_stage();
                     }
@@ -627,7 +629,8 @@ pub async fn sc8815_task(
                                 false,
                                 charger_active,
                                 charge_confirmed,
-                                (ov_pause_secs > 0 || uv_pause_secs > 0 || oc_pause_secs > 0) || temp_pause_cmd,
+                                (ov_pause_secs > 0 || uv_pause_secs > 0 || oc_pause_secs > 0)
+                                    || temp_pause_cmd,
                                 imbalance_pause_active,
                                 full_latched,
                                 sc_fault_flag,
@@ -891,7 +894,8 @@ pub async fn sc8815_task(
                 oc_pause_secs = oc_pause_secs.saturating_sub(1);
             }
         }
-        let pause_active = (ov_pause_secs > 0) || (uv_pause_secs > 0) || (oc_pause_secs > 0) || temp_pause_cmd;
+        let pause_active =
+            (ov_pause_secs > 0) || (uv_pause_secs > 0) || (oc_pause_secs > 0) || temp_pause_cmd;
         let sc_active_flag = _adapter_present && (charger_active || charge_confirmed);
         refresh_state_flags(
             _adapter_present,
