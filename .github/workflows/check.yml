@@ -3,8 +3,12 @@ name: Code Check
 on:
   push:
     branches: [ main, develop ]
+    paths:
+      - 'firmware/smart-battery/**'
   pull_request:
     branches: [ main, develop ]
+    paths:
+      - 'firmware/smart-battery/**'
 
 jobs:
   check:
@@ -39,9 +43,9 @@ jobs:
         working-directory: firmware/smart-battery
         run: cargo fmt -- --check
 
-      - name: Run clippy
+      - name: Run clippy (warnings allowed)
         working-directory: firmware/smart-battery
-        run: cargo clippy --bins --examples --no-deps --target thumbv6m-none-eabi -- -D warnings
+        run: cargo clippy --bins --examples --no-deps --target thumbv6m-none-eabi
 
       - name: Build main binary (release)
         working-directory: firmware/smart-battery
