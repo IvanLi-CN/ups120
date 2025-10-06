@@ -383,6 +383,7 @@ pub async fn bq76920_task(
                 match bq.read_all_measurements().await {
                     Ok(core_meas) => {
                         latest_core_measurements = Some(core_meas);
+                        crate::failsafe::set_bq_online(true);
                         fail_streak = 0;
                         crate::failsafe::clear_pstop();
                         bq76920_alerts_publisher.publish_immediate(crate::data_types::Bq76920Alerts { system_status: core_meas.system_status });
