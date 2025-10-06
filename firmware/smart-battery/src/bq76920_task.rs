@@ -775,7 +775,7 @@ pub async fn bq76920_task(
         let eval_period_secs: u32 = 1;
         if eval_period_secs != last_eval_period_secs {
             info!(
-                "bal:per={} ac={} chgph={}",
+                "bal:eval={} ac={} chgph={}",
                 eval_period_secs, adapter_present, charging_phase
             );
             last_eval_period_secs = eval_period_secs;
