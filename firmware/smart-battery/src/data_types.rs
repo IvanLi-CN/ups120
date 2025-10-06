@@ -69,8 +69,9 @@ pub struct BalancingCvRequest {
     pub overlay: bool,
     /// Severe imbalance indicator (Δcell >= 100 mV)
     pub severe_imbalance: bool,
+    /// Request SC8815 to pause charging due to temperature (host-level request)
+    pub temp_pause: bool,
 }
-
 /// 聚合所有设备的测量数据
 #[derive(Debug, Copy, Clone, PartialEq)]
 

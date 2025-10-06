@@ -40,6 +40,15 @@ const VERBOSE_BQ_LOG: bool = false; // set true for full register-by-register du
 const TEST_FORCE_BQ_FETS_OFF: bool = false;
 // Interlock deadtime when switching balancing target cells (safety)
 const BALANCE_SWITCH_DEADTIME_MS: u64 = 40;
+// Temperature protection thresholds (0.01°C units)
+const TEMP_PAUSE_HIGH_001C: i32 = 50_00; // > +50.00°C → request SC pause (no CHG action)
+const TEMP_PAUSE_LOW_001C: i32 = 0; // <  +0.00°C → request SC pause (no CHG action)
+const TEMP_CHG_GATE_HIGH_001C: i32 = 60_00; // > +60.00°C → gate CHG (with 5°C hysteresis)
+const TEMP_CUTOFF_HIGH_001C: i32 = 70_00; // > +70.00°C → cut output (DSG off), 5°C hysteresis
+const TEMP_CUTOFF_LOW_001C: i32 = -10_00; // < -10.00°C → cut output (DSG off), 5°C hysteresis
+const TEMP_HYST_001C: i32 = 5_00; // 5°C hysteresis
+// EMA coefficient in percent (for active mode temperature smoothing)
+const TEMP_EMA_ALPHA_PCT: i32 = 20; // 20% new sample, 80% history
 
 // Wake-on-ALERT pending flag for BQ (set by EXTI task)
 static BQ_ALERT_PENDING: AtomicBool = AtomicBool::new(false);
@@ -342,6 +351,7 @@ pub async fn bq76920_task(args: Bq76920TaskArgs) {
     // Main loop for continuous data acquisition and publishing.
     let mut balance_timer_counter: u32 = 0; // Counter for battery balancing frequency
     let mut cell_sample_elapsed: u32 = 0; // Cell measurement scheduler (seconds)
+    let mut first_sample_pending: bool = true; // Force one immediate sample after init
     let mut active_balancing_cell: Option<usize> = None;
     let mut adapter_present: bool = false;
     let mut charger_expected: bool = false;
@@ -363,6 +373,14 @@ pub async fn bq76920_task(args: Bq76920TaskArgs) {
     let mut prev_charger_confirmed: bool = false;
     let mut last_eval_period_secs: u32 = 3600;
 
+    // Temperature smoothing state
+    let mut temp_ema_001c: i32 = 0;
+    let mut temp_ema_inited: bool = false;
+    // Temperature protection latches (edge-log once)
+    let mut temp_pause_active: bool = false; // request to SC (pubsub)
+    let mut temp_chg_gate_active: bool = false; // local CHG gating (>60°C with hysteresis)
+    let mut temp_cutoff_active: bool = false;
+
     loop {
         if crate::failsafe::is_quiesced() {
             // 静默时也不停止安全职责：不提前返回，只把 AC 视图标记为 false，允许后续以 60s 周期运行
@@ -373,6 +391,8 @@ pub async fn bq76920_task(args: Bq76920TaskArgs) {
                 match bq.read_all_measurements().await {
                     Ok(core_meas) => {
                         latest_core_measurements = Some(core_meas);
+                        // mark online (no extra log)
+                        crate::failsafe::set_bq_online(true);
                         fail_streak = 0;
                         crate::failsafe::clear_pstop();
                         bq76920_alerts_publisher.publish_immediate(
@@ -421,11 +441,13 @@ pub async fn bq76920_task(args: Bq76920TaskArgs) {
             let _ = bq.set_cell_balancing(0).await;
         }
 
-        // 采样调度：均衡期间 1s，其余按阶段 30/60s；ALERT 立即采样
-        let hw_balancing_active_now =
-            last_cellbal_bits != 0 || active_balancing_cell.is_some() || balancing_needed_by_delta;
+        // 采样调度："实际均衡活跃"或"充电相位"时 1s；其余按阶段 30/60s；ALERT 立即采样
+        // 注：仅“需要均衡（Δcell≥阈值）”而未处于充电相位时，不再将周期强制为 1s，避免 AC 不在时的高频打点。
         let charging_phase =
             charger_expected || charger_confirmed || ov_pause_active || imbalance_pause_active;
+        let hw_balancing_active_now = last_cellbal_bits != 0
+            || active_balancing_cell.is_some()
+            || (balancing_needed_by_delta && charging_phase);
         let period_secs: u32 = if hw_balancing_active_now {
             1
         } else if charging_phase {
@@ -433,8 +455,8 @@ pub async fn bq76920_task(args: Bq76920TaskArgs) {
         } else {
             60
         };
-        let bq_active_flag = period_secs < 60;
-        let mut sample_due = cell_sample_elapsed >= period_secs;
+        let bq_active_flag = period_secs < 30;
+        let mut sample_due = cell_sample_elapsed >= period_secs || first_sample_pending;
         let alert_due_now = BQ_ALERT_PENDING.swap(false, portable_atomic::Ordering::Relaxed);
         if alert_due_now {
             sample_due = true;
@@ -615,6 +637,110 @@ pub async fn bq76920_task(args: Bq76920TaskArgs) {
 
             // last_cellbal_bits already updated earlier on change; keep it as snapshot
 
+            // Compute and log temperature (EMA when active; median-of-3 when inactive)
+            if let Some(core) = latest_core_measurements.as_ref() {
+                // Choose internal TS1 (die temperature) per project requirement
+                let raw_t_001c: i16 = core.temperatures.ts1;
+                let bq_active_flag = period_secs < 30;
+                // Will be assigned by EMA (active) or median-of-3 (inactive) branches below
+                let used_t_001c: i16;
+                if bq_active_flag {
+                    // EMA smoothing
+                    if !temp_ema_inited {
+                        temp_ema_001c = i32::from(raw_t_001c);
+                        temp_ema_inited = true;
+                    } else {
+                        // ema = ema*(1-a) + x*a; all in 0.01°C integer domain
+                        let a = TEMP_EMA_ALPHA_PCT;
+                        temp_ema_001c =
+                            (temp_ema_001c * (100 - a) + i32::from(raw_t_001c) * a + 50) / 100;
+                    }
+                    used_t_001c = temp_ema_001c as i16;
+                    defmt::info!("bq:t= {} (ema) raw={} (0.01C)", used_t_001c, raw_t_001c);
+                } else {
+                    // Median of three consecutive reads (temperature only) when inactive
+                    let mut buf = [raw_t_001c, raw_t_001c, raw_t_001c];
+                    // Two additional quick samples
+                    if let Ok(t2) = bq.read_temperatures().await.map(|t| t.ts1) {
+                        buf[1] = t2;
+                    }
+                    Timer::after(Duration::from_millis(5)).await;
+                    if let Ok(t3) = bq.read_temperatures().await.map(|t| t.ts1) {
+                        buf[2] = t3;
+                    }
+                    // sort 3 values to get median
+                    if buf[0] > buf[1] {
+                        buf.swap(0, 1);
+                    }
+                    if buf[1] > buf[2] {
+                        buf.swap(1, 2);
+                    }
+                    if buf[0] > buf[1] {
+                        buf.swap(0, 1);
+                    }
+                    used_t_001c = buf[1];
+                    // keep EMA aligned to latest value when inactive
+                    temp_ema_001c = i32::from(used_t_001c);
+                    temp_ema_inited = true;
+                    defmt::info!(
+                        "bq:t= {} (med3) r0={} r1={} r2={} (0.01C)",
+                        used_t_001c,
+                        buf[0],
+                        buf[1],
+                        buf[2]
+                    );
+                }
+
+                // Temperature-based protections
+                let used_i32 = i32::from(used_t_001c);
+                let pause_needed =
+                    !(TEMP_PAUSE_LOW_001C..=TEMP_PAUSE_HIGH_001C).contains(&used_i32);
+                // CHG gate with hysteresis around 60°C
+                let chg_gate_enter = used_i32 > TEMP_CHG_GATE_HIGH_001C;
+                let chg_gate_exit = used_i32 <= (TEMP_CHG_GATE_HIGH_001C - TEMP_HYST_001C);
+                // DSG cutoff with hysteresis around ±70/−10°C
+                let cutoff_enter =
+                    !(TEMP_CUTOFF_LOW_001C..=TEMP_CUTOFF_HIGH_001C).contains(&used_i32);
+                let cutoff_exit = ((TEMP_CUTOFF_LOW_001C + TEMP_HYST_001C)
+                    ..=(TEMP_CUTOFF_HIGH_001C - TEMP_HYST_001C))
+                    .contains(&used_i32);
+
+                // Cutoff dominates pause
+                if cutoff_enter && !temp_cutoff_active {
+                    // Immediately cut discharge output
+                    let _ = bq.disable_discharging().await;
+                    defmt::warn!("bq:temp_cut DSG_OFF t001c={}", used_i32);
+                    temp_cutoff_active = true;
+                    fault_bq_flag = true;
+                } else if cutoff_exit && temp_cutoff_active {
+                    // Recover discharge path when temperature returns to safe band
+                    let _ = bq.enable_discharging().await;
+                    defmt::info!("bq:temp_cut clr t001c={}", used_i32);
+                    temp_cutoff_active = false;
+                    fault_bq_flag = false;
+                }
+
+                // Request SC pause (no direct CHG FET action here)
+                if pause_needed && !temp_pause_active {
+                    defmt::warn!("sc:req temp_pause t001c={}", used_i32);
+                    temp_pause_active = true;
+                } else if !pause_needed && temp_pause_active {
+                    defmt::info!("sc:req temp_pause clr t001c={}", used_i32);
+                    temp_pause_active = false;
+                }
+
+                // Local CHG gating only above 60°C with hysteresis
+                if chg_gate_enter && !temp_chg_gate_active {
+                    let _ = bq.disable_charging().await;
+                    defmt::warn!("bq:temp_chg_gate CHG_OFF t001c={}", used_i32);
+                    temp_chg_gate_active = true;
+                } else if chg_gate_exit && temp_chg_gate_active {
+                    let _ = bq.enable_charging().await;
+                    defmt::info!("bq:temp_chg_gate clr t001c={}", used_i32);
+                    temp_chg_gate_active = false;
+                }
+            }
+
             // 发布测量（即便失败也发布默认值，便于外设镜像）
             let bq76920_measurements_payload_for_main_pub =
                 crate::data_types::Bq76920Measurements {
@@ -628,6 +754,7 @@ pub async fn bq76920_task(args: Bq76920TaskArgs) {
             }
 
             cell_sample_elapsed = 0;
+            first_sample_pending = false;
         } // end sample_due
 
         // (spread re-evaluated earlier within the OK-measurements branch)
@@ -650,7 +777,7 @@ pub async fn bq76920_task(args: Bq76920TaskArgs) {
         let eval_period_secs: u32 = 1;
         if eval_period_secs != last_eval_period_secs {
             info!(
-                "bal:per={} ac={} chgph={}",
+                "bal:eval={} ac={} chgph={}",
                 eval_period_secs, adapter_present, charging_phase
             );
             last_eval_period_secs = eval_period_secs;
@@ -750,6 +877,7 @@ pub async fn bq76920_task(args: Bq76920TaskArgs) {
             require_cv,
             overlay: overlay_led,
             severe_imbalance: severe_imbalance_flag,
+            temp_pause: temp_pause_active,
         });
 
         // dbg: read end
