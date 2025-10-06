@@ -355,41 +355,25 @@ pub async fn bq76920_task(
 
     loop {
         if crate::failsafe::is_quiesced() {
-            // Minimal maintenance: ensure balancing off
+            // 静默时也不停止安全职责：不提前返回，只把 AC 视图标记为 false，允许后续以 60s 周期运行
             if let Some(_cell) = active_balancing_cell.take() {
                 let _ = bq.set_cell_balancing(0).await;
             }
-            // Wake-on-ALERT: if IRQ flagged, do a quick status/measurements read and publish
             if BQ_ALERT_PENDING.swap(false, portable_atomic::Ordering::Relaxed) {
                 match bq.read_all_measurements().await {
                     Ok(core_meas) => {
                         latest_core_measurements = Some(core_meas);
-                        // 成功则清空 fail-safe
                         fail_streak = 0;
                         crate::failsafe::clear_pstop();
-                        let alerts = crate::data_types::Bq76920Alerts {
-                            system_status: core_meas.system_status,
-                        };
-                        bq76920_alerts_publisher.publish_immediate(alerts);
-                        let meas_payload = crate::data_types::Bq76920Measurements {
-                            core_measurements: core_meas,
-                        };
-                        bq76920_measurements_publisher.publish_immediate(meas_payload);
+                        bq76920_alerts_publisher.publish_immediate(crate::data_types::Bq76920Alerts { system_status: core_meas.system_status });
+                        bq76920_measurements_publisher.publish_immediate(crate::data_types::Bq76920Measurements { core_measurements: core_meas });
                         let flags_to_clear = core_meas.system_status.0.bits();
-                        if flags_to_clear != 0 {
-                            let _ = bq.clear_status_flags(flags_to_clear).await;
-                        }
+                        if flags_to_clear != 0 { let _ = bq.clear_status_flags(flags_to_clear).await; }
                     }
                     Err(_e) => {
-                        // 失败计数，达到阈值后提出 fail-safe 请求
                         fail_streak = fail_streak.saturating_add(1);
-                        if fail_streak >= 3 {
-                            crate::failsafe::request_pstop();
-                        }
-                        let alerts = crate::data_types::Bq76920Alerts {
-                            system_status: Default::default(),
-                        };
-                        bq76920_alerts_publisher.publish_immediate(alerts);
+                        if fail_streak >= 3 { crate::failsafe::request_pstop(); }
+                        bq76920_alerts_publisher.publish_immediate(crate::data_types::Bq76920Alerts { system_status: Default::default() });
                     }
                 }
             }
@@ -397,8 +381,7 @@ pub async fn bq76920_task(
             let full_flag = (state_bits::flags() & sbits::FULL) != 0;
             let preparing = !full_flag && last_pack_voltage_mv < PACK_CHARGE_START_THRESHOLD_MV;
             update_bq_state(preparing, false, fault_bq_flag, false);
-            embassy_time::Timer::after(embassy_time::Duration::from_millis(100)).await;
-            continue;
+            // 不再 continue；后续进入统一的周期调度
         }
         // This task focuses on reading data from the BQ76920 itself.
         // Communication with other chips (like BQ25730 charger) is handled in their respective tasks.
