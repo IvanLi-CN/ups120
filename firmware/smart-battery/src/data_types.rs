@@ -23,53 +23,27 @@ impl<const N: usize> Default for Bq76920Measurements<N> {
 }
 
 /// BQ76920 安全告警信息
-#[derive(Debug, Copy, Clone, PartialEq)]
+#[derive(Debug, Copy, Clone, PartialEq, Default)]
 pub struct Bq76920Alerts {
     pub system_status: SystemStatus,
 }
-
-impl Default for Bq76920Alerts {
-    fn default() -> Self {
-        Self {
-            system_status: SystemStatus::default(),
-        }
-    }
-}
 /// INA226 测量数据
 #[allow(dead_code)]
-#[derive(Debug, Copy, Clone, PartialEq)]
+#[derive(Debug, Copy, Clone, PartialEq, Default)]
 pub struct Ina226Measurements {
     pub voltage: f32,
     pub current: f32,
     pub power: f32, // 假设需要功率，如果不需要可以调整
 }
 
-impl Default for Ina226Measurements {
-    fn default() -> Self {
-        Self {
-            voltage: 0.0,
-            current: 0.0,
-            power: 0.0,
-        }
-    }
-}
-
 /// SC8815 测量数据
-#[derive(Debug, Copy, Clone, PartialEq)]
+#[derive(Debug, Copy, Clone, PartialEq, Default)]
 pub struct Sc8815Measurements {
     pub adc_measurements: Sc8815AdcMeasurements,
 }
 
-impl Default for Sc8815Measurements {
-    fn default() -> Self {
-        Self {
-            adc_measurements: Sc8815AdcMeasurements::default(),
-        }
-    }
-}
-
 /// SC8815 安全告警信息
-#[derive(Debug, Copy, Clone, PartialEq)]
+#[derive(Debug, Copy, Clone, PartialEq, Default)]
 pub struct Sc8815Alerts {
     pub device_status: SC8815Status,
     /// Firmware currently requests the charger to be active (CE low, PSTOP low).
@@ -82,24 +56,12 @@ pub struct Sc8815Alerts {
     pub imbalance_pause_active: bool,
 }
 
-impl Default for Sc8815Alerts {
-    fn default() -> Self {
-        Self {
-            device_status: SC8815Status::default(),
-            expected_charging: false,
-            charging_confirmed: false,
-            ov_pause_active: false,
-            imbalance_pause_active: false,
-        }
-    }
-}
-
 /// Balancing → Charger coupling signal
 ///
 /// When `require_cv` is true, the charger task shall maintain CV charging
 /// (keep session active and avoid termination) until the balancer indicates
 /// it is no longer required.
-#[derive(Debug, Copy, Clone, PartialEq)]
+#[derive(Debug, Copy, Clone, PartialEq, Default)]
 pub struct BalancingCvRequest {
     /// Request charger to maintain CV (used by charger task)
     pub require_cv: bool,
@@ -107,16 +69,6 @@ pub struct BalancingCvRequest {
     pub overlay: bool,
     /// Severe imbalance indicator (Δcell >= 100 mV)
     pub severe_imbalance: bool,
-}
-
-impl Default for BalancingCvRequest {
-    fn default() -> Self {
-        Self {
-            require_cv: false,
-            overlay: false,
-            severe_imbalance: false,
-        }
-    }
 }
 
 /// 聚合所有设备的测量数据
@@ -145,7 +97,7 @@ impl<const N: usize> AllMeasurements<N> {
     /// Converts the aggregated measurements into the flattened USB payload structure.
     /// Assumes that BQ76920 temperatures and current are already in physical units within `self.bq76920.core_measurements`.
     #[allow(dead_code)]
-    pub fn to_usb_payload(&self) -> AllMeasurementsUsbPayload {
+    pub fn as_usb_payload(&self) -> AllMeasurementsUsbPayload {
         // SC8815 ADC measurements (already in mV/mA in self.sc8815.adc_measurements)
         let sc8815_adc_vbus_mv = self.sc8815.adc_measurements.vbus_mv;
         let sc8815_adc_vbat_mv = self.sc8815.adc_measurements.vbat_mv;

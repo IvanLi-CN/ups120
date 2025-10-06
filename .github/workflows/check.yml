@@ -1,0 +1,76 @@
+name: Code Check
+
+on:
+  push:
+    branches: [ main, develop ]
+    paths:
+      - 'firmware/smart-battery/**'
+  pull_request:
+    branches: [ main, develop ]
+    paths:
+      - 'firmware/smart-battery/**'
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain (Cortex-M0+, thumbv6m)
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: 1.90
+          components: rustfmt, clippy, rust-src, llvm-tools-preview
+          targets: thumbv6m-none-eabi
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            firmware/smart-battery/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Check code formatting
+        working-directory: firmware/smart-battery
+        run: cargo fmt -- --check
+
+      - name: Run clippy (deny warnings)
+        working-directory: firmware/smart-battery
+        run: cargo clippy --bins --examples --no-deps --target thumbv6m-none-eabi -- -D warnings
+
+      - name: Build main binary (release)
+        working-directory: firmware/smart-battery
+        run: cargo build --release --target thumbv6m-none-eabi
+
+      - name: Build examples (release)
+        working-directory: firmware/smart-battery
+        run: cargo build --examples --release --target thumbv6m-none-eabi || echo "No examples to build; skipping"
+
+      - name: Skip binary packaging for STM32L0
+        run: echo "Packaging .bin is skipped; use ELF with probe-rs for flashing."
+
+      - name: Check build artifacts
+        run: |
+          ARTIFACT=firmware/smart-battery/target/thumbv6m-none-eabi/release/smart-battery
+          if [ ! -f "$ARTIFACT" ]; then
+            echo "Build failed: ELF not found at $ARTIFACT" && exit 1
+          fi
+          echo "Build successful: size $(stat -c%s "$ARTIFACT" 2>/dev/null || stat -f%z "$ARTIFACT") bytes"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: build-artifacts-${{ github.sha }}-thumbv6m
+          path: |
+            firmware/smart-battery/target/thumbv6m-none-eabi/release/smart-battery
+          retention-days: 7

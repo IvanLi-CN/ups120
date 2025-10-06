@@ -63,6 +63,21 @@ fn update_bq_state(preparing: bool, balancing_active: bool, fault_bq: bool, acti
     state_bits::update_flags(MASK, value);
 }
 
+pub struct Bq76920TaskArgs {
+    pub i2c_bus: I2cDevice<
+        'static,
+        CriticalSectionRawMutex,
+        I2c<'static, embassy_stm32::mode::Async, embassy_stm32::i2c::mode::Master>,
+    >,
+    pub address: u8,
+    pub sense_resistor_m_ohm: u32,
+    pub ntc_params: Option<NtcParameters>,
+    pub bq76920_alerts_publisher: Bq76920AlertsPublisher<'static>,
+    pub bq76920_measurements_publisher: Bq76920MeasurementsPublisher<'static, 5>,
+    pub sc8815_alerts_subscriber: Sc8815AlertsSubscriber<'static>,
+    pub balancing_cv_publisher: BalancingCvRequestPublisher<'static>,
+}
+
 #[embassy_executor::task]
 pub async fn bq_alert_irq_task(mut int_pin: ExtiInput<'static>) {
     loop {
@@ -204,12 +219,10 @@ async fn execute_smart_battery_balancing<'a>(
                 Err(_e) => defmt::info!("bal:vr rd!"),
             }
         }
-    } else {
-        if active_cell.is_some() {
-            info!("bal:no-meas disable");
-            let _ = bq.set_cell_balancing(0).await;
-            *active_cell = None;
-        }
+    } else if active_cell.is_some() {
+        info!("bal:no-meas disable");
+        let _ = bq.set_cell_balancing(0).await;
+        *active_cell = None;
     }
 }
 
@@ -242,20 +255,17 @@ async fn execute_smart_battery_balancing<'a>(
 /// * `bq76920_measurements_publisher`: Publisher for sending BQ76920 measurement data.
 ///   The const generic `5` indicates the number of cells, matching the `N` for `Bq769x0`.
 #[embassy_executor::task]
-pub async fn bq76920_task(
-    i2c_bus: I2cDevice<
-        'static,
-        CriticalSectionRawMutex,
-        I2c<'static, embassy_stm32::mode::Async, embassy_stm32::i2c::mode::Master>,
-    >,
-    address: u8,
-    sense_resistor_m_ohm: u32, // Added: Sense resistor value in mOhms
-    ntc_params: Option<NtcParameters>, // Added: NTC parameters
-    bq76920_alerts_publisher: Bq76920AlertsPublisher<'static>,
-    bq76920_measurements_publisher: Bq76920MeasurementsPublisher<'static, 5>,
-    mut sc8815_alerts_subscriber: Sc8815AlertsSubscriber<'static>,
-    balancing_cv_publisher: BalancingCvRequestPublisher<'static>,
-) {
+pub async fn bq76920_task(args: Bq76920TaskArgs) {
+    let Bq76920TaskArgs {
+        i2c_bus,
+        address,
+        sense_resistor_m_ohm,
+        ntc_params,
+        bq76920_alerts_publisher,
+        bq76920_measurements_publisher,
+        mut sc8815_alerts_subscriber,
+        balancing_cv_publisher,
+    } = args;
     // dbg: test_fets_off
     // Initialize the BQ769x0 driver instance with CRC enabled and for 5 cells.
     // sense_resistor_m_ohm and ntc_params are now passed as arguments to this task.
@@ -365,15 +375,31 @@ pub async fn bq76920_task(
                         latest_core_measurements = Some(core_meas);
                         fail_streak = 0;
                         crate::failsafe::clear_pstop();
-                        bq76920_alerts_publisher.publish_immediate(crate::data_types::Bq76920Alerts { system_status: core_meas.system_status });
-                        bq76920_measurements_publisher.publish_immediate(crate::data_types::Bq76920Measurements { core_measurements: core_meas });
+                        bq76920_alerts_publisher.publish_immediate(
+                            crate::data_types::Bq76920Alerts {
+                                system_status: core_meas.system_status,
+                            },
+                        );
+                        bq76920_measurements_publisher.publish_immediate(
+                            crate::data_types::Bq76920Measurements {
+                                core_measurements: core_meas,
+                            },
+                        );
                         let flags_to_clear = core_meas.system_status.0.bits();
-                        if flags_to_clear != 0 { let _ = bq.clear_status_flags(flags_to_clear).await; }
+                        if flags_to_clear != 0 {
+                            let _ = bq.clear_status_flags(flags_to_clear).await;
+                        }
                     }
                     Err(_e) => {
                         fail_streak = fail_streak.saturating_add(1);
-                        if fail_streak >= 3 { crate::failsafe::request_pstop(); }
-                        bq76920_alerts_publisher.publish_immediate(crate::data_types::Bq76920Alerts { system_status: Default::default() });
+                        if fail_streak >= 3 {
+                            crate::failsafe::request_pstop();
+                        }
+                        bq76920_alerts_publisher.publish_immediate(
+                            crate::data_types::Bq76920Alerts {
+                                system_status: Default::default(),
+                            },
+                        );
                     }
                 }
             }
@@ -494,12 +520,10 @@ pub async fn bq76920_task(
                         if is_discharge_currently_on {
                             let _ = bq.disable_discharging().await;
                         }
-                    } else {
-                        if should_enable_discharge && !is_discharge_currently_on {
-                            let _ = bq.enable_discharging().await;
-                        } else if !should_enable_discharge && is_discharge_currently_on {
-                            let _ = bq.disable_discharging().await;
-                        }
+                    } else if should_enable_discharge && !is_discharge_currently_on {
+                        let _ = bq.enable_discharging().await;
+                    } else if !should_enable_discharge && is_discharge_currently_on {
+                        let _ = bq.disable_discharging().await;
                     }
 
                     // Compute whether balancing is needed by pack spread threshold (start condition)
@@ -549,12 +573,10 @@ pub async fn bq76920_task(
                     if TEST_FORCE_BQ_FETS_OFF {
                         let _ = bq.disable_charging().await;
                         debug!("TEST: Forcing BQ76920 CHG/DSG OFF (runtime)");
+                    } else if should_enable_charging {
+                        let _ = bq.enable_charging().await;
                     } else {
-                        if should_enable_charging {
-                            let _ = bq.enable_charging().await;
-                        } else {
-                            let _ = bq.disable_charging().await;
-                        }
+                        let _ = bq.disable_charging().await;
                     }
 
                     // Publish BQ76920 alert information (derived from system status).
@@ -742,16 +764,18 @@ pub async fn bq76920_task(
             balance_retry_holdoff = balance_retry_holdoff.saturating_sub(1);
         }
         // 当抑制计时刚好归零时，立刻执行一次快速评估，避免再等到下一周期
-        if prev_holdoff > 0 && balance_retry_holdoff == 0 {
-            if adapter_present && !TEST_FORCE_BQ_FETS_OFF {
-                info!("bal:holdoff");
-                execute_smart_battery_balancing(
-                    &mut bq,
-                    &latest_core_measurements,
-                    &mut active_balancing_cell,
-                )
-                .await;
-            }
+        if prev_holdoff > 0
+            && balance_retry_holdoff == 0
+            && adapter_present
+            && !TEST_FORCE_BQ_FETS_OFF
+        {
+            info!("bal:holdoff");
+            execute_smart_battery_balancing(
+                &mut bq,
+                &latest_core_measurements,
+                &mut active_balancing_cell,
+            )
+            .await;
         }
 
         let full_flag = (state_bits::flags() & sbits::FULL) != 0;
