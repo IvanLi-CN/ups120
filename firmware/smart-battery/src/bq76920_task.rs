@@ -383,12 +383,8 @@ pub async fn bq76920_task(
                 match bq.read_all_measurements().await {
                     Ok(core_meas) => {
                         latest_core_measurements = Some(core_meas);
-                        // Log once on offline→online transition
-                        let was_online = crate::failsafe::is_bq_online();
+                        // mark online (no extra log)
                         crate::failsafe::set_bq_online(true);
-                        if !was_online {
-                            defmt::info!("bq:online=1(silent)");
-                        }
                         fail_streak = 0;
                         crate::failsafe::clear_pstop();
                         bq76920_alerts_publisher.publish_immediate(
