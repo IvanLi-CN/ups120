@@ -227,38 +227,36 @@ async fn main(_spawner: Spawner) {
     let balancing_cv_sub = balancing_cv_chan
         .subscriber()
         .expect("Allocate BalancingCv subscriber for charger task");
-    _spawner.spawn(
-        sc8815_task::sc8815_task(sc8815_task::Sc8815TaskArgs {
-            ce_ctl: ce,
-            pstop_ctl: pstop,
-            i2c_device: i2c_dev_for_sc,
-            address: sc8815_task::SC8815_DEFAULT_ADDRESS,
-            sc8815_alerts_publisher: sc8815_alerts_pub,
-            sc8815_measurements_publisher: sc8815_meas_pub,
-            bq76920_measurements_subscriber: bq76920_meas_sub,
+    _spawner
+        .spawn(sc8815_task::sc8815_task(
+            ce,
+            pstop,
+            i2c_dev_for_sc,
+            sc8815_task::SC8815_DEFAULT_ADDRESS,
+            sc8815_alerts_pub,
+            sc8815_meas_pub,
+            bq76920_meas_sub,
             balancing_cv_sub,
-        })
-        .expect("sc token"),
-    );
+        )
+        .expect("sc token"));
 
     let bq_runtime_addr = bq_init_addr.unwrap_or(BQ76920_I2C_ADDR);
     let i2c_dev_runtime = I2cDevice::new(i2c_bus);
     let sc8815_alerts_sub = _sc8815_alerts_chan
         .subscriber()
         .expect("Allocate SC8815 alerts subscriber for BQ task");
-    _spawner.spawn(
-        bq76920_task::bq76920_task(bq76920_task::Bq76920TaskArgs {
-            i2c_bus: i2c_dev_runtime,
-            address: bq_runtime_addr,
-            sense_resistor_m_ohm: 3,
-            ntc_params: None,
-            bq76920_alerts_publisher: bq76920_alerts_pub,
-            bq76920_measurements_publisher: bq76920_meas_pub,
-            sc8815_alerts_subscriber: sc8815_alerts_sub,
-            balancing_cv_publisher: balancing_cv_pub,
-        })
-        .expect("bq token"),
-    );
+    _spawner
+        .spawn(bq76920_task::bq76920_task(
+            i2c_dev_runtime,
+            bq_runtime_addr,
+            3,
+            None,
+            bq76920_alerts_pub,
+            bq76920_meas_pub,
+            sc8815_alerts_sub,
+            balancing_cv_pub,
+        )
+        .expect("bq token"));
 
     // 保留软件睡眠管理器（轻度 SLEEP 策略），由默认执行器 WFE 驱动。
     _spawner.spawn(sleep_manager::sleep_task().expect("sleep-mgr token"));

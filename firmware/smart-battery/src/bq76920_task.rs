@@ -72,35 +72,7 @@ fn update_bq_state(preparing: bool, balancing_active: bool, fault_bq: bool, acti
     state_bits::update_flags(MASK, value);
 }
 
-pub struct Bq76920TaskArgs {
-    pub i2c_bus: I2cDevice<
-        'static,
-        CriticalSectionRawMutex,
-        I2c<'static, embassy_stm32::mode::Async, embassy_stm32::i2c::mode::Master>,
-    >,
-    pub address: u8,
-    pub sense_resistor_m_ohm: u32,
-    pub ntc_params: Option<NtcParameters>,
-    pub bq76920_alerts_publisher: Bq76920AlertsPublisher<'static>,
-    pub bq76920_measurements_publisher: Bq76920MeasurementsPublisher<'static, 5>,
-    pub sc8815_alerts_subscriber: Sc8815AlertsSubscriber<'static>,
-    pub balancing_cv_publisher: BalancingCvRequestPublisher<'static>,
-}
-
-pub struct Bq76920TaskArgs {
-    pub i2c_bus: I2cDevice<
-        'static,
-        CriticalSectionRawMutex,
-        I2c<'static, embassy_stm32::mode::Async, embassy_stm32::i2c::mode::Master>,
-    >,
-    pub address: u8,
-    pub sense_resistor_m_ohm: u32,
-    pub ntc_params: Option<NtcParameters>,
-    pub bq76920_alerts_publisher: Bq76920AlertsPublisher<'static>,
-    pub bq76920_measurements_publisher: Bq76920MeasurementsPublisher<'static, 5>,
-    pub sc8815_alerts_subscriber: Sc8815AlertsSubscriber<'static>,
-    pub balancing_cv_publisher: BalancingCvRequestPublisher<'static>,
-}
+// Note: args wrapper struct removed to keep the task signature stable (positional args)
 
 #[embassy_executor::task]
 pub async fn bq_alert_irq_task(mut int_pin: ExtiInput<'static>) {
@@ -402,13 +374,8 @@ pub async fn bq76920_task(
     let mut temp_cutoff_active: bool = false;
 
     loop {
-<<<<<<< HEAD
         if crate::failsafe::is_quiesced() {
             // 静默时也不停止安全职责：不提前返回，只把 AC 视图标记为 false，允许后续以 60s 周期运行
-=======
-        if crate::failsafe::is_quiesced() && !first_sample_pending {
-            // Minimal maintenance: ensure balancing off
->>>>>>> 5f9b87a (chore(wip): preserve local uncommitted changes before syncing main)
             if let Some(_cell) = active_balancing_cell.take() {
                 let _ = bq.set_cell_balancing(0).await;
             }
