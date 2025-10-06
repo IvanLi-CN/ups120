@@ -258,6 +258,8 @@ controls, and telemetry loops that underpin bring-up.
   - 功率级放行（PSTOP 低）与暂停（PSTOP 高）：
     - 正常充电：无暂停条件时，放行功率级（PSTOP 低）。
     - 过压（OV，电池故障）：立即暂停，仅拉高 PSTOP，保持会话不结束；进入 180 s 冷却计时，计时结束且仍满足“会话创建两条”时再放行。
+
+ 
     - 严重不均衡（Δcell ≥ 100 mV，非故障）：立即暂停，仅拉高 PSTOP，保持会话不结束；当 `Δcell < 50 mV` 立刻解除暂停并放行（无时间迟滞）。
     - 其它电池或充电故障（如 UV/OCD/SCD、OTP、VBUS/VBAT 短路等）：立即暂停并结束会话（CE/PSTOP 置高），待故障消除后按会话创建规则重来。
   - 进入充电时序：会话创建成功后，先断开功率级（PSTOP 高）、拉低 CE、延时 100 ms、再释放 PSTOP 以放行功率级。
@@ -321,6 +323,26 @@ Full detection (parameters):
   posture that now gates charger bring-up.
 
 ---
+
+## Temperature Sensing & Protection (BQ76920 Internal Sensor)
+
+Goal: 使用 BQ76920 内部温度作为单一权威温度输入；在 BQ 激活/非激活两种采样节拍下分别进行平滑/抗毛刺；按如下分级保护并保持 5°C 迟滞。
+
+- 传感器来源：BQ76920 内部温度（TEMP_SEL=Internal），驱动返回 `temperatures.ts1`，单位 0.01°C。
+- 采样/滤波：
+  - 激活态（采样周期 < 60s）：EMA 平滑，α=0.20（整数域）。
+  - 非激活态（≥60s）：快速连续三次求中位数；该中位数也用于重置 EMA。
+  - 启动快速首样：初始化完成后强制一次“立即采样”，便于尽快暴露故障与温度异常。
+- 日志：每次决策打印一行 `bq:t= <used> (ema|med3) raw=<raw> (0.01C)`。
+- 保护与动作（带 5°C 迟滞）：
+  - 温度暂停：T > +50 或 T < 0 → BQ 通过 BalancingCvRequest.temp_pause=true 请求 SC8815 暂停充电；温度回到 ≤45 或 ≥+5 时清除请求。注意：此阶段不直接操作 CHG FET。
+  - CHG 抑制：T > +60 → 仅在 BQ 侧关闭 CHG FET；温度 ≤55 自动恢复。
+  - 输出切断：T > +70 或 T < −10 → 关闭 DSG FET；温度 ≤65 且 ≥−5 自动恢复。
+- 灯语：本次改动不直接影响黄灯；黄灯仍由 SC8815 自身告警/会话状态决定。红灯会因 FET 组合状态变化（非两侧同时 ON）表现为更高脉冲码；蓝灯是否显示“暂停”仍取决于现有 CHG_PAUSED 标志（由 SC 侧暂停行为产生）。
+
+Notes:
+- Temperature based CHG/DSG FET control is executed by the BQ task for fastest reaction and does not depend on charger session state.
+- SC8815 charging logic remains authoritative for session creation/termination; CHG FET gating at BQ level prevents current flow during temperature pauses.
 
 ## Control-Flow Diagrams
 

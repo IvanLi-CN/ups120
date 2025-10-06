@@ -107,6 +107,8 @@ pub struct BalancingCvRequest {
     pub overlay: bool,
     /// Severe imbalance indicator (Δcell >= 100 mV)
     pub severe_imbalance: bool,
+    /// Request SC8815 to pause charging due to temperature (host-level request)
+    pub temp_pause: bool,
 }
 
 impl Default for BalancingCvRequest {
@@ -115,6 +117,7 @@ impl Default for BalancingCvRequest {
             require_cv: false,
             overlay: false,
             severe_imbalance: false,
+            temp_pause: false,
         }
     }
 }
