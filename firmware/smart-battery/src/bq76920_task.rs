@@ -642,7 +642,8 @@ pub async fn bq76920_task(args: Bq76920TaskArgs) {
                 // Choose internal TS1 (die temperature) per project requirement
                 let raw_t_001c: i16 = core.temperatures.ts1;
                 let bq_active_flag = period_secs < 30;
-                let mut used_t_001c: i16 = raw_t_001c;
+                // Will be assigned by EMA (active) or median-of-3 (inactive) branches below
+                let used_t_001c: i16;
                 if bq_active_flag {
                     // EMA smoothing
                     if !temp_ema_inited {
@@ -693,15 +694,16 @@ pub async fn bq76920_task(args: Bq76920TaskArgs) {
                 // Temperature-based protections
                 let used_i32 = i32::from(used_t_001c);
                 let pause_needed =
-                    used_i32 > TEMP_PAUSE_HIGH_001C || used_i32 < TEMP_PAUSE_LOW_001C;
+                    !(TEMP_PAUSE_LOW_001C..=TEMP_PAUSE_HIGH_001C).contains(&used_i32);
                 // CHG gate with hysteresis around 60°C
                 let chg_gate_enter = used_i32 > TEMP_CHG_GATE_HIGH_001C;
                 let chg_gate_exit = used_i32 <= (TEMP_CHG_GATE_HIGH_001C - TEMP_HYST_001C);
                 // DSG cutoff with hysteresis around ±70/−10°C
                 let cutoff_enter =
-                    used_i32 > TEMP_CUTOFF_HIGH_001C || used_i32 < TEMP_CUTOFF_LOW_001C;
-                let cutoff_exit = (used_i32 <= (TEMP_CUTOFF_HIGH_001C - TEMP_HYST_001C))
-                    && (used_i32 >= (TEMP_CUTOFF_LOW_001C + TEMP_HYST_001C));
+                    !(TEMP_CUTOFF_LOW_001C..=TEMP_CUTOFF_HIGH_001C).contains(&used_i32);
+                let cutoff_exit = ((TEMP_CUTOFF_LOW_001C + TEMP_HYST_001C)
+                    ..=(TEMP_CUTOFF_HIGH_001C - TEMP_HYST_001C))
+                    .contains(&used_i32);
 
                 // Cutoff dominates pause
                 if cutoff_enter && !temp_cutoff_active {

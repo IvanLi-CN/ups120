@@ -61,7 +61,7 @@ pub struct Sc8815Alerts {
 /// When `require_cv` is true, the charger task shall maintain CV charging
 /// (keep session active and avoid termination) until the balancer indicates
 /// it is no longer required.
-#[derive(Debug, Copy, Clone, PartialEq)]
+#[derive(Debug, Copy, Clone, PartialEq, Default)]
 pub struct BalancingCvRequest {
     /// Request charger to maintain CV (used by charger task)
     pub require_cv: bool,
@@ -71,17 +71,6 @@ pub struct BalancingCvRequest {
     pub severe_imbalance: bool,
     /// Request SC8815 to pause charging due to temperature (host-level request)
     pub temp_pause: bool,
-}
-
-impl Default for BalancingCvRequest {
-    fn default() -> Self {
-        Self {
-            require_cv: false,
-            overlay: false,
-            severe_imbalance: false,
-            temp_pause: false,
-        }
-    }
 }
 /// 聚合所有设备的测量数据
 #[derive(Debug, Copy, Clone, PartialEq)]
