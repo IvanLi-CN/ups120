@@ -530,9 +530,11 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                 }
 
                 // Charge start conditions (edge-logged)
+                // 当处于温度暂停时，严格禁止进入启动路径，避免启停抖动与日志刷屏
                 let pol_start_cond = pack_voltage_mv < PACK_CHARGE_START_THRESHOLD_MV
                     && !charger_active
-                    && adapter_holdoff_secs == 0;
+                    && adapter_holdoff_secs == 0
+                    && !temp_pause_cmd;
                 if pol_start_cond {
                     // (edge latch removed)
                     if sc8815_session.is_none() {
@@ -570,6 +572,7 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                         && uv_pause_secs == 0
                         && oc_pause_secs == 0
                         && !imbalance_pause_active
+                        && !temp_pause_cmd
                     {
                         if let Some(sess) = sc8815_session.as_mut() {
                             sess.enable_power_stage();
