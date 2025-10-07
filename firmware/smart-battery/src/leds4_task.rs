@@ -99,6 +99,7 @@ pub async fn leds_task(
     let mut sc_pause_imb = false;
     let mut bq_fault = false;
     let mut overlay_balancing = false;
+    let mut temp_pause_active = false; // from BQ (BalancingCvRequest)
 
     loop {
         let now = Instant::now();
@@ -138,6 +139,7 @@ pub async fn leds_task(
         }
         if let Some(b) = bal_cv_sub.try_next_message_pure() {
             overlay_balancing = b.overlay;
+            temp_pause_active = b.temp_pause;
         }
         // Dropout derived from online flags: device stays online after boot probe
         // and only turns offline on real communication timeout thereafter.
@@ -177,9 +179,13 @@ pub async fn leds_task(
         if overlay_balancing {
             red.pulses = red.pulses.max(1);
         }
-        if !both_on {
-            red.pulses = red.pulses.max(5);
+        // Report temperature pause via Red LED with a dedicated code (6 pulses).
+        if temp_pause_active {
+            red.pulses = red.pulses.max(6);
         }
+        // Note: do NOT assign extra pulses when FETs are not both ON.
+        //       Base_on already reflects FET gating (any side OFF → base ON),
+        //       to avoid mixing with temperature indication.
 
         // Yellow (SC8815)
         let yellow_active = (state_flags & sbits::ACTIVE_SC) != 0;
