@@ -83,6 +83,7 @@ Notes: LED tasks do not synchronize phases across colors; each keeps its own 3 s
   - 3 pulses: SCD (short‑circuit discharge).
   - 4 pulses: OCD (over‑current discharge).
   - 5 pulses: AFE internal temp/reference abnormal or other major unclassified fault.
+  - 6 pulses: Battery temperature out of band (temp pause by BQ76920).
 
 ### 3.4 Blue (Global State)
 
@@ -100,8 +101,8 @@ Notes: LED tasks do not synchronize phases across colors; each keeps its own 3 s
 ## 4) Arbitration & Timing Composition
 
 - Per‑LED priority: Dropout 1 Hz > Fault 50% (1.5 s/1.5 s) + pulses > Base + pulses.
-- Green’s I2C pulse is asynchronous and can briefly override for ~30–240 ms without changing the 3 s phase.
-- Driver layer composes modes; semantic layer only decides “base + pulses / 50% blink / 1 Hz blink”.
+  - Green’s I2C pulse is asynchronous and can briefly override for ~30–240 ms without changing the 3 s phase.
+  - Driver layer composes modes; semantic layer only decides “base + pulses / 50% blink / 1 Hz blink”.
 
 ## 5) Sampling Cadence, Balancing, Pause‑Charge
 

@@ -58,16 +58,7 @@ fn compose_with_pulses(base_on: bool, pulses: u8, phase_ms: u32) -> bool {
     base_on
 }
 
-fn bq_fets_both_on<const N: usize>(
-    bq_opt: &Option<crate::data_types::Bq76920Measurements<N>>,
-) -> bool {
-    if let Some(bq) = bq_opt.as_ref() {
-        use bq769x0_async_rs::registers::SysCtrl2Flags;
-        let m = bq.core_measurements.mos_status.0;
-        return m.contains(SysCtrl2Flags::CHG_ON) && m.contains(SysCtrl2Flags::DSG_ON);
-    }
-    false
-}
+// Note: FET gating状态仅通过 red.base_on 表达；不再需要单独判定“both_on”作为脉冲编码输入。
 
 /// 4-LED status compositor
 #[embassy_executor::task]
@@ -99,6 +90,7 @@ pub async fn leds_task(
     let mut sc_pause_imb = false;
     let mut bq_fault = false;
     let mut overlay_balancing = false;
+    let mut temp_pause_active = false; // from BQ (BalancingCvRequest)
 
     loop {
         let now = Instant::now();
@@ -138,6 +130,7 @@ pub async fn leds_task(
         }
         if let Some(b) = bal_cv_sub.try_next_message_pure() {
             overlay_balancing = b.overlay;
+            temp_pause_active = b.temp_pause;
         }
         // Dropout derived from online flags: device stays online after boot probe
         // and only turns offline on real communication timeout thereafter.
@@ -160,7 +153,6 @@ pub async fn leds_task(
 
         // Red (BQ FET/Protection)
         let mut red = LedIntent::default();
-        let both_on = bq_fets_both_on(&bq);
         let red_active = (state_flags & sbits::ACTIVE_BQ) != 0;
         red.base_on = red_active;
         // Fault blink mapping：电池故障 → 50% 闪烁；并按严重度分配脉冲数（越严重脉冲数越大）
@@ -177,9 +169,13 @@ pub async fn leds_task(
         if overlay_balancing {
             red.pulses = red.pulses.max(1);
         }
-        if !both_on {
-            red.pulses = red.pulses.max(5);
+        // Report temperature pause via Red LED with a dedicated code (6 pulses).
+        if temp_pause_active {
+            red.pulses = red.pulses.max(6);
         }
+        // Note: do NOT assign extra pulses when FETs are not both ON.
+        //       Base_on already reflects FET gating (any side OFF → base ON),
+        //       to avoid mixing with temperature indication.
 
         // Yellow (SC8815)
         let yellow_active = (state_flags & sbits::ACTIVE_SC) != 0;

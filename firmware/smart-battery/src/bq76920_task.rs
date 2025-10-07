@@ -793,8 +793,10 @@ pub async fn bq76920_task(args: Bq76920TaskArgs) {
 
         // Determine if we should request CV hold from charger
         let hw_balancing_active = last_cellbal_bits != 0;
-        // Charger should hold CV when balancing is required or active, but only when AC is present.
+        // Charger should hold CV when balancing is required or active, but only when AC is present
+        // and not during temperature pause.
         let mut require_cv = adapter_present
+            && !temp_pause_active
             && (active_balancing_cell.is_some()
                 || hw_balancing_active
                 || balancing_needed_by_delta);
@@ -812,7 +814,8 @@ pub async fn bq76920_task(args: Bq76920TaskArgs) {
             // 3600 seconds = 1 hour
             if !TEST_FORCE_BQ_FETS_OFF {
                 // Strict policy: balancing only allowed when adapter is present.
-                let balancing_env = adapter_present;
+                // Additionally, never allow balancing during temperature pause.
+                let balancing_env = adapter_present && !temp_pause_active;
                 if balancing_env && charging_phase {
                     execute_smart_battery_balancing(
                         &mut bq,
@@ -831,6 +834,16 @@ pub async fn bq76920_task(args: Bq76920TaskArgs) {
             balance_timer_counter = 0; // Reset counter after execution
         }
         // --- End Battery Balancing Logic ---
+
+        // If temperature pause becomes active while balancing, stop immediately.
+        if temp_pause_active && (active_balancing_cell.is_some() || last_cellbal_bits != 0) {
+            defmt::info!("bal:stop temp_pause hw=0x{:02X}", last_cellbal_bits);
+            let _ = bq.set_cell_balancing(0).await;
+            active_balancing_cell = None;
+            last_cellbal_bits = 0;
+            // During temp pause we also withdraw CV request to avoid keeping charge path primed.
+            require_cv = false;
+        }
 
         // If adapter lost while balancing, stop immediately (log once until recovery)
         // 在暂停环境下（OV/严重不均衡），即使 adapter 不在也不立即停均衡
