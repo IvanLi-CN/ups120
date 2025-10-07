@@ -58,16 +58,7 @@ fn compose_with_pulses(base_on: bool, pulses: u8, phase_ms: u32) -> bool {
     base_on
 }
 
-fn bq_fets_both_on<const N: usize>(
-    bq_opt: &Option<crate::data_types::Bq76920Measurements<N>>,
-) -> bool {
-    if let Some(bq) = bq_opt.as_ref() {
-        use bq769x0_async_rs::registers::SysCtrl2Flags;
-        let m = bq.core_measurements.mos_status.0;
-        return m.contains(SysCtrl2Flags::CHG_ON) && m.contains(SysCtrl2Flags::DSG_ON);
-    }
-    false
-}
+// Note: FET gating状态仅通过 red.base_on 表达；不再需要单独判定“both_on”作为脉冲编码输入。
 
 /// 4-LED status compositor
 #[embassy_executor::task]
