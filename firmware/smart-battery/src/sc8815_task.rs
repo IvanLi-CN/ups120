@@ -41,6 +41,43 @@ const ADIN_CODE_COLD_5V: u16 = 990; // ≈0°C  @ VCC_SC≈5.0V
 const ADIN_CODE_MARGIN: u16 = 5; //  ±5 codes tolerance
 const ADIN_DEBOUNCE_SAMPLES: u8 = 3; // require N consecutive samples
 
+// Lightweight temperature approximation using small piecewise-linear LUTs (no libm)
+// Covers 0..80°C in 10°C steps. Code decreases monotonically with temperature.
+const LUT_T_STEP_C: i16 = 10;
+const LUT_LEN: usize = 9;
+// run-mode (VCC_SC≈3.0V)
+const LUT_CODE_3V: [u16; LUT_LEN] = [593, 446, 329, 242, 178, 131, 98, 74, 56];
+// stop-mode (VCC_SC≈5.0V)
+const LUT_CODE_5V: [u16; LUT_LEN] = [990, 743, 549, 403, 297, 220, 164, 124, 95];
+
+#[inline]
+fn approx_temp_centi_c_from_code(code: u16, run_mode_3v: bool) -> i16 {
+    let lut = if run_mode_3v { &LUT_CODE_3V } else { &LUT_CODE_5V };
+    // Saturate outside table
+    if code >= lut[0] {
+        return 0; // ~0°C
+    }
+    if code <= lut[LUT_LEN - 1] {
+        return 80 * 100; // ~80°C
+    }
+    // Find segment where lut[i] >= code > lut[i+1]
+    let mut i = 0usize;
+    while i + 1 < LUT_LEN {
+        if lut[i] >= code && code > lut[i + 1] {
+            break;
+        }
+        i += 1;
+    }
+    let code_hi = lut[i] as i32;
+    let code_lo = lut[i + 1] as i32;
+    let seg = (code_hi - code_lo).max(1);
+    let num = (code_hi - code as i32).clamp(0, seg);
+    // Linear interpolate within the 10°C segment
+    let t_c_times100 = (i as i32 * LUT_T_STEP_C as i32 * 100)
+        + (num * (LUT_T_STEP_C as i32 * 100) + (seg / 2)) / seg;
+    t_c_times100 as i16
+}
+
 // Local alias for the concrete I2C device type used by this task.
 type I2cDev = I2cDevice<
     'static,
@@ -794,6 +831,26 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                         let adin_mv = measurements.adin_mv;
                         // code ≈ V/2mV - 1, clamp at 0
                         let adin_code: u16 = adin_mv.saturating_div(2).saturating_sub(1);
+                        // Optional runtime diagnostic (1 Hz) — not persisted; inexpensive
+                        static mut TEMP_LOG_TICK: u8 = 0;
+                        unsafe {
+                            TEMP_LOG_TICK = TEMP_LOG_TICK.wrapping_add(1);
+                            if TEMP_LOG_TICK >= 10 {
+                                TEMP_LOG_TICK = 0;
+                                let t001c = approx_temp_centi_c_from_code(
+                                    adin_code,
+                                    charger_active,
+                                );
+                                defmt::info!(
+                                    "adin: {}mV code={} mode={} t≈{}.{:02}C",
+                                    adin_mv,
+                                    adin_code,
+                                    if charger_active { "run3v" } else { "stop5v" },
+                                    (t001c as i32) / 100,
+                                    (t001c as i32).abs() % 100
+                                );
+                            }
+                        }
 
                         if charger_active {
                             // Running at VCC_SC≈3V → hot-stop check
@@ -813,6 +870,11 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                                 drop_streak = 0;
                                 sc_temp_pause_active = true;
                                 hot_hits = 0;
+                                defmt::warn!(
+                                    "temp: HOT-STOP adin={}mV code={} (>=60C)",
+                                    adin_mv,
+                                    adin_code
+                                );
                             }
                         } else {
                             // Stopped at VCC_SC≈5V → cold inhibit and cool-down resume checks
@@ -823,6 +885,11 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                             }
                             if cold_hits >= ADIN_DEBOUNCE_SAMPLES {
                                 sc_temp_pause_active = true; // latch pause while too cold
+                                defmt::warn!(
+                                    "temp: TOO-COLD adin={}mV code>={} (~<=0C)",
+                                    adin_mv,
+                                    ADIN_CODE_COLD_5V
+                                );
                             }
 
                             if adin_code < ADIN_CODE_RESUME_5V.saturating_sub(ADIN_CODE_MARGIN) {
@@ -833,6 +900,11 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                             if cool_hits >= ADIN_DEBOUNCE_SAMPLES {
                                 sc_temp_pause_active = false; // release by cooling below ~40°C threshold
                                 cool_hits = 0;
+                                defmt::info!(
+                                    "temp: RESUME adin={}mV code<{} (~<=40C)",
+                                    adin_mv,
+                                    ADIN_CODE_RESUME_5V
+                                );
                             }
                         }
 
