@@ -35,66 +35,17 @@ const ENABLE_SC8815_DIAG: bool = false;
 const ENABLE_SC8815_SNAP: bool = false; // one-line snapshot each second
 
 // SC8815 ADIN temperature policy constants (see SOFTWARE_DESIGN.md §11)
-// 采用 5V 映射：板上功率级开启时 VCC_SC≈5V，50°C 对应 code≈220
-const ADIN_CODE_HOT_STOP_5V: u16 = 220; // ≈50°C @ VCC_SC≈5.0V
-const ADIN_CODE_RESUME_5V: u16 = 297; // ≈40°C @ VCC_SC≈5.0V
-const ADIN_CODE_COLD_5V: u16 = 990; // ≈0°C  @ VCC_SC≈5.0V
-const ADIN_CODE_MARGIN: u16 = 2; //  ±2 codes tolerance（边界更敏感）
-const ADIN_DEBOUNCE_SAMPLES: u8 = 2; // require N consecutive samples（测试期降低）
+// Run-mode (power stage enabled): board uses VCC_SC≈5V → 50°C code≈220
+const ADIN_CODE_HOT_STOP_5V: u16 = 220; // 50°C @5V
+// Stop-mode (power stage stopped): per requirement use 3V mapping
+const ADIN_CODE_RESUME_3V: u16 = 178; // 40°C @3V
+const ADIN_CODE_COLD_3V: u16 = 593;   // 0°C  @3V
+// Tuning knobs (kept conservative after verification)
+const ADIN_CODE_MARGIN: u16 = 2; // ±2 codes tolerance
+const ADIN_DEBOUNCE_SAMPLES: u8 = 2; // consecutive samples
+const ENABLE_ADIN_SNAP: bool = false; // disable per-sample log to save flash
 
-// Lightweight temperature approximation using small piecewise-linear LUTs (no libm)
-// Covers 0..80°C in 10°C steps. Code decreases monotonically with temperature.
-const LUT_T_STEP_C: i16 = 10;
-const LUT_LEN: usize = 9;
-// 3.0V & 5.0V code tables (still kept for reference)
-const LUT_CODE_3V: [u16; LUT_LEN] = [593, 446, 329, 242, 178, 131, 98, 74, 56];
-const LUT_CODE_5V: [u16; LUT_LEN] = [990, 743, 549, 403, 297, 220, 164, 124, 95];
-
-#[inline]
-fn approx_temp_centi_c_from_code(code: u16, run_mode_3v: bool) -> i16 {
-    let lut = if run_mode_3v { &LUT_CODE_3V } else { &LUT_CODE_5V };
-    // Saturate outside table
-    if code >= lut[0] {
-        return 0; // ~0°C
-    }
-    if code <= lut[LUT_LEN - 1] {
-        return 80 * 100; // ~80°C
-    }
-    // Find segment where lut[i] >= code > lut[i+1]
-    let mut i = 0usize;
-    while i + 1 < LUT_LEN {
-        if lut[i] >= code && code > lut[i + 1] {
-            break;
-        }
-        i += 1;
-    }
-    let code_hi = lut[i] as i32;
-    let code_lo = lut[i + 1] as i32;
-    let seg = (code_hi - code_lo).max(1);
-    let num = (code_hi - code as i32).clamp(0, seg);
-    // Linear interpolate within the 10°C segment
-    let t_c_times100 = (i as i32 * LUT_T_STEP_C as i32 * 100)
-        + (num * (LUT_T_STEP_C as i32 * 100) + (seg / 2)) / seg;
-    t_c_times100 as i16
-}
-
-#[inline]
-fn code_from_temp_centi_c(t001c: i32, use_3v: bool) -> u16 {
-    let lut = if use_3v { &LUT_CODE_3V } else { &LUT_CODE_5V };
-    let t = t001c.clamp(0, 80_00); // 0..8000 (0.01C)
-    // segment index per 10C
-    let seg = (t / 1000) as usize;
-    if seg >= LUT_LEN - 1 {
-        return lut[LUT_LEN - 1];
-    }
-    let frac001c = t - (seg as i32) * 1000; // 0..999
-    let c_hi = lut[seg] as i32;
-    let c_lo = lut[seg + 1] as i32;
-    let delta = c_hi - c_lo; // positive
-    // linear interpolate within 10C segment
-    let code = c_hi - (delta * frac001c + 500) / 1000;
-    code as u16
-}
+// (Note) Removed LUT helpers to minimize footprint; thresholds use precomputed codes.
 
 // Local alias for the concrete I2C device type used by this task.
 type I2cDev = I2cDevice<
@@ -861,7 +812,10 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                         let adin_code: u16 = adin_mv.saturating_div(2).saturating_sub(1);
                         // 档位选择：功率级运行→3V，停机→5V（按 PSTOP 语义）。
                         // Optional runtime diagnostic (1 Hz)
-                        defmt::info!("adin:{}mV code={}", adin_mv, adin_code);
+                        // ultra-short diagnostic to keep flash within limits
+                        if ENABLE_ADIN_SNAP {
+                            defmt::info!("a:{} c={}", adin_mv, adin_code);
+                        }
 
                         if charger_active {
                             // Running：按板上实际→ VCC_SC≈5V，采用 5V 映射阈值
@@ -884,13 +838,14 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                                 sc_temp_pause_active = true;
                                 hot_hits = 0;
                                 if !sc_temp_pause_prev {
-                                    defmt::warn!("temp:HOT adin={}mV code={}", adin_mv, adin_code);
+                                    defmt::warn!("HOT a={} c={}", adin_mv, adin_code);
                                 }
                             }
                         } else {
-                            // Stopped at VCC_SC≈5V → cold inhibit and cool-down resume checks
-                            sc_overtemp_adin = false; // 仅运行态考虑过温提示
-                            if adin_code + 0 >= ADIN_CODE_COLD_5V.saturating_sub(ADIN_CODE_MARGIN) {
+                            // Stopped → per requirement use 3V mapping for resume/cold checks
+                            sc_overtemp_adin = false; // 指示仅在运行态考虑
+                            // Too-cold inhibit (≤0°C): 3V code≥593
+                            if adin_code >= ADIN_CODE_COLD_3V.saturating_sub(ADIN_CODE_MARGIN) {
                                 cold_hits = cold_hits.saturating_add(1);
                             } else {
                                 cold_hits = 0;
@@ -898,12 +853,12 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                             if cold_hits >= ADIN_DEBOUNCE_SAMPLES {
                                 sc_temp_pause_active = true; // latch pause while too cold
                                 if !sc_temp_pause_prev {
-                                    defmt::warn!("temp:COLD adin={}mV code>={}", adin_mv, ADIN_CODE_COLD_5V);
+                                    defmt::warn!("COLD a={} c>={}", adin_mv, ADIN_CODE_COLD_3V);
                                 }
                             }
 
-                            // Cool-down resume (<=40C) at VCC_SC≈5V: code increases when cooling
-                            if adin_code + ADIN_CODE_MARGIN >= ADIN_CODE_RESUME_5V {
+                            // Cool-down resume (≤40°C): 3V code≥178; code increases when cooling
+                            if adin_code >= ADIN_CODE_RESUME_3V.saturating_sub(ADIN_CODE_MARGIN) {
                                 cool_hits = cool_hits.saturating_add(1);
                             } else {
                                 cool_hits = 0;
@@ -913,11 +868,7 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                                 sc_temp_pause_active = false; // release by cooling to ≤40°C threshold
                                 cool_hits = 0;
                                 if was_active || sc_temp_pause_prev {
-                                    defmt::info!(
-                                        "temp:RESUME adin={}mV code>={}",
-                                        adin_mv,
-                                        ADIN_CODE_RESUME_5V
-                                    );
+                                    defmt::info!("RESUME a={} c>={}", adin_mv, ADIN_CODE_RESUME_3V);
                                 }
                             }
                         }
