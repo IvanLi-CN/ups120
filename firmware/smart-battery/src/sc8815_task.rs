@@ -39,8 +39,8 @@ const ENABLE_SC8815_SNAP: bool = false; // one-line snapshot each second
 const ADIN_CODE_HOT_STOP_5V: u16 = 220; // ≈50°C @ VCC_SC≈5.0V
 const ADIN_CODE_RESUME_5V: u16 = 297; // ≈40°C @ VCC_SC≈5.0V
 const ADIN_CODE_COLD_5V: u16 = 990; // ≈0°C  @ VCC_SC≈5.0V
-const ADIN_CODE_MARGIN: u16 = 5; //  ±5 codes tolerance
-const ADIN_DEBOUNCE_SAMPLES: u8 = 3; // require N consecutive samples
+const ADIN_CODE_MARGIN: u16 = 2; //  ±2 codes tolerance（边界更敏感）
+const ADIN_DEBOUNCE_SAMPLES: u8 = 2; // require N consecutive samples（测试期降低）
 
 // Lightweight temperature approximation using small piecewise-linear LUTs (no libm)
 // Covers 0..80°C in 10°C steps. Code decreases monotonically with temperature.
@@ -359,6 +359,7 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
     // 来自 SC8815 ADIN 的温度暂停（本任务计算）
     let mut sc_temp_pause_active: bool = false;
     let mut sc_temp_pause_prev: bool = false; // for edge logs
+    let mut sc_overtemp_adin: bool = false; // indication-only flag
     // ADIN VCC selection (3V vs 5V) — follow power stage state per datasheet:
     // PSTOP low (power allowed, charger_active=true) → VCC_SC≈3V; otherwise ≈5V.
     // 去抖计数器
@@ -859,18 +860,19 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                         // code ≈ V/2mV - 1, clamp at 0
                         let adin_code: u16 = adin_mv.saturating_div(2).saturating_sub(1);
                         // 档位选择：功率级运行→3V，停机→5V（按 PSTOP 语义）。
-                        // Optional runtime diagnostic (1 Hz) — not persisted; inexpensive
+                        // Optional runtime diagnostic (1 Hz)
                         defmt::info!("adin:{}mV code={}", adin_mv, adin_code);
 
                         if charger_active {
                             // Running：按板上实际→ VCC_SC≈5V，采用 5V 映射阈值
                             let hot_code = ADIN_CODE_HOT_STOP_5V;
-                            if adin_code + ADIN_CODE_MARGIN <= hot_code {
+                            if adin_code <= hot_code.saturating_add(ADIN_CODE_MARGIN) {
                                 hot_hits = hot_hits.saturating_add(1);
                             } else {
                                 hot_hits = 0;
                             }
-                            if hot_hits >= ADIN_DEBOUNCE_SAMPLES {
+                            sc_overtemp_adin = hot_hits >= ADIN_DEBOUNCE_SAMPLES;
+                            if sc_overtemp_adin {
                                 // Enter temperature pause: stop power stage immediately
                                 if let Some(s) = sc8815_session.as_mut() {
                                     s.disable_power_stage();
@@ -887,6 +889,7 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                             }
                         } else {
                             // Stopped at VCC_SC≈5V → cold inhibit and cool-down resume checks
+                            sc_overtemp_adin = false; // 仅运行态考虑过温提示
                             if adin_code + 0 >= ADIN_CODE_COLD_5V.saturating_sub(ADIN_CODE_MARGIN) {
                                 cold_hits = cold_hits.saturating_add(1);
                             } else {
@@ -1035,6 +1038,7 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                         || (oc_pause_secs > 0),
                     imbalance_pause_active,
                     temp_pause_adin: sc_temp_pause_active,
+                    overtemp_adin: sc_overtemp_adin,
                 };
                 sc8815_alerts_publisher.publish_immediate(alerts_payload);
             }
@@ -1047,6 +1051,7 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                 ov_pause_active: (ov_pause_secs > 0) || (uv_pause_secs > 0) || (oc_pause_secs > 0),
                 imbalance_pause_active,
                 temp_pause_adin: sc_temp_pause_active,
+                overtemp_adin: sc_overtemp_adin,
             };
             sc8815_alerts_publisher.publish_immediate(alerts_payload);
         }
