@@ -35,9 +35,8 @@ const ENABLE_SC8815_DIAG: bool = false;
 const ENABLE_SC8815_SNAP: bool = false; // one-line snapshot each second
 
 // SC8815 ADIN temperature policy constants (see SOFTWARE_DESIGN.md §11)
-// Use 3V thresholds在功率级运行时，5V 阈值用于停机态逻辑。
-const ADIN_CODE_HOT_STOP_3V: u16 = 131; // ≈50°C @ VCC_SC≈3.0V
-const ADIN_CODE_HOT_STOP_5V: u16 = 220; // (备用) ≈50°C @ VCC_SC≈5.0V
+// 采用 5V 映射：板上功率级开启时 VCC_SC≈5V，50°C 对应 code≈220
+const ADIN_CODE_HOT_STOP_5V: u16 = 220; // ≈50°C @ VCC_SC≈5.0V
 const ADIN_CODE_RESUME_5V: u16 = 297; // ≈40°C @ VCC_SC≈5.0V
 const ADIN_CODE_COLD_5V: u16 = 990; // ≈0°C  @ VCC_SC≈5.0V
 const ADIN_CODE_MARGIN: u16 = 5; //  ±5 codes tolerance
@@ -864,8 +863,8 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                         defmt::info!("adin:{}mV code={}", adin_mv, adin_code);
 
                         if charger_active {
-                            // Running：3V 阈值（按数据手册功率级启用时 VCC_SC≈3V）
-                            let hot_code = ADIN_CODE_HOT_STOP_3V;
+                            // Running：按板上实际→ VCC_SC≈5V，采用 5V 映射阈值
+                            let hot_code = ADIN_CODE_HOT_STOP_5V;
                             if adin_code + ADIN_CODE_MARGIN <= hot_code {
                                 hot_hits = hot_hits.saturating_add(1);
                             } else {
