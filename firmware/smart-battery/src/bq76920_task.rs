@@ -42,7 +42,7 @@ const TEST_FORCE_BQ_FETS_OFF: bool = false;
 const BALANCE_SWITCH_DEADTIME_MS: u64 = 40;
 // Temperature protection thresholds (0.01°C units)
 // NOTE: Temporarily disable BQ-driven temp pause for SC testing
-const DISABLE_BQ_TEMP_PAUSE: bool = true; // set false to re-enable
+const DISABLE_BQ_TEMP_PAUSE: bool = false; // re-enabled per request
 const TEMP_PAUSE_HIGH_001C: i32 = 50_00; // > +50.00°C → request SC pause (no CHG action)
 const TEMP_PAUSE_LOW_001C: i32 = 0; // <  +0.00°C → request SC pause (no CHG action)
 const TEMP_CHG_GATE_HIGH_001C: i32 = 60_00; // > +60.00°C → gate CHG (with 5°C hysteresis)
