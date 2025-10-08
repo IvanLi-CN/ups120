@@ -948,6 +948,7 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                         || (uv_pause_secs > 0)
                         || (oc_pause_secs > 0),
                     imbalance_pause_active,
+                    temp_pause_adin: sc_temp_pause_active,
                 };
                 sc8815_alerts_publisher.publish_immediate(alerts_payload);
             }
@@ -959,6 +960,7 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                 charging_confirmed: charge_confirmed,
                 ov_pause_active: (ov_pause_secs > 0) || (uv_pause_secs > 0) || (oc_pause_secs > 0),
                 imbalance_pause_active,
+                temp_pause_adin: sc_temp_pause_active,
             };
             sc8815_alerts_publisher.publish_immediate(alerts_payload);
         }

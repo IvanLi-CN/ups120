@@ -88,6 +88,7 @@ pub async fn leds_task(
     let mut sc_confirmed = false;
     let mut sc_pause_ov = false;
     let mut sc_pause_imb = false;
+    let mut sc_pause_temp = false;
     let mut bq_fault = false;
     let mut overlay_balancing = false;
     let mut temp_pause_active = false; // from BQ (BalancingCvRequest)
@@ -110,6 +111,7 @@ pub async fn leds_task(
             sc_confirmed = a.charging_confirmed;
             sc_pause_ov = a.ov_pause_active;
             sc_pause_imb = a.imbalance_pause_active;
+            sc_pause_temp = a.temp_pause_adin;
         }
         let mut red_pulse_severity: u8 = 0; // 4>3>2>1
         if let Some(ba) = bq_alerts_sub.try_next_message_pure() {
@@ -203,7 +205,7 @@ pub async fn leds_task(
         if sc_vbus_short {
             yellow.pulses = yellow.pulses.max(2);
         }
-        if sc_otp {
+        if sc_otp || sc_pause_temp {
             yellow.pulses = yellow.pulses.max(4);
         }
 
@@ -224,7 +226,7 @@ pub async fn leds_task(
             6
         } else if (state_flags & sbits::BALANCING) != 0 || overlay_balancing {
             4
-        } else if sc_pause_ov || sc_pause_imb || (state_flags & sbits::CHG_PAUSED) != 0 {
+        } else if sc_pause_ov || sc_pause_imb || sc_pause_temp || (state_flags & sbits::CHG_PAUSED) != 0 {
             3
         } else if (state_flags & sbits::FULL) != 0 {
             5
