@@ -340,6 +340,7 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
     let mut temp_pause_cmd: bool = false;
     // 来自 SC8815 ADIN 的温度暂停（本任务计算）
     let mut sc_temp_pause_active: bool = false;
+    let mut sc_temp_pause_prev: bool = false; // for edge logs
     // 去抖计数器
     let mut hot_hits: u8 = 0;
     let mut cool_hits: u8 = 0;
@@ -620,12 +621,12 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                     }
 
                     // Now that the chip is configured and ADC running, (conditionally) enable power stage
-                    if ov_pause_secs == 0
-                        && uv_pause_secs == 0
-                        && oc_pause_secs == 0
-                        && !imbalance_pause_active
-                        && !temp_pause_cmd
-                        && !sc_temp_pause_active
+                        if ov_pause_secs == 0
+                            && uv_pause_secs == 0
+                            && oc_pause_secs == 0
+                            && !imbalance_pause_active
+                            && !temp_pause_cmd
+                            && !sc_temp_pause_active
                     {
                         if let Some(sess) = sc8815_session.as_mut() {
                             sess.enable_power_stage();
@@ -643,16 +644,22 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                         // log pause gating only when state (OV/IMB pair) changes
                         let pause_sig = (
                             (ov_pause_secs > 0 || uv_pause_secs > 0 || oc_pause_secs > 0),
-                            imbalance_pause_active,
+                            imbalance_pause_active || temp_pause_cmd || sc_temp_pause_active,
                         );
                         if last_pause_report != Some(pause_sig) {
-                            let mut b: u8 = 0; // bit0=LH, bit1=OV, bit2=IMB
+                            let mut b: u8 = 0; // bit0=LH, bit1=OV/UV/OC, bit2=IMB, bit3=BQtemp, bit4=ADINtemp
                             b |= 1 << 0; // LH
                             if ov_pause_secs > 0 || uv_pause_secs > 0 || oc_pause_secs > 0 {
                                 b |= 1 << 1;
                             }
                             if imbalance_pause_active {
                                 b |= 1 << 2;
+                            }
+                            if temp_pause_cmd {
+                                b |= 1 << 3;
+                            }
+                            if sc_temp_pause_active {
+                                b |= 1 << 4;
                             }
                             let _ = b; // shrink log
                             last_pause_report = Some(pause_sig);
@@ -842,12 +849,10 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                                     charger_active,
                                 );
                                 defmt::info!(
-                                    "adin: {}mV code={} mode={} t≈{}.{:02}C",
+                                    "adin:{}mV code={} t001c={}",
                                     adin_mv,
                                     adin_code,
-                                    if charger_active { "run3v" } else { "stop5v" },
-                                    (t001c as i32) / 100,
-                                    (t001c as i32).abs() % 100
+                                    t001c
                                 );
                             }
                         }
@@ -870,11 +875,9 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                                 drop_streak = 0;
                                 sc_temp_pause_active = true;
                                 hot_hits = 0;
-                                defmt::warn!(
-                                    "temp: HOT-STOP adin={}mV code={} (>=60C)",
-                                    adin_mv,
-                                    adin_code
-                                );
+                                if !sc_temp_pause_prev {
+                                    defmt::warn!("temp:HOT adin={}mV code={}", adin_mv, adin_code);
+                                }
                             }
                         } else {
                             // Stopped at VCC_SC≈5V → cold inhibit and cool-down resume checks
@@ -885,28 +888,33 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                             }
                             if cold_hits >= ADIN_DEBOUNCE_SAMPLES {
                                 sc_temp_pause_active = true; // latch pause while too cold
-                                defmt::warn!(
-                                    "temp: TOO-COLD adin={}mV code>={} (~<=0C)",
-                                    adin_mv,
-                                    ADIN_CODE_COLD_5V
-                                );
+                                if !sc_temp_pause_prev {
+                                    defmt::warn!("temp:COLD adin={}mV code>={}", adin_mv, ADIN_CODE_COLD_5V);
+                                }
                             }
 
-                            if adin_code < ADIN_CODE_RESUME_5V.saturating_sub(ADIN_CODE_MARGIN) {
+                            // Cool-down resume (<=40C) at VCC_SC≈5V: code increases when cooling
+                            if adin_code + ADIN_CODE_MARGIN >= ADIN_CODE_RESUME_5V {
                                 cool_hits = cool_hits.saturating_add(1);
                             } else {
                                 cool_hits = 0;
                             }
                             if cool_hits >= ADIN_DEBOUNCE_SAMPLES {
-                                sc_temp_pause_active = false; // release by cooling below ~40°C threshold
+                                let was_active = sc_temp_pause_active;
+                                sc_temp_pause_active = false; // release by cooling to ≤40°C threshold
                                 cool_hits = 0;
-                                defmt::info!(
-                                    "temp: RESUME adin={}mV code<{} (~<=40C)",
-                                    adin_mv,
-                                    ADIN_CODE_RESUME_5V
-                                );
+                                if was_active || sc_temp_pause_prev {
+                                    defmt::info!(
+                                        "temp:RESUME adin={}mV code>={}",
+                                        adin_mv,
+                                        ADIN_CODE_RESUME_5V
+                                    );
+                                }
                             }
                         }
+
+                        // Track edge
+                        sc_temp_pause_prev = sc_temp_pause_active;
 
                         let last_vbat_mv = measurements.vbat_mv as i32;
                         if _adapter_present {
