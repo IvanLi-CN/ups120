@@ -34,6 +34,13 @@ const FULL_EXIT_SECS: u32 = 10;
 const ENABLE_SC8815_DIAG: bool = false;
 const ENABLE_SC8815_SNAP: bool = false; // one-line snapshot each second
 
+// SC8815 ADIN temperature policy constants (see SOFTWARE_DESIGN.md §11)
+const ADIN_CODE_HOT_STOP_3V: u16 = 100; // ≈60°C @ VCC_SC≈3.0V
+const ADIN_CODE_RESUME_5V: u16 = 297; // ≈40°C @ VCC_SC≈5.0V
+const ADIN_CODE_COLD_5V: u16 = 990; // ≈0°C  @ VCC_SC≈5.0V
+const ADIN_CODE_MARGIN: u16 = 5; //  ±5 codes tolerance
+const ADIN_DEBOUNCE_SAMPLES: u8 = 3; // require N consecutive samples
+
 // Local alias for the concrete I2C device type used by this task.
 type I2cDev = I2cDevice<
     'static,
@@ -294,6 +301,12 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
     let mut imbalance_pause_active: bool = false;
     // 来自 BQ 的温度暂停请求（通过 BalancingCvRequest 下发）
     let mut temp_pause_cmd: bool = false;
+    // 来自 SC8815 ADIN 的温度暂停（本任务计算）
+    let mut sc_temp_pause_active: bool = false;
+    // 去抖计数器
+    let mut hot_hits: u8 = 0;
+    let mut cool_hits: u8 = 0;
+    let mut cold_hits: u8 = 0;
     // 100ms tick accumulator → drive *_pause_secs at 1 Hz
     let mut tick_100ms: u8 = 0;
     let mut sc_comm_fail_streak: u8 = 0;
@@ -378,7 +391,8 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                 charger_active,
                 charge_confirmed,
                 pause_active: (ov_pause_secs > 0 || uv_pause_secs > 0 || oc_pause_secs > 0)
-                    || temp_pause_cmd,
+                    || temp_pause_cmd
+                    || sc_temp_pause_active,
                 imbalance_pause_active,
                 full_latched,
                 sc_fault: sc_fault_flag,
@@ -534,7 +548,8 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                 let pol_start_cond = pack_voltage_mv < PACK_CHARGE_START_THRESHOLD_MV
                     && !charger_active
                     && adapter_holdoff_secs == 0
-                    && !temp_pause_cmd;
+                    && !temp_pause_cmd
+                    && !sc_temp_pause_active;
                 if pol_start_cond {
                     // (edge latch removed)
                     if sc8815_session.is_none() {
@@ -573,6 +588,7 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                         && oc_pause_secs == 0
                         && !imbalance_pause_active
                         && !temp_pause_cmd
+                        && !sc_temp_pause_active
                     {
                         if let Some(sess) = sc8815_session.as_mut() {
                             sess.enable_power_stage();
@@ -774,6 +790,52 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                         sc_comm_fail_streak = 0;
                         // ok
 
+                        // --- Temperature policy via ADIN ---
+                        let adin_mv = measurements.adin_mv;
+                        // code ≈ V/2mV - 1, clamp at 0
+                        let adin_code: u16 = adin_mv.saturating_div(2).saturating_sub(1);
+
+                        if charger_active {
+                            // Running at VCC_SC≈3V → hot-stop check
+                            if adin_code + ADIN_CODE_MARGIN <= ADIN_CODE_HOT_STOP_3V {
+                                hot_hits = hot_hits.saturating_add(1);
+                            } else {
+                                hot_hits = 0;
+                            }
+                            if hot_hits >= ADIN_DEBOUNCE_SAMPLES {
+                                // Enter temperature pause: stop power stage immediately
+                                if let Some(s) = sc8815_session.as_mut() {
+                                    s.disable_power_stage();
+                                }
+                                charger_active = false;
+                                charge_confirmed = false;
+                                confirm_streak = 0;
+                                drop_streak = 0;
+                                sc_temp_pause_active = true;
+                                hot_hits = 0;
+                            }
+                        } else {
+                            // Stopped at VCC_SC≈5V → cold inhibit and cool-down resume checks
+                            if adin_code + 0 >= ADIN_CODE_COLD_5V.saturating_sub(ADIN_CODE_MARGIN) {
+                                cold_hits = cold_hits.saturating_add(1);
+                            } else {
+                                cold_hits = 0;
+                            }
+                            if cold_hits >= ADIN_DEBOUNCE_SAMPLES {
+                                sc_temp_pause_active = true; // latch pause while too cold
+                            }
+
+                            if adin_code < ADIN_CODE_RESUME_5V.saturating_sub(ADIN_CODE_MARGIN) {
+                                cool_hits = cool_hits.saturating_add(1);
+                            } else {
+                                cool_hits = 0;
+                            }
+                            if cool_hits >= ADIN_DEBOUNCE_SAMPLES {
+                                sc_temp_pause_active = false; // release by cooling below ~40°C threshold
+                                cool_hits = 0;
+                            }
+                        }
+
                         let last_vbat_mv = measurements.vbat_mv as i32;
                         if _adapter_present {
                             if last_status_eoc {
@@ -918,8 +980,11 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                 oc_pause_secs = oc_pause_secs.saturating_sub(1);
             }
         }
-        let pause_active =
-            (ov_pause_secs > 0) || (uv_pause_secs > 0) || (oc_pause_secs > 0) || temp_pause_cmd;
+        let pause_active = (ov_pause_secs > 0)
+            || (uv_pause_secs > 0)
+            || (oc_pause_secs > 0)
+            || temp_pause_cmd
+            || sc_temp_pause_active;
         let sc_active_flag = _adapter_present && (charger_active || charge_confirmed);
         refresh_state_flags(StateFlagsCtx {
             ac_present: _adapter_present,
