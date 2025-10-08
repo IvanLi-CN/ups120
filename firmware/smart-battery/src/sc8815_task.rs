@@ -35,7 +35,7 @@ const ENABLE_SC8815_DIAG: bool = false;
 const ENABLE_SC8815_SNAP: bool = false; // one-line snapshot each second
 
 // SC8815 ADIN temperature policy constants (see SOFTWARE_DESIGN.md §11)
-const ADIN_CODE_HOT_STOP_3V: u16 = 100; // ≈60°C @ VCC_SC≈3.0V
+const ADIN_CODE_HOT_STOP_3V: u16 = 131; // ≈50°C @ VCC_SC≈3.0V (test)
 const ADIN_CODE_RESUME_5V: u16 = 297; // ≈40°C @ VCC_SC≈5.0V
 const ADIN_CODE_COLD_5V: u16 = 990; // ≈0°C  @ VCC_SC≈5.0V
 const ADIN_CODE_MARGIN: u16 = 5; //  ±5 codes tolerance

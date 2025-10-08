@@ -41,6 +41,8 @@ const TEST_FORCE_BQ_FETS_OFF: bool = false;
 // Interlock deadtime when switching balancing target cells (safety)
 const BALANCE_SWITCH_DEADTIME_MS: u64 = 40;
 // Temperature protection thresholds (0.01°C units)
+// NOTE: Temporarily disable BQ-driven temp pause for SC testing
+const DISABLE_BQ_TEMP_PAUSE: bool = true; // set false to re-enable
 const TEMP_PAUSE_HIGH_001C: i32 = 50_00; // > +50.00°C → request SC pause (no CHG action)
 const TEMP_PAUSE_LOW_001C: i32 = 0; // <  +0.00°C → request SC pause (no CHG action)
 const TEMP_CHG_GATE_HIGH_001C: i32 = 60_00; // > +60.00°C → gate CHG (with 5°C hysteresis)
@@ -720,12 +722,20 @@ pub async fn bq76920_task(args: Bq76920TaskArgs) {
                     fault_bq_flag = false;
                 }
 
-                // Request SC pause (no direct CHG FET action here)
-                if pause_needed && !temp_pause_active {
-                    defmt::warn!("sc:req temp_pause t001c={}", used_i32);
-                    temp_pause_active = true;
-                } else if !pause_needed && temp_pause_active {
-                    defmt::info!("sc:req temp_pause clr t001c={}", used_i32);
+                // Request SC pause (disabled when DISABLE_BQ_TEMP_PAUSE)
+                if !DISABLE_BQ_TEMP_PAUSE {
+                    if pause_needed && !temp_pause_active {
+                        defmt::warn!("sc:req temp_pause t001c={}", used_i32);
+                        temp_pause_active = true;
+                    } else if !pause_needed && temp_pause_active {
+                        defmt::info!("sc:req temp_pause clr t001c={}", used_i32);
+                        temp_pause_active = false;
+                    }
+                } else {
+                    // keep temp_pause_active=false during SC-only testing
+                    if temp_pause_active {
+                        defmt::info!("sc:req temp_pause DISABLED");
+                    }
                     temp_pause_active = false;
                 }
 
