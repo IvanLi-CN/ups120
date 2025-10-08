@@ -79,6 +79,24 @@ fn approx_temp_centi_c_from_code(code: u16, run_mode_3v: bool) -> i16 {
     t_c_times100 as i16
 }
 
+#[inline]
+fn code_from_temp_centi_c(t001c: i32, use_3v: bool) -> u16 {
+    let lut = if use_3v { &LUT_CODE_3V } else { &LUT_CODE_5V };
+    let t = t001c.clamp(0, 80_00); // 0..8000 (0.01C)
+    // segment index per 10C
+    let seg = (t / 1000) as usize;
+    if seg >= LUT_LEN - 1 {
+        return lut[LUT_LEN - 1];
+    }
+    let frac001c = t - (seg as i32) * 1000; // 0..999
+    let c_hi = lut[seg] as i32;
+    let c_lo = lut[seg + 1] as i32;
+    let delta = c_hi - c_lo; // positive
+    // linear interpolate within 10C segment
+    let code = c_hi - (delta * frac001c + 500) / 1000;
+    code as u16
+}
+
 // Local alias for the concrete I2C device type used by this task.
 type I2cDev = I2cDevice<
     'static,
@@ -342,6 +360,9 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
     // 来自 SC8815 ADIN 的温度暂停（本任务计算）
     let mut sc_temp_pause_active: bool = false;
     let mut sc_temp_pause_prev: bool = false; // for edge logs
+    // ADIN VCC selection (3V vs 5V) — dynamically inferred from BQ temp and ADIN code
+    let mut adin_use_5v: bool = true; // default to 5V until proven otherwise
+    let mut adin_sel_hits: u8 = 0; // debounce selection
     // 去抖计数器
     let mut hot_hits: u8 = 0;
     let mut cool_hits: u8 = 0;
@@ -839,26 +860,38 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                         let adin_mv = measurements.adin_mv;
                         // code ≈ V/2mV - 1, clamp at 0
                         let adin_code: u16 = adin_mv.saturating_div(2).saturating_sub(1);
-                        // Optional runtime diagnostic (1 Hz) — not persisted; inexpensive
-                        static mut TEMP_LOG_TICK: u8 = 0;
-                        unsafe {
-                            TEMP_LOG_TICK = TEMP_LOG_TICK.wrapping_add(1);
-                            if TEMP_LOG_TICK >= 10 {
-                                TEMP_LOG_TICK = 0;
-                                // Use 5V LUT for logging (board shows VCC_SC≈5V)
-                                let t001c = approx_temp_centi_c_from_code(adin_code, false);
-                                defmt::info!(
-                                    "adin:{}mV code={} t001c={}",
-                                    adin_mv,
-                                    adin_code,
-                                    t001c
-                                );
+                        // ADIN VCC selection using BQ temperature (if available)
+                        if let Some(bq_meas) = latest_bq_measurements.as_ref() {
+                            // use EMA temp (0.01C) when available; fall back to TS1
+                            let t001c = bq_meas.core_measurements.temperatures.ts1;
+                            let est3 = code_from_temp_centi_c(t001c as i32, true);
+                            let est5 = code_from_temp_centi_c(t001c as i32, false);
+                            let d3 = (est3 as i32 - adin_code as i32).abs();
+                            let d5 = (est5 as i32 - adin_code as i32).abs();
+                            let pick_5v = d5 + 8 < d3; // 8-code bias to avoid chatter
+                            if pick_5v != adin_use_5v {
+                                adin_sel_hits = adin_sel_hits.saturating_add(1);
+                                if adin_sel_hits >= 3 { // 3 consecutive samples to switch
+                                    adin_use_5v = pick_5v;
+                                    adin_sel_hits = 0;
+                                    defmt::info!("adin:sel{} m={} e3={} e5={} t={}", if adin_use_5v {5}else{3}, adin_code, est3, est5, t001c);
+                                }
+                            } else {
+                                adin_sel_hits = 0;
                             }
                         }
+                        // Optional runtime diagnostic (1 Hz) — not persisted; inexpensive
+                        defmt::info!("adin:{}mV code={}", adin_mv, adin_code);
 
                         if charger_active {
-                            // Running: use 5V mapping for hot-stop on this board
-                            if adin_code + ADIN_CODE_MARGIN <= ADIN_CODE_HOT_STOP_5V {
+                            // Running: choose threshold by selected VCC
+                            let hot_code = if adin_use_5v {
+                                ADIN_CODE_HOT_STOP_5V
+                            } else {
+                                // 50C @ 3V for completeness
+                                131
+                            };
+                            if adin_code + ADIN_CODE_MARGIN <= hot_code {
                                 hot_hits = hot_hits.saturating_add(1);
                             } else {
                                 hot_hits = 0;
