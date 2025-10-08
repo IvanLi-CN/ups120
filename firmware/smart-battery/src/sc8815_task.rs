@@ -35,9 +35,9 @@ const ENABLE_SC8815_DIAG: bool = false;
 const ENABLE_SC8815_SNAP: bool = false; // one-line snapshot each second
 
 // SC8815 ADIN temperature policy constants (see SOFTWARE_DESIGN.md §11)
-// Observed board behavior shows VCC_SC≈5V in both run/stop states.
-// Use 5V mapping for thresholds/logging.
-const ADIN_CODE_HOT_STOP_5V: u16 = 220; // ≈50°C @ VCC_SC≈5.0V (test)
+// Use 3V thresholds在功率级运行时，5V 阈值用于停机态逻辑。
+const ADIN_CODE_HOT_STOP_3V: u16 = 131; // ≈50°C @ VCC_SC≈3.0V
+const ADIN_CODE_HOT_STOP_5V: u16 = 220; // (备用) ≈50°C @ VCC_SC≈5.0V
 const ADIN_CODE_RESUME_5V: u16 = 297; // ≈40°C @ VCC_SC≈5.0V
 const ADIN_CODE_COLD_5V: u16 = 990; // ≈0°C  @ VCC_SC≈5.0V
 const ADIN_CODE_MARGIN: u16 = 5; //  ±5 codes tolerance
@@ -360,9 +360,8 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
     // 来自 SC8815 ADIN 的温度暂停（本任务计算）
     let mut sc_temp_pause_active: bool = false;
     let mut sc_temp_pause_prev: bool = false; // for edge logs
-    // ADIN VCC selection (3V vs 5V) — dynamically inferred from BQ temp and ADIN code
-    let mut adin_use_5v: bool = true; // default to 5V until proven otherwise
-    let mut adin_sel_hits: u8 = 0; // debounce selection
+    // ADIN VCC selection (3V vs 5V) — follow power stage state per datasheet:
+    // PSTOP low (power allowed, charger_active=true) → VCC_SC≈3V; otherwise ≈5V.
     // 去抖计数器
     let mut hot_hits: u8 = 0;
     let mut cool_hits: u8 = 0;
@@ -860,37 +859,13 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                         let adin_mv = measurements.adin_mv;
                         // code ≈ V/2mV - 1, clamp at 0
                         let adin_code: u16 = adin_mv.saturating_div(2).saturating_sub(1);
-                        // ADIN VCC selection using BQ temperature (if available)
-                        if let Some(bq_meas) = latest_bq_measurements.as_ref() {
-                            // use EMA temp (0.01C) when available; fall back to TS1
-                            let t001c = bq_meas.core_measurements.temperatures.ts1;
-                            let est3 = code_from_temp_centi_c(t001c as i32, true);
-                            let est5 = code_from_temp_centi_c(t001c as i32, false);
-                            let d3 = (est3 as i32 - adin_code as i32).abs();
-                            let d5 = (est5 as i32 - adin_code as i32).abs();
-                            let pick_5v = d5 + 8 < d3; // 8-code bias to avoid chatter
-                            if pick_5v != adin_use_5v {
-                                adin_sel_hits = adin_sel_hits.saturating_add(1);
-                                if adin_sel_hits >= 3 { // 3 consecutive samples to switch
-                                    adin_use_5v = pick_5v;
-                                    adin_sel_hits = 0;
-                                    defmt::info!("adin:sel{} m={} e3={} e5={} t={}", if adin_use_5v {5}else{3}, adin_code, est3, est5, t001c);
-                                }
-                            } else {
-                                adin_sel_hits = 0;
-                            }
-                        }
+                        // 档位选择：功率级运行→3V，停机→5V（按 PSTOP 语义）。
                         // Optional runtime diagnostic (1 Hz) — not persisted; inexpensive
                         defmt::info!("adin:{}mV code={}", adin_mv, adin_code);
 
                         if charger_active {
-                            // Running: choose threshold by selected VCC
-                            let hot_code = if adin_use_5v {
-                                ADIN_CODE_HOT_STOP_5V
-                            } else {
-                                // 50C @ 3V for completeness
-                                131
-                            };
+                            // Running：3V 阈值（按数据手册功率级启用时 VCC_SC≈3V）
+                            let hot_code = ADIN_CODE_HOT_STOP_3V;
                             if adin_code + ADIN_CODE_MARGIN <= hot_code {
                                 hot_hits = hot_hits.saturating_add(1);
                             } else {
