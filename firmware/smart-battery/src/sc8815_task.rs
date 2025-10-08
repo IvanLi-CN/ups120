@@ -43,6 +43,9 @@ const ADIN_CODE_COLD_3V: u16 = 593;   // 0°C  @3V
 // Tuning knobs (kept conservative after verification)
 const ADIN_CODE_MARGIN: u16 = 2; // ±2 codes tolerance
 const ADIN_DEBOUNCE_SAMPLES: u8 = 2; // consecutive samples
+// After asserting PSTOP (stop power stage), allow VCC_SC to drop to its low rail
+// before evaluating stop-mode (3V) thresholds to avoid immediate RESUME chatter.
+const VCCSC_DROP_MS: u32 = 1000; // settle window; tune with bench if needed
 const ENABLE_ADIN_SNAP: bool = false; // disable per-sample log to save flash
 
 // (Note) Removed LUT helpers to minimize footprint; thresholds use precomputed codes.
@@ -311,6 +314,7 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
     let mut sc_temp_pause_active: bool = false;
     let mut sc_temp_pause_prev: bool = false; // for edge logs
     let mut sc_overtemp_adin: bool = false; // indication-only flag
+    let mut last_temp_stop_ms: u32 = 0; // when HOT asserted
     // ADIN VCC selection (3V vs 5V) — follow power stage state per datasheet:
     // PSTOP low (power allowed, charger_active=true) → VCC_SC≈3V; otherwise ≈5V.
     // 去抖计数器
@@ -836,13 +840,24 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                                 confirm_streak = 0;
                                 drop_streak = 0;
                                 sc_temp_pause_active = true;
+                                last_temp_stop_ms = now_ms;
                                 hot_hits = 0;
                                 if !sc_temp_pause_prev {
                                     defmt::warn!("HOT a={} c={}", adin_mv, adin_code);
                                 }
                             }
                         } else {
-                            // Stopped → per requirement use 3V mapping for resume/cold checks
+                            // Stopped: wait for VCC_SC to drop before 3V-mapped checks
+                            let elapsed_ms = now_ms.saturating_sub(last_temp_stop_ms);
+                            if elapsed_ms < VCCSC_DROP_MS {
+                                // Hold: do not evaluate resume yet; keep paused
+                                cold_hits = 0;
+                                cool_hits = 0;
+                                sc_temp_pause_active = true;
+                                sc_overtemp_adin = false;
+                                // fall through to end of branch
+                            } else {
+                                // Per requirement use 3V mapping for resume/cold
                             sc_overtemp_adin = false; // 指示仅在运行态考虑
                             // Too-cold inhibit (≤0°C): 3V code≥593
                             if adin_code >= ADIN_CODE_COLD_3V.saturating_sub(ADIN_CODE_MARGIN) {
@@ -870,6 +885,7 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                                 if was_active || sc_temp_pause_prev {
                                     defmt::info!("RESUME a={} c>={}", adin_mv, ADIN_CODE_RESUME_3V);
                                 }
+                            }
                             }
                         }
 
