@@ -35,7 +35,9 @@ const ENABLE_SC8815_DIAG: bool = false;
 const ENABLE_SC8815_SNAP: bool = false; // one-line snapshot each second
 
 // SC8815 ADIN temperature policy constants (see SOFTWARE_DESIGN.md §11)
-const ADIN_CODE_HOT_STOP_3V: u16 = 131; // ≈50°C @ VCC_SC≈3.0V (test)
+// Observed board behavior shows VCC_SC≈5V in both run/stop states.
+// Use 5V mapping for thresholds/logging.
+const ADIN_CODE_HOT_STOP_5V: u16 = 220; // ≈50°C @ VCC_SC≈5.0V (test)
 const ADIN_CODE_RESUME_5V: u16 = 297; // ≈40°C @ VCC_SC≈5.0V
 const ADIN_CODE_COLD_5V: u16 = 990; // ≈0°C  @ VCC_SC≈5.0V
 const ADIN_CODE_MARGIN: u16 = 5; //  ±5 codes tolerance
@@ -45,9 +47,8 @@ const ADIN_DEBOUNCE_SAMPLES: u8 = 3; // require N consecutive samples
 // Covers 0..80°C in 10°C steps. Code decreases monotonically with temperature.
 const LUT_T_STEP_C: i16 = 10;
 const LUT_LEN: usize = 9;
-// run-mode (VCC_SC≈3.0V)
+// 3.0V & 5.0V code tables (still kept for reference)
 const LUT_CODE_3V: [u16; LUT_LEN] = [593, 446, 329, 242, 178, 131, 98, 74, 56];
-// stop-mode (VCC_SC≈5.0V)
 const LUT_CODE_5V: [u16; LUT_LEN] = [990, 743, 549, 403, 297, 220, 164, 124, 95];
 
 #[inline]
@@ -844,10 +845,8 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                             TEMP_LOG_TICK = TEMP_LOG_TICK.wrapping_add(1);
                             if TEMP_LOG_TICK >= 10 {
                                 TEMP_LOG_TICK = 0;
-                                let t001c = approx_temp_centi_c_from_code(
-                                    adin_code,
-                                    charger_active,
-                                );
+                                // Use 5V LUT for logging (board shows VCC_SC≈5V)
+                                let t001c = approx_temp_centi_c_from_code(adin_code, false);
                                 defmt::info!(
                                     "adin:{}mV code={} t001c={}",
                                     adin_mv,
@@ -858,8 +857,8 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                         }
 
                         if charger_active {
-                            // Running at VCC_SC≈3V → hot-stop check
-                            if adin_code + ADIN_CODE_MARGIN <= ADIN_CODE_HOT_STOP_3V {
+                            // Running: use 5V mapping for hot-stop on this board
+                            if adin_code + ADIN_CODE_MARGIN <= ADIN_CODE_HOT_STOP_5V {
                                 hot_hits = hot_hits.saturating_add(1);
                             } else {
                                 hot_hits = 0;
