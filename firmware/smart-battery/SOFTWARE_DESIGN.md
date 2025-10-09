@@ -225,21 +225,23 @@ ADC input `ADIN` and the on‑board NTC network shown in the schematic (R23=43 k
 to `VCC_SC`, NTC=10 kΩ 3380 K to GND, C32=100 nF to GND at the divider mid‑node
 → `ADIN`).
 
-Design facts and constraints
+Design facts and constraints (updated)
 
 - SC8815 exposes a 10‑bit ADC channel on `ADIN` with 2 mV/LSB and a full‑scale
   of 2.048 V. The result is split as MSB 8‑bit and LSB 2‑bit registers. There is
   no readable internal die‑temperature register; only an OTP (over‑temperature
   protection) fault bit exists in STATUS. We therefore derive temperature solely
   from the external NTC divider.
-- `VCC_SC` depends on the power‑stage gating (`PSTOP`): when `PSTOP` is Low
-  (power stage allowed/working), `VCC_SC ≈ 3.0 V`; when `PSTOP` is High (power
-  stage force‑stopped), `VCC_SC ≈ 5.0 V`. Because the divider is ratiometric to
-  `VCC_SC`, temperature estimation must use the correct `VCC_SC` per mode.
-- Required behavior
-  - Over‑temperature stop at 60 °C with hysteresis: resume at 40 °C.
-  - Low‑temperature inhibit below 0 °C; resume immediately once > 0 °C (no
-    hysteresis on the low side).
+- Board mapping used by this firmware:
+  - Run mode (power stage enabled): use 5.0 V codes for ADIN policy.
+  - Stop mode (power stage stopped): evaluate with 3.0 V codes, but only after a
+    fixed 10‑second settle window to allow VCC_SC to drop.
+- Required behavior (aligned with current test plan)
+  - Over‑temperature stop at 50 °C (Yellow 4‑pulse on detection).
+  - Cool‑down resume at 40 °C (hot path only).
+  - Low‑temperature inhibit below 0 °C; after the 10‑second settle window,
+    resume once temperature is ≥ 0 °C (no extra time hysteresis, the 10 s window
+    is the only timing hysteresis).
   - While power stage is running, target ≈1 °C effective accuracy. While
     stopped, accuracy is not critical; we only need a reliable resume threshold.
 
@@ -254,34 +256,23 @@ NTC model and conversion
 - ADC code to voltage: with the SC8815 formula, `V_adin ≈ (code + 1) * 2 mV`
   where `code ∈ [0..1023]` is formed by `(MSB<<2)|LSB`.
 
-Reference thresholds (computed from β=3380 K, R23=43 kΩ, R28=NTC=10 kΩ)
+Reference thresholds (β=3380 K, R23=43 kΩ, NTC=10 kΩ)
 
-- For `VCC_SC = 3.0 V` (PSTOP Low, power stage running):
-  - 60 °C → `V_adin ≈ 198 mV` → code ≈ 98.
-  - 40 °C → `V_adin ≈ 357 mV` → code ≈ 178.
-- For `VCC_SC = 5.0 V` (PSTOP High, power stage stopped):
-  - 60 °C → `V_adin ≈ 330 mV` → code ≈ 164.
-  - 40 °C → `V_adin ≈ 595 mV` → code ≈ 297.
-  - 0 °C  → `V_adin ≈ 1981 mV` → code ≈ 990.
+- Run 5.0 V: 50 °C → code ≈ 220.
+- Stop 3.0 V: 40 °C → code ≈ 178；0 °C → code ≈ 593。
 
 Operational policy
 
 - Sampling
   - Enable SC8815 ADC (`AD_START=1`) whenever charger telemetry is needed.
-  - While running (PSTOP Low), sample `ADIN` at 10–20 Hz and compute
-    temperature using `VCC_SC=3.0 V` in the divider inversion.
-  - While stopped (PSTOP High), it is sufficient to compare raw `ADIN` code
-    against thresholds (no full temperature solve) using the `VCC_SC=5.0 V`
-    table below.
+  - While running, compare against 5.0 V codes (no full temperature solve).
+  - After stopping, wait a 10‑second settle window, then compare against 3.0 V
+    codes for resume/cold policy.
 - Decisions (hysteresis and low‑temp behavior)
-  - Over‑temp stop: if power stage is currently allowed (chip `PSTOP=Low`, i.e.,
-    `PSTOP_CTL=High`) and `code_3V ≤ 100` (≈60 °C)，则拉低 `PSTOP_CTL` 令芯片
-    `PSTOP=High`，立即停功率级，并在 Yellow LED 显示温度类 4 脉冲。
-  - Cool‑down resume: 若已停机（芯片 `PSTOP=High`，即 `PSTOP_CTL=Low`）且
-    `code_5V ≥ 297` 说明仍偏热；仅当 `code_5V < 297` 连续满足（3 次）时，
-    将 `PSTOP_CTL` 拉高（芯片 `PSTOP=Low`）恢复功率级。该阈值对应约 40 °C。
-  - Low‑temp inhibit: 停机状态下若 `code_5V ≥ 990`（≈≤0 °C），保持禁止；
-    一旦 `code_5V < 990` 立即允许（低温侧无迟滞）。
+  - Over‑temp stop (Run/5V): `ADIN_code ≤ 220`（默认去抖 2 次，±2 码裕量）→ 立即停功率级并打 Yellow 4 脉冲。
+  - Settle window: 停机后先等待 10 s，让 VCC_SC 下沉到 3 V；窗口内不执行 3 V 判定。
+  - Cool‑down resume (Stop/3V)：窗口结束后，`ADIN_code ≥ 178`（去抖 2 次）才恢复。
+  - Low‑temp inhibit (Stop/3V)：`ADIN_code ≥ 593` 进入低温保护；窗口结束后，一旦 `ADIN_code < 593` 立即恢复（无额外时间迟滞）。
 - Margins & filtering
   - Apply a ±5‑code margin to the fixed thresholds to absorb ADC quantization,
     resistor/β tolerance and noise (C32=100 nF provides analog filtering).
@@ -297,10 +288,9 @@ Driver/API hooks (to be implemented in code after approval)
 - `should_stop_from_hot(code_3v)` and `should_resume_from_cool(code_5v)` to
   evaluate thresholds with margins and debounce.
 
-LED linkage
+- LED linkage
 
-- Yellow LED fault codebook already reserves “4 pulses: OTP / NTC abnormal”.
-  Assert this while the power stage is stopped due to temperature conditions.
+- Yellow 4‑pulse on ADIN over‑temperature detection（独立于是否已执行停机）；OTP 仍然 4 脉冲；掉线 1 Hz 优先级最高。
 
 Testing notes
 
