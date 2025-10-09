@@ -1,6 +1,5 @@
 # Smart Battery Software Design (LED/State Machine/Low Power)
 
-Version: 2025-09-29
 
 This document is the single source of truth for the smart‑battery firmware design, consolidating charger control inversion (CE/PSTOP), 4‑LED signaling, dropout handling, sampling cadence, event‑driven global state machine, and the low‑power Sleep mode. It supersedes earlier LED drafts and scattered notes.
 
@@ -25,8 +24,8 @@ This document is the single source of truth for the smart‑battery firmware des
 
 - Hardware: MCU drives SC8815 `CE` and `PSTOP` through N‑MOSFET isolation; the MCU pin level is inverted relative to the IC’s active level.
 - Unified net names and semantics (used consistently in code and docs):
-  - `CE_CTL`: Low → enable charger; High → disable charger.
-  - `PSTOP_CTL`: Low → power stage allowed; High → power stage stopped (active stop).
+  - `CE_CTL`: High → chip `/CE` Low (enable charger); Low → chip `/CE` High (disable charger).
+  - `PSTOP_CTL`: High → chip `PSTOP` Low (power stage allowed); Low → chip `PSTOP` High (power stage stopped).
 - SC8815 pin-level semantics (non-inverted, for absolute clarity):
   - `PSTOP = High` → power stage stopped.
   - `PSTOP = Low`  → power stage allowed.
@@ -34,12 +33,12 @@ This document is the single source of truth for the smart‑battery firmware des
 
   | MCU pin       | Semantic            | Chip pin meaning |
   |---------------|---------------------|------------------|
-  | CE_CTL = Low  | Charger enabled     | CE = Active      |
-  | CE_CTL = High | Charger disabled    | CE = Inactive    |
-  | PSTOP_CTL = Low | Power allowed     | PSTOP = Low      |
-  | PSTOP_CTL = High | Power stopped    | PSTOP = High     |
+  | CE_CTL = High | Charger enabled     | /CE = Low        |
+  | CE_CTL = Low  | Charger disabled    | /CE = High       |
+  | PSTOP_CTL = High | Power allowed    | PSTOP = Low      |
+  | PSTOP_CTL = Low  | Power stopped    | PSTOP = High     |
 
-- Safety rule: any stop/pause/fault/dropout path must end with `PSTOP_CTL = High`.
+- Safety rule: any stop/pause/fault/dropout path must end with `PSTOP_CTL = Low` (chip `PSTOP = High`).
 
 ## 3) 4‑LED Signaling Rules (3 s base cycle)
 
@@ -218,6 +217,89 @@ controls, and telemetry loops that underpin bring-up.
      succeeds.
    - On success, spawn the asynchronous `bq76920_task`, which keeps verifying the
      pack, manages FET states, and publishes telemetry.
+
+## 11) Temperature Sensing (SC8815 ADIN) & Protection Policy
+
+Goal: provide a robust temperature‑based power‑stage protection using the SC8815
+ADC input `ADIN` and the on‑board NTC network shown in the schematic (R23=43 kΩ
+to `VCC_SC`, NTC=10 kΩ 3380 K to GND, C32=100 nF to GND at the divider mid‑node
+→ `ADIN`).
+
+Design facts and constraints (updated)
+
+- SC8815 exposes a 10‑bit ADC channel on `ADIN` with 2 mV/LSB and a full‑scale
+  of 2.048 V. The result is split as MSB 8‑bit and LSB 2‑bit registers. There is
+  no readable internal die‑temperature register; only an OTP (over‑temperature
+  protection) fault bit exists in STATUS. We therefore derive temperature solely
+  from the external NTC divider.
+- Board mapping used by this firmware:
+  - Run mode (power stage enabled): use 5.0 V codes for ADIN policy (board-level VCC_SC≈5 V while power stage runs).
+  - Stop mode (power stage stopped): evaluate with 3.0 V codes, but only after a
+    fixed 10‑second settle window to allow VCC_SC to drop.
+- Required behavior (aligned with current test plan)
+  - Over‑temperature stop at 50 °C (Yellow 4‑pulse on detection).
+  - Cool‑down resume at 40 °C (hot path only).
+  - Low‑temperature inhibit below 0 °C; after the 10‑second settle window,
+    resume once temperature is ≥ 0 °C (no extra time hysteresis, the 10 s window
+    is the only timing hysteresis).
+  - While power stage is running, target ≈1 °C effective accuracy. While
+    stopped, accuracy is not critical; we only need a reliable resume threshold.
+
+NTC model and conversion
+
+- Parts: R23 = 43 kΩ (±?), NTC = 10 kΩ @ 25 °C, β = 3380 K
+  (`FNTC0402X103F3380FB`).
+- Divider equation: `V_adin = Vcc * R_ntc / (R23 + R_ntc)`.
+- Recover `R_ntc` from a measurement: `R_ntc = R23 * V_adin / (Vcc - V_adin)`.
+- Convert to temperature (Kelvin) with the β model: `T = 1 / (1/T25 + (1/β)
+  * ln(R_ntc/R25))`; `T25 = 298.15 K`, `R25 = 10 kΩ`. Celsius = `T − 273.15`.
+- ADC code to voltage: with the SC8815 formula, `V_adin ≈ (code + 1) * 2 mV`
+  where `code ∈ [0..1023]` is formed by `(MSB<<2)|LSB`.
+
+Reference thresholds (β=3380 K, R23=43 kΩ, NTC=10 kΩ)
+
+- Run 5.0 V: 50 °C → code ≈ 220.
+- Stop 3.0 V: 40 °C → code ≈ 178；0 °C → code ≈ 593。
+
+Operational policy
+
+- Sampling
+  - Enable SC8815 ADC (`AD_START=1`) whenever charger telemetry is needed.
+  - While running, compare against 5.0 V codes (no full temperature solve).
+  - After stopping, wait a 10‑second settle window, then compare against 3.0 V
+    codes for resume/cold policy.
+- Decisions (hysteresis and low‑temp behavior)
+  - Over‑temp stop (Run/5V): `ADIN_code ≤ 220`（默认去抖 2 次，±2 码裕量）→ 立即停功率级并打 Yellow 4 脉冲。
+- Settle window: 停机后先等待 10 s，让 VCC_SC 下沉到 3 V；窗口内不执行 3 V 判定。
+  - 窗口触发条件：仅在运行→停机边沿或运行态 HOT 触发后开始计时；上电不触发窗口。窗口不叠加、不续期。
+  - Cool‑down resume (Stop/3V)：窗口结束后，`ADIN_code ≥ 178`（去抖 2 次）才恢复。
+  - Low‑temp inhibit (Stop/3V)：`ADIN_code ≥ 593` 进入低温保护；窗口结束后，一旦 `ADIN_code < 593` 立即恢复（无额外时间迟滞）。
+- Margins & filtering
+  - Apply a ±5‑code margin to the fixed thresholds to absorb ADC quantization,
+    resistor/β tolerance and noise (C32=100 nF provides analog filtering).
+  - Debounce by requiring any threshold condition for ≥100 ms or 3 consecutive
+    samples, whichever is longer.
+
+Driver/API hooks (to be implemented in code after approval)
+
+- `sc8815::SC8815::set_adc_conversion(true)` to start conversions.
+- `read_adin_raw()` → `(msb, lsb)`; helper `adin_code_10bit(msb, lsb)`.
+- `temp_c_from_adin(code, vcc_mv)` implementing the divider inversion and β
+  solve for run‑mode (vcc=3000 mV).
+- `should_stop_from_hot(code_3v)` and `should_resume_from_cool(code_5v)` to
+  evaluate thresholds with margins and debounce.
+
+- LED linkage
+
+- Yellow 4‑pulse on ADIN over‑temperature detection（独立于是否已执行停机）；OTP 仍然 4 脉冲；掉线 1 Hz 优先级最高。
+
+Testing notes
+
+- Bench can validate by heating the NTC with hot air and observing code
+  crossings near the listed references. Because β and resistor tolerances vary,
+  plan for a single‑point calibration offset in software when hardware data is
+  available; the algorithm supports an additive temperature offset applied in
+  run‑mode only.
 5. Once the protection stage is alive, wait 10 ms, drive CE low, and delay
    another 100 ms to satisfy the SC8815 wake timing.
 6. Reassert `PSTOP` high immediately before configuring the SC8815. Create an

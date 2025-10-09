@@ -54,6 +54,10 @@ pub struct Sc8815Alerts {
     pub ov_pause_active: bool,
     /// Severe imbalance pause (Δcell >= threshold); charger power stage gated until Δ falls below release threshold.
     pub imbalance_pause_active: bool,
+    /// Temperature pause derived from SC8815 ADIN (NTC) policy.
+    pub temp_pause_adin: bool,
+    /// Detected over-temp by ADIN (indication purpose, independent of whether pause was executed).
+    pub overtemp_adin: bool,
 }
 
 /// Balancing → Charger coupling signal

@@ -34,6 +34,22 @@ const FULL_EXIT_SECS: u32 = 10;
 const ENABLE_SC8815_DIAG: bool = false;
 const ENABLE_SC8815_SNAP: bool = false; // one-line snapshot each second
 
+// SC8815 ADIN temperature policy constants (see SOFTWARE_DESIGN.md §11)
+// Run-mode (power stage enabled): VCC_SC≈5V on this board → 50°C code≈220
+const ADIN_CODE_HOT_STOP_5V: u16 = 220; // 50°C @5V
+// Stop-mode (power stage stopped): use 3V mapping for resume/cold after settle
+const ADIN_CODE_RESUME_3V: u16 = 178; // 40°C @3V
+const ADIN_CODE_COLD_3V: u16 = 593; // 0°C  @3V
+// Tuning knobs (kept conservative after verification)
+const ADIN_CODE_MARGIN: u16 = 2; // ±2 codes tolerance
+const ADIN_DEBOUNCE_SAMPLES: u8 = 2; // consecutive samples
+// After asserting PSTOP (stop power stage), allow VCC_SC to drop to its low rail
+// before evaluating stop-mode (3V) thresholds to avoid immediate RESUME chatter.
+const VCCSC_DROP_MS: u32 = 10_000; // settle window; tuned per bench (10 s)
+const ENABLE_ADIN_SNAP: bool = false; // disable per-sample log to save flash
+
+// (Note) Removed LUT helpers to minimize footprint; thresholds use precomputed codes.
+
 // Local alias for the concrete I2C device type used by this task.
 type I2cDev = I2cDevice<
     'static,
@@ -279,6 +295,7 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
     let mut pstop_ctl_slot: Option<Output<'static>> = Some(pstop_ctl);
 
     let mut charger_active = false;
+    let mut charger_active_prev = false; // track run→stop edge for settle window
     let mut charge_confirmed = false;
     let mut confirm_streak: u8 = 0;
     let mut drop_streak: u8 = 0;
@@ -294,6 +311,20 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
     let mut imbalance_pause_active: bool = false;
     // 来自 BQ 的温度暂停请求（通过 BalancingCvRequest 下发）
     let mut temp_pause_cmd: bool = false;
+    // 来自 SC8815 ADIN 的温度暂停（本任务计算）
+    let mut sc_temp_pause_active: bool = false;
+    let mut sc_temp_pause_prev: bool = false; // for edge logs
+    let mut sc_overtemp_adin: bool = false; // indication-only flag
+    let mut last_temp_stop_ms: u32 = 0; // when HOT asserted
+    let mut last_temp_stop_cause_hot: bool = false; // distinguish HOT vs COLD pause cause
+    let mut cold_latch_active: bool = false; // latch low-temp until >=0°C after settle
+    // ADIN VCC selection (3V vs 5V) — board behavior:
+    // Power stage running → use 5 V codes; power stage stopped → evaluate with 3 V
+    // codes after the settle window. Do not assume pin‑level polarity here.
+    // 去抖计数器
+    let mut hot_hits: u8 = 0;
+    let mut cool_hits: u8 = 0;
+    let mut cold_hits: u8 = 0;
     // 100ms tick accumulator → drive *_pause_secs at 1 Hz
     let mut tick_100ms: u8 = 0;
     let mut sc_comm_fail_streak: u8 = 0;
@@ -378,7 +409,8 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                 charger_active,
                 charge_confirmed,
                 pause_active: (ov_pause_secs > 0 || uv_pause_secs > 0 || oc_pause_secs > 0)
-                    || temp_pause_cmd,
+                    || temp_pause_cmd
+                    || sc_temp_pause_active,
                 imbalance_pause_active,
                 full_latched,
                 sc_fault: sc_fault_flag,
@@ -534,7 +566,8 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                 let pol_start_cond = pack_voltage_mv < PACK_CHARGE_START_THRESHOLD_MV
                     && !charger_active
                     && adapter_holdoff_secs == 0
-                    && !temp_pause_cmd;
+                    && !temp_pause_cmd
+                    && !sc_temp_pause_active;
                 if pol_start_cond {
                     // (edge latch removed)
                     if sc8815_session.is_none() {
@@ -573,6 +606,7 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                         && oc_pause_secs == 0
                         && !imbalance_pause_active
                         && !temp_pause_cmd
+                        && !sc_temp_pause_active
                     {
                         if let Some(sess) = sc8815_session.as_mut() {
                             sess.enable_power_stage();
@@ -590,16 +624,22 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                         // log pause gating only when state (OV/IMB pair) changes
                         let pause_sig = (
                             (ov_pause_secs > 0 || uv_pause_secs > 0 || oc_pause_secs > 0),
-                            imbalance_pause_active,
+                            imbalance_pause_active || temp_pause_cmd || sc_temp_pause_active,
                         );
                         if last_pause_report != Some(pause_sig) {
-                            let mut b: u8 = 0; // bit0=LH, bit1=OV, bit2=IMB
+                            let mut b: u8 = 0; // bit0=LH, bit1=OV/UV/OC, bit2=IMB, bit3=BQtemp, bit4=ADINtemp
                             b |= 1 << 0; // LH
                             if ov_pause_secs > 0 || uv_pause_secs > 0 || oc_pause_secs > 0 {
                                 b |= 1 << 1;
                             }
                             if imbalance_pause_active {
                                 b |= 1 << 2;
+                            }
+                            if temp_pause_cmd {
+                                b |= 1 << 3;
+                            }
+                            if sc_temp_pause_active {
+                                b |= 1 << 4;
                             }
                             let _ = b; // shrink log
                             last_pause_report = Some(pause_sig);
@@ -774,6 +814,127 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                         sc_comm_fail_streak = 0;
                         // ok
 
+                        // --- Temperature policy via ADIN ---
+                        let adin_mv = measurements.adin_mv;
+                        // code ≈ V/2mV - 1, clamp at 0
+                        let adin_code: u16 = adin_mv.saturating_div(2).saturating_sub(1);
+                        // 档位选择：功率级运行→5V，停机→3V（窗口后评估）。
+                        // Optional runtime diagnostic (1 Hz)
+                        // ultra-short diagnostic to keep flash within limits
+                        if ENABLE_ADIN_SNAP {
+                            defmt::info!("a:{} c={}", adin_mv, adin_code);
+                        }
+
+                        if charger_active {
+                            // Running：按板上实际→ VCC_SC≈5V，采用 5V 映射阈值
+                            let hot_code = ADIN_CODE_HOT_STOP_5V;
+                            if adin_code <= hot_code.saturating_add(ADIN_CODE_MARGIN) {
+                                hot_hits = hot_hits.saturating_add(1);
+                            } else {
+                                hot_hits = 0;
+                            }
+                            sc_overtemp_adin = hot_hits >= ADIN_DEBOUNCE_SAMPLES;
+                            if sc_overtemp_adin {
+                                // Enter temperature pause: stop power stage immediately
+                                if let Some(s) = sc8815_session.as_mut() {
+                                    s.disable_power_stage();
+                                }
+                                charger_active = false;
+                                charge_confirmed = false;
+                                confirm_streak = 0;
+                                drop_streak = 0;
+                                sc_temp_pause_active = true;
+                                last_temp_stop_ms = now_ms;
+                                last_temp_stop_cause_hot = true;
+                                hot_hits = 0;
+                                if !sc_temp_pause_prev {
+                                    defmt::warn!("HOT a={} c={}", adin_mv, adin_code);
+                                }
+                            }
+                        } else {
+                            // Stopped: wait for VCC_SC to drop before 3V-mapped checks
+                            let elapsed_ms = now_ms.saturating_sub(last_temp_stop_ms);
+                            if last_temp_stop_ms != 0 && elapsed_ms < VCCSC_DROP_MS {
+                                // Hold: do not evaluate resume yet; keep paused
+                                cold_hits = 0;
+                                cool_hits = 0;
+                                sc_temp_pause_active = true;
+                                sc_overtemp_adin = false;
+                                // fall through to end of branch
+                            } else {
+                                // Per requirement use 3V mapping for resume/cold
+                                sc_overtemp_adin = false; // 指示仅在运行态考虑
+                                // Too-cold inhibit (≤0°C): 3V code≥593
+                                if adin_code >= ADIN_CODE_COLD_3V.saturating_sub(ADIN_CODE_MARGIN) {
+                                    cold_hits = cold_hits.saturating_add(1);
+                                } else {
+                                    cold_hits = 0;
+                                }
+                                if cold_hits >= ADIN_DEBOUNCE_SAMPLES {
+                                    sc_temp_pause_active = true; // latch pause while too cold
+                                    cold_latch_active = true;
+                                    last_temp_stop_cause_hot = false;
+                                    if !sc_temp_pause_prev {
+                                        defmt::warn!("COLD a={} c>={}", adin_mv, ADIN_CODE_COLD_3V);
+                                    }
+                                }
+
+                                // Resume path depends on cause:
+                                if cold_latch_active {
+                                    // cold latch: release when >=0°C (3V code <593)
+                                    if adin_code
+                                        < ADIN_CODE_COLD_3V.saturating_sub(ADIN_CODE_MARGIN)
+                                    {
+                                        cool_hits = cool_hits.saturating_add(1);
+                                    } else {
+                                        cool_hits = 0;
+                                    }
+                                    if cool_hits >= ADIN_DEBOUNCE_SAMPLES {
+                                        cold_latch_active = false;
+                                        sc_temp_pause_active = false;
+                                        cool_hits = 0;
+                                        defmt::info!(
+                                            "RESUME_COLD a={} c<{}",
+                                            adin_mv,
+                                            ADIN_CODE_COLD_3V
+                                        );
+                                    }
+                                } else if last_temp_stop_cause_hot {
+                                    // hot stop: release when ≤40°C (3V code ≥178)
+                                    if adin_code
+                                        >= ADIN_CODE_RESUME_3V.saturating_sub(ADIN_CODE_MARGIN)
+                                    {
+                                        cool_hits = cool_hits.saturating_add(1);
+                                    } else {
+                                        cool_hits = 0;
+                                    }
+                                    if cool_hits >= ADIN_DEBOUNCE_SAMPLES {
+                                        sc_temp_pause_active = false;
+                                        last_temp_stop_cause_hot = false;
+                                        cool_hits = 0;
+                                        defmt::info!(
+                                            "RESUME a={} c>={}",
+                                            adin_mv,
+                                            ADIN_CODE_RESUME_3V
+                                        );
+                                    }
+                                } else {
+                                    // No ADIN cause remains and settle window is over → resume
+                                    if sc_temp_pause_active {
+                                        sc_temp_pause_active = false;
+                                        defmt::info!(
+                                            "RESUME_WIN a={} c={} (no-cause)",
+                                            adin_mv,
+                                            adin_code
+                                        );
+                                    }
+                                }
+                            }
+                        }
+
+                        // Track edge
+                        sc_temp_pause_prev = sc_temp_pause_active;
+
                         let last_vbat_mv = measurements.vbat_mv as i32;
                         if _adapter_present {
                             if last_status_eoc {
@@ -886,6 +1047,8 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                         || (uv_pause_secs > 0)
                         || (oc_pause_secs > 0),
                     imbalance_pause_active,
+                    temp_pause_adin: sc_temp_pause_active,
+                    overtemp_adin: sc_overtemp_adin,
                 };
                 sc8815_alerts_publisher.publish_immediate(alerts_payload);
             }
@@ -897,6 +1060,8 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                 charging_confirmed: charge_confirmed,
                 ov_pause_active: (ov_pause_secs > 0) || (uv_pause_secs > 0) || (oc_pause_secs > 0),
                 imbalance_pause_active,
+                temp_pause_adin: sc_temp_pause_active,
+                overtemp_adin: sc_overtemp_adin,
             };
             sc8815_alerts_publisher.publish_immediate(alerts_payload);
         }
@@ -918,8 +1083,24 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                 oc_pause_secs = oc_pause_secs.saturating_sub(1);
             }
         }
-        let pause_active =
-            (ov_pause_secs > 0) || (uv_pause_secs > 0) || (oc_pause_secs > 0) || temp_pause_cmd;
+        // One-shot 10 s settle window after any run→stop edge (no stacking)
+        if charger_active_prev && !charger_active {
+            let now_ms_edge = embassy_time::Instant::now().as_millis() as u32;
+            // Only start window if a previous window is not active
+            if last_temp_stop_ms == 0
+                || now_ms_edge.saturating_sub(last_temp_stop_ms) >= VCCSC_DROP_MS
+            {
+                last_temp_stop_ms = now_ms_edge;
+                defmt::info!("temp: WIN_START edge");
+            }
+        }
+        charger_active_prev = charger_active;
+
+        let pause_active = (ov_pause_secs > 0)
+            || (uv_pause_secs > 0)
+            || (oc_pause_secs > 0)
+            || temp_pause_cmd
+            || sc_temp_pause_active;
         let sc_active_flag = _adapter_present && (charger_active || charge_confirmed);
         refresh_state_flags(StateFlagsCtx {
             ac_present: _adapter_present,
