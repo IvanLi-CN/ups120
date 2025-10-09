@@ -233,7 +233,7 @@ Design facts and constraints (updated)
   protection) fault bit exists in STATUS. We therefore derive temperature solely
   from the external NTC divider.
 - Board mapping used by this firmware:
-  - Run mode (power stage enabled): use 5.0 V codes for ADIN policy.
+  - Run mode (power stage enabled): use 5.0 V codes for ADIN policy (board-level VCC_SC≈5 V while power stage runs).
   - Stop mode (power stage stopped): evaluate with 3.0 V codes, but only after a
     fixed 10‑second settle window to allow VCC_SC to drop.
 - Required behavior (aligned with current test plan)
@@ -270,7 +270,8 @@ Operational policy
     codes for resume/cold policy.
 - Decisions (hysteresis and low‑temp behavior)
   - Over‑temp stop (Run/5V): `ADIN_code ≤ 220`（默认去抖 2 次，±2 码裕量）→ 立即停功率级并打 Yellow 4 脉冲。
-  - Settle window: 停机后先等待 10 s，让 VCC_SC 下沉到 3 V；窗口内不执行 3 V 判定。
+- Settle window: 停机后先等待 10 s，让 VCC_SC 下沉到 3 V；窗口内不执行 3 V 判定。
+  - 窗口触发条件：仅在运行→停机边沿或运行态 HOT 触发后开始计时；上电不触发窗口。窗口不叠加、不续期。
   - Cool‑down resume (Stop/3V)：窗口结束后，`ADIN_code ≥ 178`（去抖 2 次）才恢复。
   - Low‑temp inhibit (Stop/3V)：`ADIN_code ≥ 593` 进入低温保护；窗口结束后，一旦 `ADIN_code < 593` 立即恢复（无额外时间迟滞）。
 - Margins & filtering

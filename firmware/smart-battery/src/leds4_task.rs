@@ -228,7 +228,11 @@ pub async fn leds_task(
             6
         } else if (state_flags & sbits::BALANCING) != 0 || overlay_balancing {
             4
-        } else if sc_pause_ov || sc_pause_imb || sc_pause_temp || (state_flags & sbits::CHG_PAUSED) != 0 {
+        } else if sc_pause_ov
+            || sc_pause_imb
+            || sc_pause_temp
+            || (state_flags & sbits::CHG_PAUSED) != 0
+        {
             3
         } else if (state_flags & sbits::FULL) != 0 {
             5
