@@ -45,7 +45,7 @@ const ADIN_CODE_MARGIN: u16 = 2; // ±2 codes tolerance
 const ADIN_DEBOUNCE_SAMPLES: u8 = 2; // consecutive samples
 // After asserting PSTOP (stop power stage), allow VCC_SC to drop to its low rail
 // before evaluating stop-mode (3V) thresholds to avoid immediate RESUME chatter.
-const VCCSC_DROP_MS: u32 = 1000; // settle window; tune with bench if needed
+const VCCSC_DROP_MS: u32 = 10_000; // settle window; tuned per bench (10 s)
 const ENABLE_ADIN_SNAP: bool = false; // disable per-sample log to save flash
 
 // (Note) Removed LUT helpers to minimize footprint; thresholds use precomputed codes.
