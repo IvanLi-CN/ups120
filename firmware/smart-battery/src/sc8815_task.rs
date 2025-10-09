@@ -318,8 +318,9 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
     let mut last_temp_stop_ms: u32 = 0; // when HOT asserted
     let mut last_temp_stop_cause_hot: bool = false; // distinguish HOT vs COLD pause cause
     let mut cold_latch_active: bool = false; // latch low-temp until >=0°C after settle
-    // ADIN VCC selection (3V vs 5V) — follow power stage state per datasheet:
-    // PSTOP low (power allowed, charger_active=true) → VCC_SC≈3V; otherwise ≈5V.
+    // ADIN VCC selection (3V vs 5V) — board behavior:
+    // Power stage running → use 5 V codes; power stage stopped → evaluate with 3 V
+    // codes after the settle window. Do not assume pin‑level polarity here.
     // 去抖计数器
     let mut hot_hits: u8 = 0;
     let mut cool_hits: u8 = 0;
@@ -817,7 +818,7 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                         let adin_mv = measurements.adin_mv;
                         // code ≈ V/2mV - 1, clamp at 0
                         let adin_code: u16 = adin_mv.saturating_div(2).saturating_sub(1);
-                        // 档位选择：功率级运行→3V，停机→5V（按 PSTOP 语义）。
+                        // 档位选择：功率级运行→5V，停机→3V（窗口后评估）。
                         // Optional runtime diagnostic (1 Hz)
                         // ultra-short diagnostic to keep flash within limits
                         if ENABLE_ADIN_SNAP {
