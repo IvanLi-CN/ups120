@@ -315,6 +315,8 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
     let mut sc_temp_pause_prev: bool = false; // for edge logs
     let mut sc_overtemp_adin: bool = false; // indication-only flag
     let mut last_temp_stop_ms: u32 = 0; // when HOT asserted
+    let mut last_temp_stop_cause_hot: bool = false; // distinguish HOT vs COLD pause cause
+    let mut cold_latch_active: bool = false; // latch low-temp until >=0°C after settle
     // ADIN VCC selection (3V vs 5V) — follow power stage state per datasheet:
     // PSTOP low (power allowed, charger_active=true) → VCC_SC≈3V; otherwise ≈5V.
     // 去抖计数器
@@ -841,6 +843,7 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                                 drop_streak = 0;
                                 sc_temp_pause_active = true;
                                 last_temp_stop_ms = now_ms;
+                                last_temp_stop_cause_hot = true;
                                 hot_hits = 0;
                                 if !sc_temp_pause_prev {
                                     defmt::warn!("HOT a={} c={}", adin_mv, adin_code);
@@ -858,34 +861,52 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                                 // fall through to end of branch
                             } else {
                                 // Per requirement use 3V mapping for resume/cold
-                            sc_overtemp_adin = false; // 指示仅在运行态考虑
-                            // Too-cold inhibit (≤0°C): 3V code≥593
-                            if adin_code >= ADIN_CODE_COLD_3V.saturating_sub(ADIN_CODE_MARGIN) {
-                                cold_hits = cold_hits.saturating_add(1);
-                            } else {
-                                cold_hits = 0;
-                            }
-                            if cold_hits >= ADIN_DEBOUNCE_SAMPLES {
-                                sc_temp_pause_active = true; // latch pause while too cold
-                                if !sc_temp_pause_prev {
-                                    defmt::warn!("COLD a={} c>={}", adin_mv, ADIN_CODE_COLD_3V);
+                                sc_overtemp_adin = false; // 指示仅在运行态考虑
+                                // Too-cold inhibit (≤0°C): 3V code≥593
+                                if adin_code >= ADIN_CODE_COLD_3V.saturating_sub(ADIN_CODE_MARGIN) {
+                                    cold_hits = cold_hits.saturating_add(1);
+                                } else {
+                                    cold_hits = 0;
                                 }
-                            }
+                                if cold_hits >= ADIN_DEBOUNCE_SAMPLES {
+                                    sc_temp_pause_active = true; // latch pause while too cold
+                                    cold_latch_active = true;
+                                    last_temp_stop_cause_hot = false;
+                                    if !sc_temp_pause_prev {
+                                        defmt::warn!("COLD a={} c>={}", adin_mv, ADIN_CODE_COLD_3V);
+                                    }
+                                }
 
-                            // Cool-down resume (≤40°C): 3V code≥178; code increases when cooling
-                            if adin_code >= ADIN_CODE_RESUME_3V.saturating_sub(ADIN_CODE_MARGIN) {
-                                cool_hits = cool_hits.saturating_add(1);
-                            } else {
-                                cool_hits = 0;
-                            }
-                            if cool_hits >= ADIN_DEBOUNCE_SAMPLES {
-                                let was_active = sc_temp_pause_active;
-                                sc_temp_pause_active = false; // release by cooling to ≤40°C threshold
-                                cool_hits = 0;
-                                if was_active || sc_temp_pause_prev {
-                                    defmt::info!("RESUME a={} c>={}", adin_mv, ADIN_CODE_RESUME_3V);
+                                // Resume path depends on cause:
+                                if cold_latch_active {
+                                    // cold latch: release when >=0°C (3V code <593)
+                                    if adin_code < ADIN_CODE_COLD_3V.saturating_sub(ADIN_CODE_MARGIN) {
+                                        cool_hits = cool_hits.saturating_add(1);
+                                    } else {
+                                        cool_hits = 0;
+                                    }
+                                    if cool_hits >= ADIN_DEBOUNCE_SAMPLES {
+                                        cold_latch_active = false;
+                                        sc_temp_pause_active = false;
+                                        cool_hits = 0;
+                                        defmt::info!("RESUME_COLD a={} c<{}", adin_mv, ADIN_CODE_COLD_3V);
+                                    }
+                                } else if last_temp_stop_cause_hot {
+                                    // hot stop: release when ≤40°C (3V code ≥178)
+                                    if adin_code >= ADIN_CODE_RESUME_3V.saturating_sub(ADIN_CODE_MARGIN) {
+                                        cool_hits = cool_hits.saturating_add(1);
+                                    } else {
+                                        cool_hits = 0;
+                                    }
+                                    if cool_hits >= ADIN_DEBOUNCE_SAMPLES {
+                                        sc_temp_pause_active = false;
+                                        last_temp_stop_cause_hot = false;
+                                        cool_hits = 0;
+                                        defmt::info!("RESUME a={} c>={}", adin_mv, ADIN_CODE_RESUME_3V);
+                                    }
+                                } else {
+                                    // Pause not due to ADIN (e.g., BQ): do nothing here
                                 }
-                            }
                             }
                         }
 
