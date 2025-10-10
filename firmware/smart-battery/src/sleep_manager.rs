@@ -73,7 +73,7 @@ pub async fn sleep_task() {
             let remain = forbid_until - now;
             let need = SLEEP_REENTER_IDLE_MS.saturating_sub(elapsed);
             let wait_ms = remain.max(need);
-            Timer::after(Duration::from_millis(wait_ms)).await;
+            Timer::after(Duration::from_millis(wait_ms.into())).await;
             continue;
         }
         if elapsed >= SLEEP_REENTER_IDLE_MS {
@@ -105,7 +105,7 @@ pub async fn sleep_task() {
             continue;
         }
         let wait_ms = SLEEP_REENTER_IDLE_MS.saturating_sub(elapsed);
-        Timer::after(Duration::from_millis(wait_ms)).await;
+        Timer::after(Duration::from_millis(wait_ms.into())).await;
     }
 }
 

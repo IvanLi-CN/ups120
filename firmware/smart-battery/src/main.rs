@@ -14,7 +14,7 @@ mod state_bits;
 mod shared;
 mod sleep_manager;
 
-use bq769x0_async_rs::{BatteryConfig, Bq769x0, Enabled as BqCrcEnabled, ProtectionConfig};
+use bq769x0_async_rs::{BatteryConfig, Bq769x0, Enabled as BqCrcEnabled};
 // no direct info! logs to减小尺寸
 use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
 use embassy_executor::Spawner;
