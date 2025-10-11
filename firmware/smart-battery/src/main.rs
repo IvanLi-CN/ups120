@@ -7,6 +7,7 @@ mod data_types;
 mod activity;
 mod failsafe;
 mod i2c1_slave;
+mod irq_mux;
 mod leds4_task;
 mod sc8815_task;
 mod state_bits;
@@ -179,10 +180,8 @@ async fn main(_spawner: Spawner) {
 
     // 初始化完成后再启动相关任务（IRQ → LED → SC → BQ main）
     let sc_int = ExtiInput::new(p.PB2, p.EXTI2, Pull::Up);
-    _spawner.spawn(sc8815_task::sc8815_irq_task(sc_int).expect("sc-int token"));
-
     let bq_alert = ExtiInput::new(p.PB1, p.EXTI1, Pull::None);
-    _spawner.spawn(bq76920_task::bq_alert_irq_task(bq_alert).expect("bq-int token"));
+    _spawner.spawn(irq_mux::irq_mux_task(sc_int, bq_alert).expect("irq-mux token"));
 
     let led_r = Output::new(p.PA5, Level::High, Speed::Low);
     let led_y = Output::new(p.PA6, Level::High, Speed::Low);

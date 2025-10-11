@@ -55,6 +55,12 @@ const TEMP_EMA_ALPHA_PCT: i32 = 20; // 20% new sample, 80% history
 // Wake-on-ALERT pending flag for BQ (set by EXTI task)
 static BQ_ALERT_PENDING: AtomicBool = AtomicBool::new(false);
 
+#[inline]
+pub fn set_bq_alert_pending() {
+    BQ_ALERT_PENDING.store(true, portable_atomic::Ordering::Relaxed);
+    crate::sleep_manager::bump("bq-int");
+}
+
 #[inline(always)]
 fn update_bq_state(preparing: bool, balancing_active: bool, fault_bq: bool, active: bool) {
     const MASK: u16 = sbits::PREPARING | sbits::BALANCING | sbits::FAULT_BQ | sbits::ACTIVE_BQ;
@@ -94,8 +100,7 @@ pub async fn bq_alert_irq_task(mut int_pin: ExtiInput<'static>) {
     loop {
         // ALERT is active-high per datasheet: trigger on rising edges.
         int_pin.wait_for_rising_edge().await;
-        BQ_ALERT_PENDING.store(true, portable_atomic::Ordering::Relaxed);
-        crate::sleep_manager::bump("bq-int");
+        set_bq_alert_pending();
     }
 }
 

@@ -90,12 +90,17 @@ struct ScSession {
 // SC8815 INT → 事件通知（EXTI 边沿触发后唤醒本任务查询状态）
 static SC_INT_PENDING: AtomicBool = AtomicBool::new(false);
 
+#[inline]
+pub fn set_sc_int_pending() {
+    SC_INT_PENDING.store(true, portable_atomic::Ordering::Relaxed);
+    crate::sleep_manager::bump("sc-int");
+}
+
 #[embassy_executor::task]
 pub async fn sc8815_irq_task(mut int_pin: ExtiInput<'static>) {
     loop {
         int_pin.wait_for_falling_edge().await;
-        SC_INT_PENDING.store(true, portable_atomic::Ordering::Relaxed);
-        crate::sleep_manager::bump("sc-int");
+        set_sc_int_pending();
     }
 }
 
