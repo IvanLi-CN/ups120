@@ -1,0 +1,3 @@
+cargo:rustc-link-search=/Users/ivan/Projects/Ivan/ups120/target-warn/release/build/defmt-8d783589305e0de8/out
+cargo:rustc-check-cfg=cfg(c_variadic)
+cargo:rustc-check-cfg=cfg(no_cas)

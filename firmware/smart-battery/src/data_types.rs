@@ -8,7 +8,7 @@ use sc8815::{AdcMeasurements as Sc8815AdcMeasurements, SC8815Status};
 // Removed BQ25730 related structures as we're using SC8815 now
 
 /// BQ76920 测量数据
-#[derive(Debug, Copy, Clone, PartialEq)]
+#[derive(Copy, Clone, PartialEq)]
 
 pub struct Bq76920Measurements<const N: usize> {
     pub core_measurements: Bq76920CoreMeasurements<N>,
@@ -23,27 +23,19 @@ impl<const N: usize> Default for Bq76920Measurements<N> {
 }
 
 /// BQ76920 安全告警信息
-#[derive(Debug, Copy, Clone, PartialEq, Default)]
+#[derive(Copy, Clone, PartialEq, Default)]
 pub struct Bq76920Alerts {
     pub system_status: SystemStatus,
 }
-/// INA226 测量数据
-#[allow(dead_code)]
-#[derive(Debug, Copy, Clone, PartialEq, Default)]
-pub struct Ina226Measurements {
-    pub voltage: f32,
-    pub current: f32,
-    pub power: f32, // 假设需要功率，如果不需要可以调整
-}
 
 /// SC8815 测量数据
-#[derive(Debug, Copy, Clone, PartialEq, Default)]
+#[derive(Copy, Clone, PartialEq, Default)]
 pub struct Sc8815Measurements {
     pub adc_measurements: Sc8815AdcMeasurements,
 }
 
 /// SC8815 安全告警信息
-#[derive(Debug, Copy, Clone, PartialEq, Default)]
+#[derive(Copy, Clone, PartialEq, Default)]
 pub struct Sc8815Alerts {
     pub device_status: SC8815Status,
     /// Firmware currently requests the charger to be active (CE low, PSTOP low).
@@ -65,7 +57,7 @@ pub struct Sc8815Alerts {
 /// When `require_cv` is true, the charger task shall maintain CV charging
 /// (keep session active and avoid termination) until the balancer indicates
 /// it is no longer required.
-#[derive(Debug, Copy, Clone, PartialEq, Default)]
+#[derive(Copy, Clone, PartialEq, Default)]
 pub struct BalancingCvRequest {
     /// Request charger to maintain CV (used by charger task)
     pub require_cv: bool,
@@ -77,7 +69,7 @@ pub struct BalancingCvRequest {
     pub temp_pause: bool,
 }
 /// 聚合所有设备的测量数据
-#[derive(Debug, Copy, Clone, PartialEq)]
+#[derive(Copy, Clone, PartialEq)]
 
 pub struct AllMeasurements<const N: usize> {
     pub sc8815: Sc8815Measurements,
@@ -226,7 +218,7 @@ impl<const N: usize> AllMeasurements<N> {
 }
 
 /// Payload structure for USB communication, containing flattened data from AllMeasurements.
-#[derive(Debug, Copy, Clone, PartialEq, defmt::Format)]
+#[derive(Copy, Clone, PartialEq, defmt::Format)]
 pub struct AllMeasurementsUsbPayload {
     // Fields from SC8815 ADC measurements
     pub sc8815_adc_vbus_mv: u16, // VBUS voltage in mV

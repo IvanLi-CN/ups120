@@ -6,13 +6,13 @@ use portable_atomic::{AtomicBool, AtomicU32};
 
 static ACTIVE_COUNT: AtomicU32 = AtomicU32::new(0);
 static SLEEPING: AtomicBool = AtomicBool::new(false);
-static mut LAST_ACTIVITY_MS: u64 = 0;
-static mut FORBID_SLEEP_UNTIL_MS: u64 = 0; // wake-holdoff deadline (ms)
+static mut LAST_ACTIVITY_MS: u32 = 0;
+static mut FORBID_SLEEP_UNTIL_MS: u32 = 0; // wake-holdoff deadline (ms)
 static WAKE_LATCH: AtomicBool = AtomicBool::new(false); // set by holders at work start
 static WAKE_CAUSE_PRINTED: AtomicBool = AtomicBool::new(false); // throttle cause log per sleep cycle
 
-const SLEEP_REENTER_IDLE_MS: u64 = 300;
-const WAKE_HOLDOFF_MS: u64 = 8000; // Keep awake >=8s after activity
+const SLEEP_REENTER_IDLE_MS: u32 = 300;
+const WAKE_HOLDOFF_MS: u32 = 8000; // Keep awake >=8s after activity
 
 static NOTIFY: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
@@ -35,7 +35,7 @@ impl Drop for BusyGuard {
 pub fn hold(_who: &str) -> BusyGuard {
     ACTIVE_COUNT.fetch_add(1, portable_atomic::Ordering::Relaxed);
     unsafe {
-        LAST_ACTIVITY_MS = Instant::now().as_millis();
+        LAST_ACTIVITY_MS = Instant::now().as_millis() as u32;
     }
     unsafe {
         FORBID_SLEEP_UNTIL_MS = LAST_ACTIVITY_MS.saturating_add(WAKE_HOLDOFF_MS);
@@ -50,7 +50,7 @@ pub fn hold(_who: &str) -> BusyGuard {
 
 pub fn bump(_who: &str) {
     unsafe {
-        LAST_ACTIVITY_MS = Instant::now().as_millis();
+        LAST_ACTIVITY_MS = Instant::now().as_millis() as u32;
     }
     NOTIFY.signal(());
 }
@@ -65,7 +65,7 @@ pub async fn sleep_task() {
             n.wait().await;
             continue;
         }
-        let now = Instant::now().as_millis();
+        let now: u32 = Instant::now().as_millis() as u32;
         let last = unsafe { LAST_ACTIVITY_MS };
         let elapsed = now.saturating_sub(last);
         let forbid_until = unsafe { FORBID_SLEEP_UNTIL_MS };
@@ -73,7 +73,7 @@ pub async fn sleep_task() {
             let remain = forbid_until - now;
             let need = SLEEP_REENTER_IDLE_MS.saturating_sub(elapsed);
             let wait_ms = remain.max(need);
-            Timer::after(Duration::from_millis(wait_ms)).await;
+            Timer::after(Duration::from_millis(wait_ms.into())).await;
             continue;
         }
         if elapsed >= SLEEP_REENTER_IDLE_MS {
@@ -90,7 +90,7 @@ pub async fn sleep_task() {
                     continue;
                 }
                 if SLEEPING.swap(false, portable_atomic::Ordering::Relaxed) {
-                    let now2 = Instant::now().as_millis();
+                    let now2: u32 = Instant::now().as_millis() as u32;
                     let idle_ms = now2.saturating_sub(unsafe { LAST_ACTIVITY_MS });
                     debug!(
                         "sleep: exit (active_count={} idle_ms={} latched={})",
@@ -105,7 +105,7 @@ pub async fn sleep_task() {
             continue;
         }
         let wait_ms = SLEEP_REENTER_IDLE_MS.saturating_sub(elapsed);
-        Timer::after(Duration::from_millis(wait_ms)).await;
+        Timer::after(Duration::from_millis(wait_ms.into())).await;
     }
 }
 

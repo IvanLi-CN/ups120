@@ -4,7 +4,7 @@ use defmt::*;
 use embassy_time::{Duration, Timer};
 
 use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
-use embassy_stm32::exti::ExtiInput;
+// EXTI is handled by irq_mux; no direct dependency here
 use embassy_stm32::i2c::I2c;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use portable_atomic::AtomicBool;
@@ -55,6 +55,12 @@ const TEMP_EMA_ALPHA_PCT: i32 = 20; // 20% new sample, 80% history
 // Wake-on-ALERT pending flag for BQ (set by EXTI task)
 static BQ_ALERT_PENDING: AtomicBool = AtomicBool::new(false);
 
+#[inline]
+pub fn set_bq_alert_pending() {
+    BQ_ALERT_PENDING.store(true, portable_atomic::Ordering::Relaxed);
+    crate::sleep_manager::bump("bq-int");
+}
+
 #[inline(always)]
 fn update_bq_state(preparing: bool, balancing_active: bool, fault_bq: bool, active: bool) {
     const MASK: u16 = sbits::PREPARING | sbits::BALANCING | sbits::FAULT_BQ | sbits::ACTIVE_BQ;
@@ -89,15 +95,7 @@ pub struct Bq76920TaskArgs {
     pub balancing_cv_publisher: BalancingCvRequestPublisher<'static>,
 }
 
-#[embassy_executor::task]
-pub async fn bq_alert_irq_task(mut int_pin: ExtiInput<'static>) {
-    loop {
-        // ALERT is active-high per datasheet: trigger on rising edges.
-        int_pin.wait_for_rising_edge().await;
-        BQ_ALERT_PENDING.store(true, portable_atomic::Ordering::Relaxed);
-        crate::sleep_manager::bump("bq-int");
-    }
-}
+// BQ ALERT EXTI is handled in irq_mux::irq_mux_task
 
 // Smart cell balancing logic based on charging status and voltage thresholds
 async fn execute_smart_battery_balancing<'a>(

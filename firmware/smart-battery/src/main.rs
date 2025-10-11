@@ -7,6 +7,7 @@ mod data_types;
 mod activity;
 mod failsafe;
 mod i2c1_slave;
+mod irq_mux;
 mod leds4_task;
 mod sc8815_task;
 mod state_bits;
@@ -14,7 +15,7 @@ mod state_bits;
 mod shared;
 mod sleep_manager;
 
-use bq769x0_async_rs::{BatteryConfig, Bq769x0, Enabled as BqCrcEnabled, ProtectionConfig};
+use bq769x0_async_rs::{BatteryConfig, Bq769x0, Enabled as BqCrcEnabled};
 // no direct info! logs to减小尺寸
 use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
 use embassy_executor::Spawner;
@@ -132,17 +133,14 @@ async fn main(_spawner: Spawner) {
     let probe_start = Instant::now();
     let probe_deadline = probe_start + Duration::from_millis(500);
     let tried_addresses = [BQ76920_I2C_ADDR, 0x18u8];
-    let cfg_template = BatteryConfig {
+    let mut cfg_template = BatteryConfig {
         overvoltage_trip: 3650,
         undervoltage_trip: 2500,
-        protection_config: ProtectionConfig {
-            scd_limit: 15_000,
-            ocd_limit: 10_000,
-            ..BatteryConfig::default().protection_config
-        },
         rsense: 3,
-        ..Default::default()
+        ..BatteryConfig::default()
     };
+    cfg_template.protection_config.scd_limit = 15_000;
+    cfg_template.protection_config.ocd_limit = 10_000;
 
     let mut bq_init_addr: Option<u8> = None;
     'addr_loop: for addr in tried_addresses.iter().copied() {
@@ -184,10 +182,8 @@ async fn main(_spawner: Spawner) {
 
     // 初始化完成后再启动相关任务（IRQ → LED → SC → BQ main）
     let sc_int = ExtiInput::new(p.PB2, p.EXTI2, Pull::Up);
-    _spawner.spawn(sc8815_task::sc8815_irq_task(sc_int).expect("sc-int token"));
-
     let bq_alert = ExtiInput::new(p.PB1, p.EXTI1, Pull::None);
-    _spawner.spawn(bq76920_task::bq_alert_irq_task(bq_alert).expect("bq-int token"));
+    _spawner.spawn(irq_mux::irq_mux_task(sc_int, bq_alert).expect("irq-mux token"));
 
     let led_r = Output::new(p.PA5, Level::High, Speed::Low);
     let led_y = Output::new(p.PA6, Level::High, Speed::Low);
@@ -268,10 +264,11 @@ async fn main(_spawner: Spawner) {
 
     // (Optional) EXTI for BQ ALERT can be enabled here if needed for additional wake sources.
 
-    // Spawn I2C1 slave + snapshot mirror tasks for the external interface
-    _spawner.spawn(i2c1_slave::slave_task(i2c1_dev).expect("slave token"));
-    _spawner.spawn(i2c1_slave::sc_meas_mirror_task(sc8815_meas_chan).expect("sc-mirror token"));
-    _spawner.spawn(i2c1_slave::bq_meas_mirror_task(bq76920_meas_chan).expect("bq-mirror token"));
+    // Spawn合并后的 I2C1 从机 + 两路镜像状态机任务（保持日志与寄存器映射不变）
+    _spawner.spawn(
+        i2c1_slave::slave_mux_task(i2c1_dev, sc8815_meas_chan, bq76920_meas_chan)
+            .expect("i2c1-mux token"),
+    );
     // (omit gs_mirror_task to reduce flash)
 
     // Idle task: periodically yield; low-power executor controls STOP entry.

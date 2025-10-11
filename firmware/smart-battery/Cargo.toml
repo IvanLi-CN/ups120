@@ -21,13 +21,13 @@ embassy-executor = { path = "../../embassy/embassy-executor", features = [
 ] }
 embassy-time = { path = "../../embassy/embassy-time", features = [
   "defmt",
-  "defmt-timestamp-uptime",
-  "tick-hz-32_768",
+  "tick-hz-1_000",
 ] }
 sc8815 = { path = "../../sc8815", features = ["async", "defmt"] }
 defmt = "1.0.1"
 defmt-rtt = "1.0.0"
 embassy-embedded-hal = { path = "../../embassy/embassy-embedded-hal" }
+embassy-futures = { path = "../../embassy/embassy-futures" }
 bq769x0-async-rs = { path = "../../bq76920", features = ["async", "defmt"] }
 static_cell = "2.1.0"
 portable-atomic = { version = "1.11.0", features = ["critical-section"] }
