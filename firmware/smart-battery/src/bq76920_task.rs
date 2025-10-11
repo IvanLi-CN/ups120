@@ -4,7 +4,7 @@ use defmt::*;
 use embassy_time::{Duration, Timer};
 
 use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
-use embassy_stm32::exti::ExtiInput;
+// EXTI is handled by irq_mux; no direct dependency here
 use embassy_stm32::i2c::I2c;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use portable_atomic::AtomicBool;
@@ -95,14 +95,7 @@ pub struct Bq76920TaskArgs {
     pub balancing_cv_publisher: BalancingCvRequestPublisher<'static>,
 }
 
-#[embassy_executor::task]
-pub async fn bq_alert_irq_task(mut int_pin: ExtiInput<'static>) {
-    loop {
-        // ALERT is active-high per datasheet: trigger on rising edges.
-        int_pin.wait_for_rising_edge().await;
-        set_bq_alert_pending();
-    }
-}
+// BQ ALERT EXTI is handled in irq_mux::irq_mux_task
 
 // Smart cell balancing logic based on charging status and voltage thresholds
 async fn execute_smart_battery_balancing<'a>(

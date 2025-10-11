@@ -15,7 +15,7 @@ use crate::shared::{
     Sc8815MeasurementsPublisher,
 };
 use crate::state_bits::{self, bits as sbits};
-use embassy_stm32::exti::ExtiInput;
+// EXTI is handled by irq_mux; no direct dependency here
 use portable_atomic::AtomicBool;
 
 pub const SC8815_DEFAULT_ADDRESS: u8 = sc8815::registers::constants::DEFAULT_ADDRESS;
@@ -96,13 +96,7 @@ pub fn set_sc_int_pending() {
     crate::sleep_manager::bump("sc-int");
 }
 
-#[embassy_executor::task]
-pub async fn sc8815_irq_task(mut int_pin: ExtiInput<'static>) {
-    loop {
-        int_pin.wait_for_falling_edge().await;
-        set_sc_int_pending();
-    }
-}
+// SC EXTI is handled in irq_mux::irq_mux_task
 
 impl ScSession {
     async fn begin(
