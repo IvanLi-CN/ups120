@@ -133,12 +133,14 @@ async fn main(_spawner: Spawner) {
     let probe_start = Instant::now();
     let probe_deadline = probe_start + Duration::from_millis(500);
     let tried_addresses = [BQ76920_I2C_ADDR, 0x18u8];
-    let mut cfg_template = BatteryConfig::default();
-    cfg_template.overvoltage_trip = 3650;
-    cfg_template.undervoltage_trip = 2500;
+    let mut cfg_template = BatteryConfig {
+        overvoltage_trip: 3650,
+        undervoltage_trip: 2500,
+        rsense: 3,
+        ..BatteryConfig::default()
+    };
     cfg_template.protection_config.scd_limit = 15_000;
     cfg_template.protection_config.ocd_limit = 10_000;
-    cfg_template.rsense = 3;
 
     let mut bq_init_addr: Option<u8> = None;
     'addr_loop: for addr in tried_addresses.iter().copied() {

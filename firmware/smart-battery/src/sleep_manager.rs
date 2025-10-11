@@ -35,7 +35,7 @@ impl Drop for BusyGuard {
 pub fn hold(_who: &str) -> BusyGuard {
     ACTIVE_COUNT.fetch_add(1, portable_atomic::Ordering::Relaxed);
     unsafe {
-        LAST_ACTIVITY_MS = (Instant::now().as_millis() as u64) as u32;
+        LAST_ACTIVITY_MS = Instant::now().as_millis() as u32;
     }
     unsafe {
         FORBID_SLEEP_UNTIL_MS = LAST_ACTIVITY_MS.saturating_add(WAKE_HOLDOFF_MS);
@@ -50,7 +50,7 @@ pub fn hold(_who: &str) -> BusyGuard {
 
 pub fn bump(_who: &str) {
     unsafe {
-        LAST_ACTIVITY_MS = (Instant::now().as_millis() as u64) as u32;
+        LAST_ACTIVITY_MS = Instant::now().as_millis() as u32;
     }
     NOTIFY.signal(());
 }
@@ -65,7 +65,7 @@ pub async fn sleep_task() {
             n.wait().await;
             continue;
         }
-        let now: u32 = (Instant::now().as_millis() as u64) as u32;
+        let now: u32 = Instant::now().as_millis() as u32;
         let last = unsafe { LAST_ACTIVITY_MS };
         let elapsed = now.saturating_sub(last);
         let forbid_until = unsafe { FORBID_SLEEP_UNTIL_MS };
@@ -90,7 +90,7 @@ pub async fn sleep_task() {
                     continue;
                 }
                 if SLEEPING.swap(false, portable_atomic::Ordering::Relaxed) {
-                    let now2: u32 = (Instant::now().as_millis() as u64) as u32;
+                    let now2: u32 = Instant::now().as_millis() as u32;
                     let idle_ms = now2.saturating_sub(unsafe { LAST_ACTIVITY_MS });
                     debug!(
                         "sleep: exit (active_count={} idle_ms={} latched={})",

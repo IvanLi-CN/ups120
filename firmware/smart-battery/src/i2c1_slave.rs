@@ -293,7 +293,7 @@ pub async fn slave_mux_task(
             },
             Either3::Second(m) => {
                 // SC8815 measurements mirror
-                VBAT_MV.store(m.adc_measurements.vbat_mv as u16, Ordering::Relaxed);
+                VBAT_MV.store(m.adc_measurements.vbat_mv, Ordering::Relaxed);
                 IBAT_MA.store(m.adc_measurements.ibat_ma as i16, Ordering::Relaxed);
             }
             Either3::Third(m) => {
