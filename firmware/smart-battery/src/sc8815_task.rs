@@ -57,6 +57,29 @@ type I2cDev = I2cDevice<
     I2c<'static, embassy_stm32::mode::Async, embassy_stm32::i2c::mode::Master>,
 >;
 
+#[inline(never)]
+#[cold]
+async fn sc_end_and_dock(
+    sc8815_session: &mut Option<ScSession>,
+    ce_ctl_slot: &mut Option<Output<'static>>,
+    pstop_ctl_slot: &mut Option<Output<'static>>,
+    parked_i2c_device: &mut Option<I2cDev>,
+) {
+    if let Some(sess) = sc8815_session.take() {
+        let (ce_back, pstop_back, i2c_back) = sess.end().await;
+        *ce_ctl_slot = Some(ce_back);
+        *pstop_ctl_slot = Some(pstop_back);
+        *parked_i2c_device = Some(i2c_back);
+    } else {
+        if let Some(pin) = pstop_ctl_slot.as_mut() {
+            pin.set_low();
+        }
+        if let Some(pin) = ce_ctl_slot.as_mut() {
+            pin.set_low();
+        }
+    }
+}
+
 // Session struct encapsulating an active SC8815 instance and related resources.
 struct ScSession {
     sc: SC8815<I2cDev>,
@@ -441,21 +464,13 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                 if charger_active {
                     defmt::info!("cutoff {}", pack_voltage_mv);
                 }
-                if sc8815_session.is_some() {
-                    if let Some(sess) = sc8815_session.take() {
-                        let (ce_back, pstop_back, i2c_back) = sess.end().await;
-                        ce_ctl_slot = Some(ce_back);
-                        pstop_ctl_slot = Some(pstop_back);
-                        parked_i2c_device = Some(i2c_back);
-                    }
-                } else {
-                    if let Some(pin) = pstop_ctl_slot.as_mut() {
-                        pin.set_low();
-                    }
-                    if let Some(pin) = ce_ctl_slot.as_mut() {
-                        pin.set_low();
-                    }
-                }
+                sc_end_and_dock(
+                    &mut sc8815_session,
+                    &mut ce_ctl_slot,
+                    &mut pstop_ctl_slot,
+                    &mut parked_i2c_device,
+                )
+                .await;
                 charger_active = false;
                 charge_confirmed = false;
                 confirm_streak = 0;
@@ -466,21 +481,13 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                         "stop vb>{} {}",
                         PACK_CHARGE_STOP_THRESHOLD_MV, pack_voltage_mv
                     );
-                    if sc8815_session.is_some() {
-                        if let Some(sess) = sc8815_session.take() {
-                            let (ce_back, pstop_back, i2c_back) = sess.end().await;
-                            ce_ctl_slot = Some(ce_back);
-                            pstop_ctl_slot = Some(pstop_back);
-                            parked_i2c_device = Some(i2c_back);
-                        }
-                    } else {
-                        if let Some(pin) = pstop_ctl_slot.as_mut() {
-                            pin.set_low();
-                        }
-                        if let Some(pin) = ce_ctl_slot.as_mut() {
-                            pin.set_low();
-                        }
-                    }
+                    sc_end_and_dock(
+                        &mut sc8815_session,
+                        &mut ce_ctl_slot,
+                        &mut pstop_ctl_slot,
+                        &mut parked_i2c_device,
+                    )
+                    .await;
                     charger_active = false;
                     charge_confirmed = false;
                     confirm_streak = 0;
@@ -669,12 +676,13 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                         // Track adapter presence
                         if !status.ac_adapter_connected {
                             _adapter_present = false;
-                            if let Some(sess) = sc8815_session.take() {
-                                let (ce_back, pstop_back, i2c_back) = sess.end().await;
-                                ce_ctl_slot = Some(ce_back);
-                                pstop_ctl_slot = Some(pstop_back);
-                                parked_i2c_device = Some(i2c_back);
-                            }
+                            sc_end_and_dock(
+                                &mut sc8815_session,
+                                &mut ce_ctl_slot,
+                                &mut pstop_ctl_slot,
+                                &mut parked_i2c_device,
+                            )
+                            .await;
                             charger_active = false;
                             charge_confirmed = false;
                             confirm_streak = 0;
@@ -770,12 +778,13 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                     Err(_e) => {
                         error!("sc:status!");
                         // err
-                        if let Some(sess) = sc8815_session.take() {
-                            let (ce_back, pstop_back, i2c_back) = sess.end().await;
-                            ce_ctl_slot = Some(ce_back);
-                            pstop_ctl_slot = Some(pstop_back);
-                            parked_i2c_device = Some(i2c_back);
-                        }
+                        sc_end_and_dock(
+                            &mut sc8815_session,
+                            &mut ce_ctl_slot,
+                            &mut pstop_ctl_slot,
+                            &mut parked_i2c_device,
+                        )
+                        .await;
                         charger_active = false;
                         charge_confirmed = false;
                         confirm_streak = 0;
