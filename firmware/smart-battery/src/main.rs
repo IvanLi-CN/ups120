@@ -263,10 +263,11 @@ async fn main(_spawner: Spawner) {
 
     // (Optional) EXTI for BQ ALERT can be enabled here if needed for additional wake sources.
 
-    // Spawn I2C1 slave + snapshot mirror tasks for the external interface
-    _spawner.spawn(i2c1_slave::slave_task(i2c1_dev).expect("slave token"));
-    _spawner.spawn(i2c1_slave::sc_meas_mirror_task(sc8815_meas_chan).expect("sc-mirror token"));
-    _spawner.spawn(i2c1_slave::bq_meas_mirror_task(bq76920_meas_chan).expect("bq-mirror token"));
+    // Spawn合并后的 I2C1 从机 + 两路镜像状态机任务（保持日志与寄存器映射不变）
+    _spawner.spawn(
+        i2c1_slave::slave_mux_task(i2c1_dev, sc8815_meas_chan, bq76920_meas_chan)
+            .expect("i2c1-mux token"),
+    );
     // (omit gs_mirror_task to reduce flash)
 
     // Idle task: periodically yield; low-power executor controls STOP entry.
