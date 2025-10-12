@@ -40,15 +40,6 @@ pub fn bq_heartbeat_update(now_ms: u32) {
     BQ_LAST_MS32.store(now_ms, Ordering::Relaxed);
 }
 
-#[inline]
-pub fn bq_last_ms32() -> u32 {
-    BQ_LAST_MS32.load(Ordering::Relaxed)
-}
-
-#[inline]
-pub fn sc_last_ms32() -> u32 {
-    SC_LAST_MS32.load(Ordering::Relaxed)
-}
 
 #[inline]
 pub fn set_ac_present(ac: bool) {
