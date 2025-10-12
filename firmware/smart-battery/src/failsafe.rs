@@ -40,7 +40,6 @@ pub fn bq_heartbeat_update(now_ms: u32) {
     BQ_LAST_MS32.store(now_ms, Ordering::Relaxed);
 }
 
-
 #[inline]
 pub fn set_ac_present(ac: bool) {
     // 反向记录静默标志：无 AC => QUIESCE=true
