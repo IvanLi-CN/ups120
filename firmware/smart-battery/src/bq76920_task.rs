@@ -1,7 +1,7 @@
 use bq769x0_async_rs::RegisterAccess;
 use bq769x0_async_rs::registers::{Register, SysCtrl2Flags, SysStatFlags};
 use defmt::*;
-use embassy_time::{Duration, Timer};
+use embassy_time::{Duration, Timer, with_timeout};
 
 use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
 // EXTI is handled by irq_mux; no direct dependency here
@@ -388,10 +388,12 @@ pub async fn bq76920_task(args: Bq76920TaskArgs) {
                 let _ = bq.set_cell_balancing(0).await;
             }
             if BQ_ALERT_PENDING.swap(false, portable_atomic::Ordering::Relaxed) {
-                match bq.read_all_measurements().await {
-                    Ok(core_meas) => {
+                match with_timeout(Duration::from_secs(2), bq.read_all_measurements()).await {
+                    Ok(Ok(core_meas)) => {
                         latest_core_measurements = Some(core_meas);
                         // mark online (no extra log)
+                        let now_ms = embassy_time::Instant::now().as_millis() as u32;
+                        crate::failsafe::bq_heartbeat_update(now_ms);
                         crate::failsafe::set_bq_online(true);
                         fail_streak = 0;
                         crate::failsafe::clear_pstop();
@@ -410,7 +412,7 @@ pub async fn bq76920_task(args: Bq76920TaskArgs) {
                             let _ = bq.clear_status_flags(flags_to_clear).await;
                         }
                     }
-                    Err(_e) => {
+                    Ok(Err(_)) | Err(_) => {
                         fail_streak = fail_streak.saturating_add(1);
                         if fail_streak >= 3 {
                             crate::failsafe::request_pstop();
@@ -503,12 +505,16 @@ pub async fn bq76920_task(args: Bq76920TaskArgs) {
                 last_cellbal_bits = cellbal1_register;
             }
 
-            // Read all measurements from BQ76920. These are now in physical units.
-            match bq.read_all_measurements().await {
-                Ok(core_meas) => {
+            // Read all measurements from BQ76920 with a timeout, so hangs become failures.
+            match with_timeout(Duration::from_secs(2), bq.read_all_measurements()).await {
+                Ok(Ok(core_meas)) => {
                     latest_core_measurements = Some(core_meas);
                     fail_streak = 0;
                     crate::failsafe::clear_pstop();
+                    // Heartbeat + online after a good sample
+                    let now_ms = embassy_time::Instant::now().as_millis() as u32;
+                    crate::failsafe::bq_heartbeat_update(now_ms);
+                    crate::failsafe::set_bq_online(true);
 
                     // Detailed BQ76920 measurements (optional verbose)
                     // dbg: verbose block removed to save flash
@@ -617,7 +623,7 @@ pub async fn bq76920_task(args: Bq76920TaskArgs) {
                         }
                     }
                 }
-                Err(_e) => {
+                Ok(Err(_)) | Err(_) => {
                     error!("bq:meas!");
                     latest_core_measurements = None;
                     fail_streak = fail_streak.saturating_add(1);

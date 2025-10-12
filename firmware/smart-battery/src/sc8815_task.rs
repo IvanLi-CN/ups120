@@ -659,8 +659,13 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
         if sc8815_session.is_some() {
             let mut _latest_status_for_alerts: Option<SC8815Status> = None;
             match sc8815_session.as_mut() {
-                Some(sess) => match sess.sc.get_device_status().await {
-                    Ok(status) => {
+                Some(sess) => match embassy_time::with_timeout(
+                    Duration::from_secs(2),
+                    sess.sc.get_device_status(),
+                )
+                .await
+                {
+                    Ok(Ok(status)) => {
                         sc_fault_flag = status.otp_fault || status.vbus_short_fault;
                         last_status_eoc = status.eoc;
                         // status fetched
@@ -774,7 +779,7 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                         }
                         _latest_status_for_alerts = Some(status);
                     }
-                    Err(_e) => {
+                    Ok(Err(_)) | Err(_) => {
                         error!("sc:status!");
                         // err
                         sc_end_and_dock(
