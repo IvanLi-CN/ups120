@@ -62,7 +62,7 @@ Notes: LED tasks do not synchronize phases across colors; each keeps its own 3 s
 
 ### 3.2 Yellow (SC8815 Charging/Fault)
 
-- Dropout: if SC8815 hits consecutive I²C failures threshold → 1 Hz blink (overrides others on Yellow).
+- Dropout: if SC8815达到连续 I²C 失败阈值，则进入 1 Hz 掉线闪烁（覆盖黄灯上其他显示），不受“是否使用过”之类前置条件限制。
 - Base: not charging = OFF; charging = ON.
 - Fault blink: strictly 50% over the 3‑second cycle: 1.5 s ON + 1.5 s OFF.
 - Pulse codes (applied at cycle start):
@@ -74,7 +74,7 @@ Notes: LED tasks do not synchronize phases across colors; each keeps its own 3 s
 
 ### 3.3 Red (BQ76920 FET/Protection/Balancing)
 
-- Dropout: if BQ76920 hits consecutive I²C failures threshold → 1 Hz blink (overrides others on Red).
+- Dropout: if BQ76920 hits the consecutive I²C failure threshold it enters a 1 Hz dropout blink (overrides others on Red). This includes communication hangs which are converted to failures by the timeout policy below.
 - Base: both CHG & DSG FETs ON → OFF; any side disabled → ON.
 - Pulse codes (at cycle start):
   - 1 pulse: Balancing active.
@@ -83,6 +83,15 @@ Notes: LED tasks do not synchronize phases across colors; each keeps its own 3 s
   - 4 pulses: OCD (over‑current discharge).
   - 5 pulses: AFE internal temp/reference abnormal or other major unclassified fault.
   - 6 pulses: Battery temperature out of band (temp pause by BQ76920).
+
+### 3.5 Dropout Semantics, Timeouts and Online Flags
+
+- Both BQ and SC paths maintain “online” flags that reflect recent successful communications. LED dropout blinking is driven by these flags.
+- To avoid silent hangs (e.g., I²C awaits that never resolve), the firmware wraps critical reads with a timeout and classifies timeouts as failures:
+  - BQ measurement read: 2 s timeout. On success, online=true and a heartbeat timestamp is updated; on error/timeout, `fail_streak += 1`.
+  - SC device status read: 2 s timeout. On success, online=true and a heartbeat timestamp is updated; on error/timeout, `fail_streak += 1`.
+- 当 `fail_streak >= 3` 时，将对应 online 标志设为 false，从而强制进入掉线闪烁（红灯=BQ，黄灯=SC）。SC 掉线闪烁不再受任何“使用过”之类门槛限制。
+- Successful subsequent reads immediately reset `fail_streak` and restore the online flag.
 
 ### 3.4 Blue (Global State)
 

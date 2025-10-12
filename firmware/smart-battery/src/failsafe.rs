@@ -6,6 +6,9 @@ static BQ_FAILSAFE_PSTOP: AtomicBool = AtomicBool::new(false);
 static SC_LAST_MS32: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 static QUIESCE: AtomicBool = AtomicBool::new(false); // true=外设静默（无 AC）
 
+// BQ heartbeat: last successful measurements timestamp (ms since boot, lower 32 bits)
+static BQ_LAST_MS32: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
 // Online flags: reflect whether device is considered online after boot probe or recent comm success.
 static SC_ONLINE: AtomicBool = AtomicBool::new(false);
 static BQ_ONLINE: AtomicBool = AtomicBool::new(false);
@@ -31,6 +34,11 @@ pub fn sc_heartbeat_update(now_ms: u32) {
 }
 
 // Note: `sc_last_ms` accessor removed; online tracking relies on explicit flags now.
+
+#[inline]
+pub fn bq_heartbeat_update(now_ms: u32) {
+    BQ_LAST_MS32.store(now_ms, Ordering::Relaxed);
+}
 
 #[inline]
 pub fn set_ac_present(ac: bool) {
