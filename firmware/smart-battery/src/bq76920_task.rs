@@ -428,7 +428,10 @@ pub async fn bq76920_task(args: Bq76920TaskArgs) {
             adapter_present = false;
             let full_flag = (state_bits::flags() & sbits::FULL) != 0;
             let preparing = !full_flag && last_pack_voltage_mv < PACK_CHARGE_START_THRESHOLD_MV;
-            update_bq_state(preparing, false, fault_bq_flag, false);
+            // Preserve ACTIVE_BQ here to avoid per-second flicker on Red LED.
+            // ACTIVE_BQ is decided once per tick at loop end (based on scheduler cadence).
+            let prev_active = (state_bits::flags() & sbits::ACTIVE_BQ) != 0;
+            update_bq_state(preparing, false, fault_bq_flag, prev_active);
             // 不再 continue；后续进入统一的周期调度
         }
         // This task focuses on reading data from the BQ76920 itself.
@@ -627,6 +630,7 @@ pub async fn bq76920_task(args: Bq76920TaskArgs) {
                     error!("bq:meas!");
                     latest_core_measurements = None;
                     fail_streak = fail_streak.saturating_add(1);
+                    warn!("bq:fail_streak={}", fail_streak);
                     if fail_streak >= 3 {
                         crate::failsafe::set_bq_online(false);
                     }

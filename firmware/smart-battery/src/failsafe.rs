@@ -1,4 +1,5 @@
 use core::sync::atomic::{AtomicBool, Ordering};
+use defmt::*;
 
 // When true, SC8815 power stage must be stopped (PSTOP high).
 static BQ_FAILSAFE_PSTOP: AtomicBool = AtomicBool::new(false);
@@ -63,7 +64,12 @@ pub fn is_sc_online() -> bool {
 
 #[inline]
 pub fn set_bq_online(v: bool) {
+    // Log edge changes to help diagnose LED dropout vs. online flapping
+    let prev = BQ_ONLINE.load(Ordering::Relaxed);
     BQ_ONLINE.store(v, Ordering::Relaxed);
+    if prev != v {
+        info!("bq:online {}->{}", prev, v);
+    }
 }
 
 #[inline]
