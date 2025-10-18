@@ -1,11 +1,40 @@
 [package]
 name = "ups-main"
-version = "0.0.0"
-edition = "2024"
+version = "0.1.0"
+edition = "2021"
 publish = false
 
-[[bin]]
-name = "ups-main"
-path = "src/main.rs"
-test = false
+[dependencies]
+# Embassy core
+embassy-executor = "0.7.0"
+embassy-time = "0.4.0"
+embassy-sync = "0.6.2"
+embassy-futures = "0.1.2"
+static_cell = "2.1.1"
+heapless = { version = "0.9.1", default-features = false }
+
+# HAL / EHAL families
+embedded-hal = "1.0.0"
+embedded-hal-async = "1.0.0"
+embedded-hal-bus = { version = "0.3.0", default-features = false }
+embassy-embedded-hal = "0.3.2"
+
+# Esp HAL stack (versions aligned with reference project)
+esp-hal = { version = "1.0.0-rc.0", features = ["esp32s3", "unstable"] }
+esp-hal-embassy = { version = "0.9.0", features = ["esp32s3"] }
+esp-backtrace = { version = "0.17.0", features = ["esp32s3", "panic-handler", "println"] }
+esp-println = { version = "0.15.0", features = ["esp32s3", "defmt-espflash"] }
+esp-bootloader-esp-idf = { version = "0.2.0", features = ["esp32s3"] }
+
+# Logging
+defmt = "1"
+
+[profile.release]
+codegen-units = 1
+debug = 2
+debug-assertions = false
+incremental = false
+lto = "fat"
+opt-level = "s"
+overflow-checks = false
 
