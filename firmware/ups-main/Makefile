@@ -17,9 +17,9 @@ BINDIR := target/$(TARGET)/$(PROFILE)
 ELF    := $(BINDIR)/$(BIN)
 
 PORT_FLAG   := $(if $(PORT),--port $(PORT),)
-BAUD_FLAG   := -B $(BAUD)
+BAUD_FLAG   := $(if $(BAUD),-B $(BAUD),)
 CHIP_FLAG   := --chip $(CHIP)
-LOGFMT_FLAG := --log-format $(LOGFMT)
+LOGFMT_FLAG := $(if $(LOGFMT),--log-format $(LOGFMT),)
 ESPFLASH_ARGS ?=
 
 .PHONY: help env ports build clean run attach monitor
@@ -53,4 +53,3 @@ attach: $(ELF)
 	espflash monitor $(PORT_FLAG) $(BAUD_FLAG) $(CHIP_FLAG) $(LOGFMT_FLAG) --elf $(ELF) $(ESPFLASH_ARGS)
 
 monitor: attach
-
