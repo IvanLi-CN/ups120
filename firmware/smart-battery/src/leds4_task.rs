@@ -14,6 +14,7 @@ use crate::shared::{
     Sc8815AlertsSubscriber,
 };
 use crate::state_bits::{self, bits as sbits};
+// Red LED base derives from ACTIVE_BQ (task activation), not MOS gating.
 
 // Timing (3 s base cycle; pulses are 120 ms wide with 120 ms gaps)
 const CYCLE_MS: u32 = 3000;
@@ -94,6 +95,14 @@ pub async fn leds_task(
     let mut overlay_balancing = false;
     let mut temp_pause_active = false; // from BQ (BalancingCvRequest)
 
+    // Edge log for BQ dropout (drives Red LED 1 Hz blink)
+    let mut prev_bq_dropout = false;
+
+    // Duty sampler for Red LED: estimate actual on-duty per ~1s window
+    let mut red_on_ticks: u16 = 0;
+    let mut red_samples: u16 = 0;
+    let mut red_last_report = Instant::now();
+
     loop {
         let now = Instant::now();
         // Non-blocking drains
@@ -139,6 +148,12 @@ pub async fn leds_task(
         // Dropout derived from online flags: device stays online after boot probe
         // and only turns offline on real communication timeout thereafter.
         let bq_dropout = !crate::failsafe::is_bq_online();
+        if bq_dropout && !prev_bq_dropout {
+            defmt::warn!("led:red dropout on");
+        } else if !bq_dropout && prev_bq_dropout {
+            defmt::info!("led:red dropout off");
+        }
+        prev_bq_dropout = bq_dropout;
         let sc_dropout = !crate::failsafe::is_sc_online();
 
         // Trigger async green pulse on I2C1 activity
@@ -155,8 +170,11 @@ pub async fn leds_task(
 
         let state_flags = state_bits::flags();
 
-        // Red (BQ FET/Protection)
+        // Red (BQ activation/protection)
         let mut red = LedIntent::default();
+        // Base ON semantics: ACTIVE_BQ → ON; otherwise OFF.
+        // ACTIVE_BQ reflects task activation (e.g., 1s cadence for balancing/charging phase),
+        // it is independent from MOS/FET gating.
         let red_active = (state_flags & sbits::ACTIVE_BQ) != 0;
         red.base_on = red_active;
         // Fault blink mapping：电池故障 → 50% 闪烁；并按严重度分配脉冲数（越严重脉冲数越大）
@@ -257,6 +275,32 @@ pub async fn leds_task(
             compose_with_pulses(red.base_on, red.pulses, p_red)
         };
         apply_led(&mut pins.red, red_on);
+
+        // Red duty sampling & 1s report (helps distinguish 50% vs ~30% pulses)
+        red_samples = red_samples.saturating_add(1);
+        if red_on {
+            red_on_ticks = red_on_ticks.saturating_add(1);
+        }
+        if (now - red_last_report) >= Duration::from_millis(1000) {
+            let duty_pct: u32 = if red_samples > 0 {
+                (u32::from(red_on_ticks) * 100) / u32::from(red_samples)
+            } else {
+                0
+            };
+            defmt::info!(
+                "led:red duty={}%% d/o/p={}{}{} base={} pulses={} p={}",
+                duty_pct,
+                if red.dropout_blink { 'D' } else { '-' },
+                if red.fault_blink { 'F' } else { '-' },
+                if red.pulses > 0 { 'P' } else { '-' },
+                red.base_on,
+                red.pulses,
+                p_red
+            );
+            red_on_ticks = 0;
+            red_samples = 0;
+            red_last_report = now;
+        }
 
         // YELLOW
         let yellow_on = if yellow.dropout_blink {
