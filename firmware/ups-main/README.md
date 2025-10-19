@@ -5,7 +5,9 @@ This directory contains the UPS main controller firmware targeting `ESP32‑S3` 
 - Toolchain: Rust + esp-hal (Xtensa). Requires `espflash`, Xtensa toolchain, and `xtensa-esp32s3-none-elf` target.
 - Hardware docs:
   - `docs/mcu_hardware.md` (schematic transcription + verified GPIO mapping)
-  - `docs/pwm_fan_control_circuit_design.md` (fan DC/PWM scheme, same as reference project)
+  - `docs/fan_control_spec.md` (2-wire fan control specification)
+  - `docs/fan_control_requirements.md` (current fan-control requirements & acceptance checklist)
+  - `docs/archive/pwm_fan_control_circuit_design.md` (legacy 3-wire fan design for reference)
   - `docs/datasheets/HUSB305-01.md` + `.pdf` (Type‑C source controller STAT/PG behavior)
 - Build:
   - `make -C firmware/ups-main build` (or `ups-build` at repo root)

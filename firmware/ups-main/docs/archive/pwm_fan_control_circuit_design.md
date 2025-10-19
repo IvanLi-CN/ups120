@@ -1,4 +1,7 @@
-# ESP32-S3 PWM Fan Control System Application Note
+# [Archived] ESP32-S3 PWM Fan Control System Application Note
+
+> **状态：已归档，仅供历史参考（原三线风扇方案）**  
+> 当前项目采用两线风扇调速，请查阅 `docs/fan_control_spec.md`。
 
 Based on TI standard feedback network design methodology and RT9043GB LDO
 
