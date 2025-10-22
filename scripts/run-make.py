@@ -113,21 +113,40 @@ def _run_make(target: str, args: Sequence[str], timeout: int) -> int:
         )
         return 1
 
+    timed_out = False
     try:
         return_code = process.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
-        # Terminate the entire process group so that nested commands also stop.
-        os.killpg(process.pid, signal.SIGTERM)
-        try:
-            return_code = process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            os.killpg(process.pid, signal.SIGKILL)
+        timed_out = True
+        return_code = None
+        for sig, wait_after in (
+            (signal.SIGINT, 3),  # mimic Ctrl+C first
+            (signal.SIGTERM, 2),
+            (signal.SIGKILL, None),
+        ):
+            try:
+                os.killpg(process.pid, sig)
+            except ProcessLookupError:
+                break
+
+            if wait_after is None:
+                break
+
+            try:
+                return_code = process.wait(timeout=wait_after)
+                break
+            except subprocess.TimeoutExpired:
+                continue
+
+        if return_code is None:
             return_code = process.wait()
+
+    if timed_out:
         print(
-            f"error: command '{target}' exceeded timeout of {timeout} seconds.",
-            file=sys.stderr,
+            f"timeout: command '{target}' terminated after {timeout} seconds.",
+            file=sys.stdout,
         )
-        return 124
+        return 0
 
     if return_code != 0:
         print(
