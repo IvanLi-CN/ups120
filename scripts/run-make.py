@@ -6,6 +6,8 @@ from __future__ import annotations
 import argparse
 import subprocess
 import sys
+import os
+import signal
 from pathlib import Path
 from typing import List, Sequence
 
@@ -99,25 +101,40 @@ def _build_parser(available_targets: Sequence[str]) -> argparse.ArgumentParser:
 def _run_make(target: str, args: Sequence[str], timeout: int) -> int:
     cmd = ["make", target, *args]
     try:
-        subprocess.run(
+        process = subprocess.Popen(
             cmd,
             cwd=str(ROOT),
-            timeout=timeout,
-            check=True,
+            start_new_session=True,
         )
-        return 0
+    except OSError as exc:
+        print(
+            f"error: failed to launch make for '{target}': {exc}",
+            file=sys.stderr,
+        )
+        return 1
+
+    try:
+        return_code = process.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
+        # Terminate the entire process group so that nested commands also stop.
+        os.killpg(process.pid, signal.SIGTERM)
+        try:
+            return_code = process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGKILL)
+            return_code = process.wait()
         print(
             f"error: command '{target}' exceeded timeout of {timeout} seconds.",
             file=sys.stderr,
         )
         return 124
-    except subprocess.CalledProcessError as exc:
+
+    if return_code != 0:
         print(
-            f"error: make command '{target}' exited with status {exc.returncode}.",
+            f"error: make command '{target}' exited with status {return_code}.",
             file=sys.stderr,
         )
-        return exc.returncode if exc.returncode != 0 else 1
+    return return_code
 
 
 def main(argv: Sequence[str] | None = None) -> int:
