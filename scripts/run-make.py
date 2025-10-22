@@ -142,10 +142,7 @@ def _run_make(target: str, args: Sequence[str], timeout: int) -> int:
             return_code = process.wait()
 
     if timed_out:
-        print(
-            f"timeout: command '{target}' terminated after {timeout} seconds.",
-            file=sys.stdout,
-        )
+        print(f"timeout: 命令 '{target}' 达到 {timeout} 秒的运行时限后已终止。")
         return 0
 
     if return_code != 0:
