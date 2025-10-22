@@ -1,6 +1,7 @@
 #![no_std]
 #![no_main]
 
+mod fan_control;
 mod tsens;
 
 use defmt::info;
@@ -137,9 +138,8 @@ fn main() -> ! {
     info!("SPI LCD pins: DC=GPIO10, MOSI=GPIO11, SCLK=GPIO12, CS=GPIO13, RST=GPIO14");
     info!("Fan control: EN=GPIO39, PWM=GPIO40; buzzer=GPIO38 (2kHz)");
 
-    // Keep buzzer and fan idle to avoid affecting die temperature during TSENS validation
+    // Keep buzzer idle; fan controller will manage enable/duty automatically
     buzzer.set_duty(0).ok();
-    fan_pwm.set_duty(0).ok();
     fan_en.set_low();
 
     // Probe I2C device (TCA6408A 0x20) — ignore errors during smoke-test
@@ -161,13 +161,7 @@ fn main() -> ! {
     }
     delay.delay_ms(200u32);
 
-    loop {
-        let reading = tsens::read_celsius(&mut delay);
-        let corrected = reading.base_celsius - delta_c;
-        info!(
-            "tsens sample: temp={=f32}°C base={=f32}°C raw={=u8} dac=0x{=u8:X}",
-            corrected, reading.base_celsius, reading.raw, reading.dac
-        );
-        delay.delay_ms(1000u32);
-    }
+    let vin_present = true; // VIN presence sensor pending, default to true per spec
+    let controller = fan_control::FanController::new(fan_pwm, fan_en, delta_opt, vin_present);
+    controller.run(&mut delay);
 }
