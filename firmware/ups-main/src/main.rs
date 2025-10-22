@@ -22,8 +22,6 @@ use esp_hal::{
 };
 use esp_println::{self as _, println}; // install UART logger + println! macro + defmt bridge
 
-const DIE_TO_AMBIENT_OFFSET_C: f32 = 5.0;
-
 // Populate the ESP-IDF App Descriptor so espflash can read metadata
 esp_bootloader_esp_idf::esp_app_desc!();
 
@@ -169,7 +167,7 @@ fn main() -> ! {
 
     loop {
         let reading = tsens::read_celsius(&mut delay);
-        let corrected = reading.base_celsius - delta_c + DIE_TO_AMBIENT_OFFSET_C;
+        let corrected = reading.base_celsius - delta_c;
         info!(
             "tsens sample: temp={=f32}°C base={=f32}°C raw={=u8} dac=0x{=u8:X}",
             corrected, reading.base_celsius, reading.raw, reading.dac
