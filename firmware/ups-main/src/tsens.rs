@@ -44,7 +44,7 @@ pub fn init(delay: &mut Delay) {
         .modify(|_, w| w.tsens_clk_en().set_bit().saradc_clk_en().set_bit());
     sens.sar_tsens_ctrl2().modify(|_, w| unsafe {
         w.sar_tsens_xpd_force()
-            .bits(1)
+            .bits(3)
             .sar_tsens_xpd_wait()
             .bits(0x03ff)
     });
