@@ -27,6 +27,7 @@ pub fn init(delay: &mut Delay) {
     let sys = esp_hal::peripherals::SYSTEM::regs();
     sys.perip_clk_en0()
         .modify(|_, w| w.apb_saradc_clk_en().set_bit());
+    // Note: if your bootloader asserts APB_SARADC reset, ensure it is released there.
 
     // Select digital controller for SAR1 and prevent RTC domain from overriding it.
     let sens = esp_hal::peripherals::SENS::regs();
@@ -42,6 +43,7 @@ pub fn init(delay: &mut Delay) {
 
     sens.sar_peri_clk_gate_conf()
         .modify(|_, w| w.tsens_clk_en().set_bit().saradc_clk_en().set_bit());
+    // Note: TSENS/SARADC reset bits are left at their boot defaults; TRM requires only clocks and XPD.
     sens.sar_tsens_ctrl2().modify(|_, w| unsafe {
         w.sar_tsens_xpd_force()
             .bits(3)
@@ -102,29 +104,51 @@ pub fn read_celsius(delay: &mut Delay) -> Reading {
         .modify(|_, w| w.sar_tsens_power_up().set_bit());
     regs.sar_tsens_ctrl()
         .modify(|_, w| w.sar_tsens_power_up_force().set_bit());
-    delay.delay_us(500u32);
+    // Allow bias & clock to settle before dumping out any data
+    delay.delay_us(1000u32);
 
-    // Trigger a one-shot
+    // Trigger a one-shot conversion
     regs.sar_tsens_ctrl()
         .modify(|_, w| w.sar_tsens_dump_out().set_bit());
 
+    // Bounded poll for READY, track how many loops it took and last OUT value
     let mut raw: u8 = 0;
-    for _ in 0..200 {
-        let reg = regs.sar_tsens_ctrl().read();
-        if reg.sar_tsens_ready().bit() {
-            raw = reg.sar_tsens_out().bits();
+    let mut loops: u16 = 0;
+    let mut last_out: u8 = (regs.sar_tsens_ctrl().read().bits() & 0xFF) as u8;
+    while loops < 500 {
+        let regbits = regs.sar_tsens_ctrl().read().bits();
+        let ready = ((regbits >> 8) & 1) != 0;
+        if ready {
+            raw = (regbits & 0xFF) as u8;
             break;
         }
+        last_out = (regbits & 0xFF) as u8;
+        loops += 1;
         delay.delay_us(200u32);
     }
 
     regs.sar_tsens_ctrl()
         .modify(|_, w| w.sar_tsens_dump_out().clear_bit());
+    // Let FSM regain control between shots to avoid stuck READY=0 on some steppings
+    regs.sar_tsens_ctrl()
+        .modify(|_, w| w.sar_tsens_power_up_force().clear_bit());
+    // Small guard delay before computing the temperature
+    delay.delay_us(50u32);
 
     let dac = unsafe { esp_rom_regi2c_read(0x69, 1, 0x06) } & 0x0F;
     let dac_offset = dac_offset_from_reg(dac);
     let raw_f = raw as f32;
     let base = TSENS_ADC_FACTOR * raw_f - TSENS_DAC_FACTOR * (dac_offset as f32) - TSENS_SYS_OFFSET;
+    if raw == 0 {
+        defmt::warn!(
+            "tsens.read: READY_timeout={} last_out={=u8} ctrl.dump={} ctrl.pu={}",
+            loops,
+            last_out,
+            ((regs.sar_tsens_ctrl().read().bits() >> 24) & 1) as u8,
+            ((regs.sar_tsens_ctrl().read().bits() >> 22) & 1) as u8
+        );
+    }
+
     Reading {
         raw,
         dac,
@@ -137,10 +161,18 @@ pub fn read_delta_calibration() -> Option<f32> {
         return None;
     }
     let regs = peripherals::EFUSE::regs();
-    let raw_bits = (regs.rd_sys_part1_data4().read().bits() >> 4) & 0x1FF;
+    let full = regs.rd_sys_part1_data4().read().bits();
+    let raw_bits = (full >> 4) & 0x1FF;
     let magnitude = (raw_bits & 0xFF) as i16;
     let sign = (raw_bits & 0x100) != 0; // BIT(8)=1 表示负号（与 IDF LL 一致）
     let signed = if sign { -magnitude } else { magnitude };
+    defmt::info!(
+        "tsens.efuse: rd_sys_part1_data4=0x{=u32:X} delta_raw=0x{=u16:X} sign={} mag={=u8}",
+        full,
+        raw_bits as u16,
+        sign as u8,
+        magnitude as u8
+    );
     Some(signed as f32 / 10.0)
 }
 
