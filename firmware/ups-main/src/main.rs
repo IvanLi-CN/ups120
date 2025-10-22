@@ -20,7 +20,7 @@ use esp_hal::{
     },
     time::Rate,
 };
-use esp_println::{self as _, println}; // install UART logger + println! macro + defmt bridge
+use esp_println as _; // install UART logger + defmt bridge
 
 // Populate the ESP-IDF App Descriptor so espflash can read metadata
 esp_bootloader_esp_idf::esp_app_desc!();
@@ -131,11 +131,11 @@ fn main() -> ! {
         })
         .unwrap();
 
-    println!("UPS main firmware booting…");
-    println!("Buttons: center/up/right/down/left on GPIO0/1/2/4/5");
-    println!("I2C0 on GPIO8/9; INTn on GPIO7; USB2_PG on GPIO21");
-    println!("SPI LCD: DC10 MOSI11 SCLK12 CS13 RST14");
-    println!("Fan: EN39 PWM40; Buzzer: 38 (2kHz)");
+    info!("UPS main firmware booting…");
+    info!("GPIO mappings: buttons center/up/right/down/left = 0/1/2/4/5");
+    info!("I2C0 pins: SDA=GPIO8, SCL=GPIO9, INTn=GPIO7, USB2_PG=GPIO21");
+    info!("SPI LCD pins: DC=GPIO10, MOSI=GPIO11, SCLK=GPIO12, CS=GPIO13, RST=GPIO14");
+    info!("Fan control: EN=GPIO39, PWM=GPIO40; buzzer=GPIO38 (2kHz)");
 
     // Keep buzzer and fan idle to avoid affecting die temperature during TSENS validation
     buzzer.set_duty(0).ok();
@@ -152,14 +152,12 @@ fn main() -> ! {
 
     info!("ups tsens bring-up: sampling once per second");
     if let Some(factory) = delta_opt {
-        info!("tsens calibration: delta={=f32}°C", factory);
-        println!("TSENS calibration: delta={:.2}°C (from eFuse)", factory);
+        info!("TSENS calibration: delta={=f32}°C (from eFuse)", factory);
     } else {
         info!(
             "tsens calibration: efuse missing -> fallback delta={=f32}°C",
             delta_c
         );
-        println!("TSENS calibration: NO eFuse, using delta=0.0°C");
     }
     delay.delay_ms(200u32);
 
@@ -168,11 +166,6 @@ fn main() -> ! {
         let corrected = reading.base_celsius - delta_c;
         info!(
             "tsens sample: temp={=f32}°C base={=f32}°C raw={=u8} dac=0x{=u8:X}",
-            corrected, reading.base_celsius, reading.raw, reading.dac
-        );
-        // Also print to UART for non-defmt monitoring
-        println!(
-            "Temperature: {:.2}°C (base={:.2}°C, raw={}, dac=0x{:X})",
             corrected, reading.base_celsius, reading.raw, reading.dac
         );
         delay.delay_ms(1000u32);

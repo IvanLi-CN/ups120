@@ -16,11 +16,11 @@ const TSENS_SYS_OFFSET: f32 = 20.52;
 // DAC register value to offset mapping, from ESP-IDF temperature_sensor_periph.c
 // {offset, reg_val, min, max, error}
 const TSENS_DAC_TABLE: &[(u8, i8)] = &[
-    (5, -2),   // 50~125°C
-    (7, -1),   // 20~100°C
-    (15, 0),   // -10~80°C (default)
-    (11, 1),   // -30~50°C
-    (10, 2),   // -40~20°C
+    (5, -2), // 50~125°C
+    (7, -1), // 20~100°C
+    (15, 0), // -10~80°C (default)
+    (11, 1), // -30~50°C
+    (10, 2), // -40~20°C
 ];
 
 #[derive(Clone, Copy, Debug)]
