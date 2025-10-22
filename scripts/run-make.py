@@ -9,7 +9,7 @@ import sys
 import os
 import signal
 from pathlib import Path
-from typing import List, Sequence
+from typing import List, Sequence, Optional
 
 DEFAULT_TIMEOUT = 60
 ROOT = Path(__file__).resolve().parents[1]
@@ -98,6 +98,43 @@ def _build_parser(available_targets: Sequence[str]) -> argparse.ArgumentParser:
     return parser
 
 
+def _detect_default_port() -> Optional[str]:
+    """Best-effort detection of the ESP serial port via `espflash list-ports`.
+
+    Preference order on macOS is /dev/cu.* over /dev/tty.*. On Linux prefer
+    /dev/ttyUSB* or /dev/ttyACM*.
+    """
+    try:
+        out = subprocess.check_output(["espflash", "list-ports"], text=True)
+    except Exception:
+        return None
+
+    ports: List[str] = []
+    for line in out.splitlines():
+        line = line.strip()
+        if line.startswith("/") and "/dev/" in line:
+            # take the path up to first whitespace
+            port = line.split()[0]
+            ports.append(port)
+
+    if not ports:
+        return None
+
+    # macOS preference: /dev/cu.*
+    cu = [p for p in ports if "/dev/cu." in p]
+    if cu:
+        return cu[0]
+
+    # Linux preference: ttyUSB/ttyACM
+    for prefix in ("/dev/ttyUSB", "/dev/ttyACM"):
+        for p in ports:
+            if p.startswith(prefix):
+                return p
+
+    # Fallback to the first detected port
+    return ports[0]
+
+
 def _run_make(target: str, args: Sequence[str], timeout: int) -> int:
     cmd = ["make", target, *args]
     try:
@@ -180,6 +217,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     forwarded_args = list(parsed.command_args)
     if forwarded_args and forwarded_args[0] == "--":
         forwarded_args = forwarded_args[1:]
+
+    # In non-interactive environments, espflash's monitor input may fail.
+    # If the target is `ups-run` and no PORT is provided, auto-detect a port
+    # and add a non-interactive flag to improve robustness.
+    if not sys.stdin.isatty() and target == "ups-run":
+        has_port = any(a.startswith("PORT=") for a in forwarded_args)
+        if not has_port:
+            port = _detect_default_port()
+            if port:
+                forwarded_args = list(forwarded_args) + [f"PORT={port}"]
+        # Only add non-interactive if we have a port to avoid espflash refusing to run
+        has_espflash_args = any(a.startswith("ESPFLASH_ARGS=") for a in forwarded_args)
+        if not has_espflash_args:
+            forwarded_args = list(forwarded_args) + ["ESPFLASH_ARGS=--non-interactive"]
 
     return _run_make(target, forwarded_args, parsed.timeout)
 
