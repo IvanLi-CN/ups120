@@ -95,6 +95,16 @@ pub fn init(delay: &mut Delay) {
 pub fn read_celsius(delay: &mut Delay) -> Reading {
     let regs = esp_hal::peripherals::SENS::regs();
 
+    // Re-assert power before each conversion to match robust sequence
+    regs.sar_tsens_ctrl()
+        .modify(|_, w| w.sar_tsens_dump_out().clear_bit());
+    regs.sar_tsens_ctrl()
+        .modify(|_, w| w.sar_tsens_power_up().set_bit());
+    regs.sar_tsens_ctrl()
+        .modify(|_, w| w.sar_tsens_power_up_force().set_bit());
+    delay.delay_us(500u32);
+
+    // Trigger a one-shot
     regs.sar_tsens_ctrl()
         .modify(|_, w| w.sar_tsens_dump_out().set_bit());
 
@@ -105,7 +115,7 @@ pub fn read_celsius(delay: &mut Delay) -> Reading {
             raw = reg.sar_tsens_out().bits();
             break;
         }
-        delay.delay_us(50u32);
+        delay.delay_us(200u32);
     }
 
     regs.sar_tsens_ctrl()
