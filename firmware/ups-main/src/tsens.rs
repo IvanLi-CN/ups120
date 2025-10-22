@@ -129,8 +129,8 @@ pub fn read_delta_calibration() -> Option<f32> {
     let regs = peripherals::EFUSE::regs();
     let raw_bits = (regs.rd_sys_part1_data4().read().bits() >> 4) & 0x1FF;
     let magnitude = (raw_bits & 0xFF) as i16;
-    let sign = (raw_bits & 0x100) != 0;
-    let signed = if sign { magnitude } else { -magnitude };
+    let sign = (raw_bits & 0x100) != 0; // BIT(8)=1 表示负号（与 IDF LL 一致）
+    let signed = if sign { -magnitude } else { magnitude };
     Some(signed as f32 / 10.0)
 }
 
