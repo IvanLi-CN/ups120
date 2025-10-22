@@ -13,7 +13,15 @@ const TSENS_ADC_FACTOR: f32 = 0.4386;
 const TSENS_DAC_FACTOR: f32 = 27.88;
 const TSENS_SYS_OFFSET: f32 = 20.52;
 
-const TSENS_DAC_TABLE: &[(u8, i8)] = &[(0x05, -2), (0x07, -1), (0x0F, 0), (0x0B, 1), (0x0A, 2)];
+// DAC register value to offset mapping, from ESP-IDF temperature_sensor_periph.c
+// {offset, reg_val, min, max, error}
+const TSENS_DAC_TABLE: &[(u8, i8)] = &[
+    (5, -2),   // 50~125°C
+    (7, -1),   // 20~100°C
+    (15, 0),   // -10~80°C (default)
+    (11, 1),   // -30~50°C
+    (10, 2),   // -40~20°C
+];
 
 #[derive(Clone, Copy, Debug)]
 pub struct Reading {
@@ -59,13 +67,13 @@ pub fn init(delay: &mut Delay) {
     sens.sar_tsens_ctrl()
         .modify(|_, w| w.sar_tsens_dump_out().clear_bit());
 
-    // Enable TSENS analog path (ENT_TSENS) and lock DAC to the standard offset (1 -> -1 LSB).
+    // Enable TSENS analog path (ENT_TSENS) and lock DAC to the required range (-10..80°C => offset=0, code 0x0F).
     unsafe {
         let reg7 = esp_rom_regi2c_read(0x69, 1, 0x07);
         rom_i2c_writeReg(0x69, 1, 0x07, reg7 | (1 << 2));
 
         let reg6_full = esp_rom_regi2c_read(0x69, 1, 0x06);
-        let desired = (reg6_full & !0x0F) | 0x05;
+        let desired = (reg6_full & !0x0F) | 0x0F; // offset=0 → -10..80°C
         if reg6_full != desired {
             rom_i2c_writeReg(0x69, 1, 0x06, desired);
         }
@@ -167,20 +175,22 @@ pub fn read_delta_calibration() -> Option<f32> {
     let sign = (raw_bits & 0x100) != 0; // BIT(8)=1 表示负号（与 IDF LL 一致）
     let signed = if sign { -magnitude } else { magnitude };
     defmt::info!(
-        "tsens.efuse: rd_sys_part1_data4=0x{=u32:X} delta_raw=0x{=u16:X} sign={} mag={=u8}",
+        "tsens.efuse: rd_sys_part1_data4=0x{=u32:X} delta_raw=0x{=u16:X} sign={} mag={=i16} signed={=i16}",
         full,
         raw_bits as u16,
         sign as u8,
-        magnitude as u8
+        magnitude,
+        signed
     );
     Some(signed as f32 / 10.0)
 }
 
 fn dac_offset_from_reg(reg: u8) -> i8 {
-    for &(value, offset) in TSENS_DAC_TABLE {
-        if value == (reg & 0x0F) {
+    for &(reg_val, offset) in TSENS_DAC_TABLE {
+        if reg_val == (reg & 0x0F) {
             return offset;
         }
     }
-    -(reg as i8)
+    // Fallback: should not reach here if DAC is configured correctly
+    0
 }

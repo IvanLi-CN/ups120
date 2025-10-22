@@ -137,14 +137,10 @@ fn main() -> ! {
     println!("SPI LCD: DC10 MOSI11 SCLK12 CS13 RST14");
     println!("Fan: EN39 PWM40; Buzzer: 38 (2kHz)");
 
-    // Bring-up beep: ~12% duty, 200 ms @ 2 kHz
-    buzzer.set_duty(12).ok();
-    delay.delay_ms(200u32);
+    // Keep buzzer and fan idle to avoid affecting die temperature during TSENS validation
     buzzer.set_duty(0).ok();
-
-    // Enable fan at low PWM as a smoke-test (~10%)
-    fan_en.set_high();
-    fan_pwm.set_duty(10).ok();
+    fan_pwm.set_duty(0).ok();
+    fan_en.set_low();
 
     // Probe I2C device (TCA6408A 0x20) — ignore errors during smoke-test
     let _ = i2c.write(0x20u8, &[]);
@@ -157,11 +153,13 @@ fn main() -> ! {
     info!("ups tsens bring-up: sampling once per second");
     if let Some(factory) = delta_opt {
         info!("tsens calibration: delta={=f32}°C", factory);
+        println!("TSENS calibration: delta={:.2}°C (from eFuse)", factory);
     } else {
         info!(
             "tsens calibration: efuse missing -> fallback delta={=f32}°C",
             delta_c
         );
+        println!("TSENS calibration: NO eFuse, using delta=0.0°C");
     }
     delay.delay_ms(200u32);
 
@@ -170,6 +168,11 @@ fn main() -> ! {
         let corrected = reading.base_celsius - delta_c;
         info!(
             "tsens sample: temp={=f32}°C base={=f32}°C raw={=u8} dac=0x{=u8:X}",
+            corrected, reading.base_celsius, reading.raw, reading.dac
+        );
+        // Also print to UART for non-defmt monitoring
+        println!(
+            "Temperature: {:.2}°C (base={:.2}°C, raw={}, dac=0x{:X})",
             corrected, reading.base_celsius, reading.raw, reading.dac
         );
         delay.delay_ms(1000u32);
