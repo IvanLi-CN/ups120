@@ -11,7 +11,7 @@ use esp_hal::{
 
 use crate::tsens;
 
-const SAMPLE_PERIOD_MS: u32 = 500;
+pub const SAMPLE_PERIOD_MS: u32 = 500;
 const LOG_INTERVAL_TICKS: u8 = 4; // 500 ms * 4 = 2 s
 const FILTER_WINDOW: usize = 3;
 
@@ -108,19 +108,17 @@ impl<'a> FanController<'a> {
         }
     }
 
-    pub fn run(mut self, delay: &mut Delay) -> ! {
-        loop {
-            let reading = tsens::read_celsius(delay);
-            let corrected = reading.base_celsius - self.delta_c;
-            let filtered = self.push_sample(corrected);
-            self.filtered_temp = filtered;
-            self.last_reading = Some(reading);
+    pub fn tick(&mut self, delay: &mut Delay) {
+        let reading = tsens::read_celsius(delay);
+        let corrected = reading.base_celsius - self.delta_c;
+        let filtered = self.push_sample(corrected);
+        self.filtered_temp = filtered;
+        self.last_reading = Some(reading);
 
-            self.update_outputs(filtered, &reading);
-            self.maybe_log();
+        self.update_outputs(filtered, &reading);
+        self.maybe_log();
 
-            delay.delay_ms(SAMPLE_PERIOD_MS);
-        }
+        delay.delay_ms(SAMPLE_PERIOD_MS);
     }
 
     fn push_sample(&mut self, value: f32) -> f32 {
