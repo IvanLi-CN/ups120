@@ -7,7 +7,7 @@ DEMO_FEATURES ?=
 DRIVER_PROBE_FLAGS := $(if $(PROBE),--non-interactive --probe $(PROBE),)
 
 .PHONY: help \
-        sb-build sb-run sb-attach sb-reset sb-reset-attach \
+        sb-build sb-run sb-run-ship sb-attach sb-reset sb-reset-attach \
         driver-demo-build driver-demo-run driver-demo-attach driver-demo-reset-attach \
         ups-build ups-run ups-attach ups-ports ups-clean ups-env \
         clean
@@ -16,6 +16,7 @@ help:
 	@echo "Root Makefile"
 	@echo "  sb-build            Build smart-battery firmware"
 	@echo "  sb-run              Flash+run smart-battery"
+	@echo "  sb-run-ship         Flash+run smart-battery (ship-mode feature)"
 	@echo "  sb-attach           Attach to smart-battery"
 	@echo "  sb-reset            Reset smart-battery"
 	@echo "  sb-reset-attach     Reset then attach smart-battery"
@@ -38,6 +39,9 @@ sb-build:
 
 sb-run:
 	$(MAKE) -C firmware/smart-battery run
+
+sb-run-ship:
+	$(MAKE) -C firmware/smart-battery run-ship
 
 sb-attach:
 	$(MAKE) -C firmware/smart-battery attach
