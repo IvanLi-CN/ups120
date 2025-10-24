@@ -19,6 +19,7 @@ embedded-hal-async = "1.0.0"
 embedded-hal-bus = { version = "0.3.0", default-features = false }
 embassy-embedded-hal = "0.3.2"
 sc8815 = { path = "../../sc8815", features = ["defmt"] }
+critical-section = "1.1"
 
 # Esp HAL stack (versions aligned with reference project)
 esp-hal = { version = "1.0.0-rc.1", features = ["esp32s3", "unstable"] }
