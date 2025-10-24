@@ -12,17 +12,39 @@ Requires: Pillow (pip install pillow)
 
 Design rules implemented per docs/software/ui-spec.md:
   - Screen: 160x50, safe margins L/R=4px, T/B=1px
-  - 8x8 mono grid, integer pixel placement
+  - 8x12 mono grid (7x10 glyph + 1px horizontal spacing + 2px leading)
   - Element colors: V=ORANGE, A=RED, W=GREEN
   - Celsius rendered as 'C' with a crisp 2x2 degree dot at y-1
   - 4-row dashboard layout with mode-specific third row
 
 NOTE: This is a host-side renderer to verify layout; not firmware code.
 """
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 
 W, H = 160, 50
 LM, RM, TM, BM = 4, 4, 1, 1  # margins
+CELL_W = 8
+GLYPH_W = 7
+GLYPH_H = 10
+LINE_H = 12
+LABEL_WIDTH_CELLS = 4
+VOLT_WIDTH_CELLS = 5
+CURRENT_WIDTH_CELLS = 4
+POWER_WIDTH_CELLS = 4
+VALUE_GAP_CELLS = 1
+TEMP_LABEL_CELLS = 4
+TEMP_VALUE_CELLS = 4
+AUX_GAP_CELLS = 3
+FAN_LABEL_CELLS = 3
+FAN_VALUE_CELLS = 4
+COL_LABEL = 0
+COL_VOLT = LABEL_WIDTH_CELLS
+COL_CURR = COL_VOLT + VOLT_WIDTH_CELLS + VALUE_GAP_CELLS
+COL_POWER = COL_CURR + CURRENT_WIDTH_CELLS + VALUE_GAP_CELLS
+AUX_TEMP_VALUE_COL = TEMP_LABEL_CELLS
+AUX_FAN_LABEL_COL = TEMP_LABEL_CELLS + TEMP_VALUE_CELLS + AUX_GAP_CELLS
+AUX_FAN_VALUE_COL = AUX_FAN_LABEL_COL + FAN_LABEL_CELLS
+PLACEHOLDER = '--'
 
 # RGB palette approximations of RGB565 values from the spec
 BLACK   = (0, 0, 0)
@@ -49,7 +71,8 @@ PALETTE = {
 def new_canvas():
     img = Image.new('RGB', (W, H), BLACK)
     draw = ImageDraw.Draw(img)
-    return img, draw
+    pixels = img.load()
+    return img, draw, pixels
 
 
 def save_scaled(img: Image.Image, path: str, scale: int = 4) -> None:
@@ -57,75 +80,301 @@ def save_scaled(img: Image.Image, path: str, scale: int = 4) -> None:
     out.save(path)
 
 
-def font_bitmap():
-    # Pillow's built-in bitmap font; crisp, no anti-alias.
-    return ImageFont.load_default()
+def text_width(text: str) -> int:
+    return len(text) * CELL_W
 
 
-def text_size(draw: ImageDraw.ImageDraw, text: str, font) -> tuple[int, int]:
-    # Consistent text size across Pillow versions
-    try:
-        # Pillow >=10
-        w = int(font.getlength(text))
-        h = font.getbbox(text)[3]
-        return w, h
-    except Exception:
-        return draw.textsize(text, font=font)
+# 7x10 glyph bitmaps copied from firmware (binary -> int)
+GLYPHS: dict[str, list[int]] = {
+    ' ': [
+        0b0000000, 0b0000000, 0b0000000, 0b0000000, 0b0000000,
+        0b0000000, 0b0000000, 0b0000000, 0b0000000, 0b0000000,
+    ],
+    '%': [
+        0b1110000, 0b1110001, 0b1110001, 0b0000110, 0b0001000,
+        0b0001000, 0b0110000, 0b1000111, 0b1000111, 0b0000111,
+    ],
+    '-': [
+        0b0000000, 0b0000000, 0b0000000, 0b0000000, 0b0111110,
+        0b0111110, 0b0000000, 0b0000000, 0b0000000, 0b0000000,
+    ],
+    '.': [
+        0b0000000, 0b0000000, 0b0000000, 0b0000000, 0b0000000,
+        0b0000000, 0b0000000, 0b0001000, 0b0001000, 0b0001000,
+    ],
+    '0': [
+        0b0111110, 0b1000001, 0b1000001, 0b1000111, 0b1001001,
+        0b1001001, 0b1110001, 0b1000001, 0b1000001, 0b0111110,
+    ],
+    '1': [
+        0b0001000, 0b0111000, 0b0111000, 0b0001000, 0b0001000,
+        0b0001000, 0b0001000, 0b0001000, 0b0001000, 0b0111110,
+    ],
+    '2': [
+        0b0111110, 0b1000001, 0b1000001, 0b0000001, 0b0000110,
+        0b0000110, 0b0001000, 0b0110000, 0b0110000, 0b1111111,
+    ],
+    '3': [
+        0b1111110, 0b0000001, 0b0000001, 0b0000001, 0b0111110,
+        0b0111110, 0b0000001, 0b0000001, 0b0000001, 0b1111110,
+    ],
+    '4': [
+        0b0000110, 0b0001110, 0b0001110, 0b0110110, 0b1000110,
+        0b1000110, 0b1111111, 0b0000110, 0b0000110, 0b0000110,
+    ],
+    '5': [
+        0b1111111, 0b1000000, 0b1000000, 0b1111110, 0b0000001,
+        0b0000001, 0b0000001, 0b1000001, 0b1000001, 0b0111110,
+    ],
+    '6': [
+        0b0001110, 0b0110000, 0b0110000, 0b1000000, 0b1111110,
+        0b1111110, 0b1000001, 0b1000001, 0b1000001, 0b0111110,
+    ],
+    '7': [
+        0b1111111, 0b0000001, 0b0000001, 0b0000110, 0b0001000,
+        0b0001000, 0b0110000, 0b0110000, 0b0110000, 0b0110000,
+    ],
+    '8': [
+        0b0111110, 0b1000001, 0b1000001, 0b1000001, 0b0111110,
+        0b0111110, 0b1000001, 0b1000001, 0b1000001, 0b0111110,
+    ],
+    '9': [
+        0b0111110, 0b1000001, 0b1000001, 0b1000001, 0b0111111,
+        0b0111111, 0b0000001, 0b0000110, 0b0000110, 0b0111000,
+    ],
+    ':': [
+        0b0000000, 0b0001000, 0b0001000, 0b0001000, 0b0000000,
+        0b0000000, 0b0001000, 0b0001000, 0b0001000, 0b0000000,
+    ],
+    'A': [
+        0b0111110, 0b1000001, 0b1000001, 0b1000001, 0b1111111,
+        0b1111111, 0b1000001, 0b1000001, 0b1000001, 0b1000001,
+    ],
+    'B': [
+        0b1111110, 0b1000001, 0b1000001, 0b1000001, 0b1111110,
+        0b1111110, 0b1000001, 0b1000001, 0b1000001, 0b1111110,
+    ],
+    'C': [
+        0b0111110, 0b1000001, 0b1000001, 0b1000000, 0b1000000,
+        0b1000000, 0b1000000, 0b1000001, 0b1000001, 0b0111110,
+    ],
+    'D': [
+        0b1111000, 0b1000110, 0b1000110, 0b1000001, 0b1000001,
+        0b1000001, 0b1000001, 0b1000110, 0b1000110, 0b1111000,
+    ],
+    'E': [
+        0b1111111, 0b1000000, 0b1000000, 0b1000000, 0b1111110,
+        0b1111110, 0b1000000, 0b1000000, 0b1000000, 0b1111111,
+    ],
+    'F': [
+        0b1111111, 0b1000000, 0b1000000, 0b1000000, 0b1111110,
+        0b1111110, 0b1000000, 0b1000000, 0b1000000, 0b1000000,
+    ],
+    'G': [
+        0b0111110, 0b1000001, 0b1000001, 0b1000000, 0b1001111,
+        0b1001111, 0b1000001, 0b1000001, 0b1000001, 0b0111110,
+    ],
+    'H': [
+        0b1000001, 0b1000001, 0b1000001, 0b1000001, 0b1111111,
+        0b1111111, 0b1000001, 0b1000001, 0b1000001, 0b1000001,
+    ],
+    'I': [
+        0b0111110, 0b0001000, 0b0001000, 0b0001000, 0b0001000,
+        0b0001000, 0b0001000, 0b0001000, 0b0001000, 0b0111110,
+    ],
+    'L': [
+        0b1000000, 0b1000000, 0b1000000, 0b1000000, 0b1000000,
+        0b1000000, 0b1000000, 0b1000000, 0b1000000, 0b1111111,
+    ],
+    'M': [
+        0b1000001, 0b1110111, 0b1110111, 0b1001001, 0b1001001,
+        0b1001001, 0b1000001, 0b1000001, 0b1000001, 0b1000001,
+    ],
+    'N': [
+        0b1000001, 0b1000001, 0b1000001, 0b1110001, 0b1001001,
+        0b1001001, 0b1000111, 0b1000001, 0b1000001, 0b1000001,
+    ],
+    'O': [
+        0b0111110, 0b1000001, 0b1000001, 0b1000001, 0b1000001,
+        0b1000001, 0b1000001, 0b1000001, 0b1000001, 0b0111110,
+    ],
+    'P': [
+        0b1111110, 0b1000001, 0b1000001, 0b1000001, 0b1111110,
+        0b1111110, 0b1000000, 0b1000000, 0b1000000, 0b1000000,
+    ],
+    'R': [
+        0b1111110, 0b1000001, 0b1000001, 0b1000001, 0b1111110,
+        0b1111110, 0b1001000, 0b1000110, 0b1000110, 0b1000001,
+    ],
+    'S': [
+        0b0111111, 0b1000000, 0b1000000, 0b1000000, 0b0111110,
+        0b0111110, 0b0000001, 0b0000001, 0b0000001, 0b1111110,
+    ],
+    'T': [
+        0b1111111, 0b0001000, 0b0001000, 0b0001000, 0b0001000,
+        0b0001000, 0b0001000, 0b0001000, 0b0001000, 0b0001000,
+    ],
+    'U': [
+        0b1000001, 0b1000001, 0b1000001, 0b1000001, 0b1000001,
+        0b1000001, 0b1000001, 0b1000001, 0b1000001, 0b0111110,
+    ],
+    'V': [
+        0b1000001, 0b1000001, 0b1000001, 0b1000001, 0b1000001,
+        0b1000001, 0b0110110, 0b0110110, 0b0110110, 0b0001000,
+    ],
+    'W': [
+        0b1000001, 0b1000001, 0b1000001, 0b1001001, 0b1001001,
+        0b1001001, 0b1001001, 0b1110111, 0b1110111, 0b1000001,
+    ],
+    'Y': [
+        0b1000001, 0b1000001, 0b1000001, 0b0110110, 0b0001000,
+        0b0001000, 0b0001000, 0b0001000, 0b0001000, 0b0001000,
+    ],
+}
 
 
-def draw_text(draw: ImageDraw.ImageDraw, x: int, y: int, text: str, color, font) -> int:
-    draw.text((x, y), text, fill=color, font=font)
-    w, _ = text_size(draw, text, font)
-    return x + w
+def normalize_char(ch: str) -> str:
+    if 'a' <= ch <= 'z':
+        return chr(ord(ch) - 32)
+    return ch
 
 
-def draw_celsius(draw: ImageDraw.ImageDraw, x: int, y: int, temp_str: str, color, font) -> int:
-    """
-    Draws e.g. "32℃" as: '32' + small degree dot + 'C'
-    degree dot: 2x2 px square placed 3 px left of 'C' and at y-1.
-    """
-    # Split numeric part and literal 'C'
-    assert temp_str.endswith('C')
-    num = temp_str[:-1]
-    x = draw_text(draw, x, y, num, color, font)
-    # measure width of 'C' to know its placement (for consistency)
-    c_w, c_h = text_size(draw, 'C', font)
-    # The 'C' will start at x
-    # Draw 2x2 square degree dot 3 px left of 'C' and y-1
-    deg_x = max(LM, x - 3)
-    deg_y = max(TM, y - 1)
-    draw.rectangle((deg_x, deg_y, deg_x + 1, deg_y + 1), fill=color)
-    # Now draw 'C'
-    x = draw_text(draw, x, y, 'C', color, font)
+def draw_char(pixels, x: int, y: int, ch: str, color) -> int:
+    ch = normalize_char(ch)
+    pattern = GLYPHS.get(ch)
+    if pattern is None:
+        # fallback: 1px outline box
+        for rx in range(GLYPH_W):
+            for ry in range(GLYPH_H):
+                if pixels is None:
+                    continue
+                draw_pixel = (
+                    ry == 0 or ry == GLYPH_H - 1 or rx == 0 or rx == GLYPH_W - 1
+                )
+                if draw_pixel:
+                    px = x + rx
+                    py = y + ry
+                    if 0 <= px < W and 0 <= py < H:
+                        pixels[px, py] = color
+        return x + CELL_W
+
+    for ry, row in enumerate(pattern):
+        mask = 1 << (GLYPH_W - 1)
+        for rx in range(GLYPH_W):
+            if row & mask:
+                if pixels is not None:
+                    px = x + rx
+                    py = y + ry
+                    if 0 <= px < W and 0 <= py < H:
+                        pixels[px, py] = color
+            mask >>= 1
+    return x + CELL_W
+
+
+def draw_text(pixels, x: int, y: int, text: str, color) -> int:
+    for ch in text:
+        x = draw_char(pixels, x, y, ch, color)
     return x
 
 
-def hline(draw: ImageDraw.ImageDraw, x0: int, x1: int, y: int, color) -> None:
-    draw.line((x0, y, x1, y), fill=color)
+def cell_to_x(cell: int) -> int:
+    return LM + cell * CELL_W
+
+
+def draw_value_right(pixels, col_start: int, width_cells: int, y: int, text: str, color) -> int:
+    text_cells = len(text)
+    start_cell = col_start if text_cells >= width_cells else col_start + (width_cells - text_cells)
+    x = cell_to_x(start_cell)
+    return draw_text(pixels, x, y, text, color)
+
+
+def fmt_voltage(mv: int) -> str:
+    clamped = min(mv, 99_990)
+    v_tenths = (clamped + 50) // 100
+    whole = v_tenths // 10
+    if whole >= 100:
+        return '>99V'
+    frac = v_tenths % 10
+    if whole >= 10:
+        return f'{whole:02}.{frac}V'
+    hundredths = ((clamped + 5) // 10) % 10
+    return f'{whole}.{frac}{hundredths}V'
+
+
+def fmt_current(ma: int) -> str:
+    clamped = min(ma, 99_900)
+    if clamped >= 10_000:
+        amps = (clamped + 500) // 1000
+        if amps >= 100:
+            return '>99A'
+        return f'{amps:>3}A'
+    a_tenths = (clamped + 50) // 100
+    whole = a_tenths // 10
+    frac = a_tenths % 10
+    return f'{whole}.{frac}A'
+
+
+def fmt_power(mw: int) -> str:
+    watts = (mw + 500) // 1000
+    if watts > 999:
+        return '999W'
+    return f'{watts:>3}W'
+
+
+def fmt_soc(pct: int) -> str:
+    return f'{min(pct, 100):>3}%'
+
+
+def fmt_idle(secs: int) -> str:
+    d = secs // 86400
+    h = (secs % 86400) // 3600
+    m = (secs % 3600) // 60
+    return f'{d:02}D{h:02}:{m:02}'
+
+
+def fmt_temp_digits(c: int) -> str:
+    capped = max(-99, min(199, c))
+    return f'{capped}'
+
+
+def fmt_fan(pct: int) -> str:
+    return f'{min(pct, 100):>3}%'
+
+
+def draw_celsius(pixels, x: int, y: int, digits: str, color) -> int:
+    x = draw_text(pixels, x, y, digits, color)
+    deg_x = max(LM, x - 3)
+    deg_y = max(TM, y - 1)
+    if pixels is not None:
+        for dx in range(2):
+            for dy in range(2):
+                px = deg_x + dx
+                py = deg_y + dy
+                if 0 <= px < W and 0 <= py < H:
+                    pixels[px, py] = color
+    x = draw_char(pixels, x, y, 'C', color)
+    return x
 
 
 def draw_boot() -> Image.Image:
-    img, draw = new_canvas()
-    f = font_bitmap()
+    img, draw, pixels = new_canvas()
 
     # Title centered (row 1)
     title = 'UPS120'
-    tw, th = text_size(draw, title, f)
-    tx = (W - tw) // 2
-    ty = TM + 0  # first row
-    draw_text(draw, tx, ty, title, WHITE, f)
+    tx = (W - text_width(title)) // 2
+    ty = TM  # first row baseline
+    draw_text(pixels, tx, ty, title, WHITE)
 
     # Subtitle (row 2, gray)
-    sub = 'System Boot'
-    sw, sh = text_size(draw, sub, f)
-    sx = (W - sw) // 2
-    sy = ty + 10  # bitmap font height ~8-10, add small gap
-    draw_text(draw, sx, sy, sub, GRAY, f)
+    sub = 'SYSTEM BOOT'
+    sx = (W - text_width(sub)) // 2
+    sy = ty + LINE_H
+    draw_text(pixels, sx, sy, sub, GRAY)
 
     # Progress bar (center-ish), 152x8 per spec, margin respected
     pb_w, pb_h = 152, 8
     pb_x = (W - pb_w) // 2
-    pb_y = H - BM - pb_h - 8  # keep gap above bottom line for status
+    pb_y = H - BM - pb_h - LINE_H // 2  # keep gap above bottom line for status
     # frame
     draw.rectangle((pb_x, pb_y, pb_x + pb_w - 1, pb_y + pb_h - 1), outline=GRAY)
     # fill to 72%
@@ -134,120 +383,99 @@ def draw_boot() -> Image.Image:
     draw.rectangle((pb_x + 1, pb_y + 1, pb_x + 1 + fill_w - 1, pb_y + pb_h - 2), fill=GREEN)
 
     # Status above the bar (no overlap)
-    status = f'Init SC8815  {pct}%'
-    sw, _ = text_size(draw, status, f)
+    status = f'INIT SC8815  {pct}%'
+    sw = text_width(status)
     sx = max(LM, (W - sw) // 2)
-    draw_text(draw, sx, pb_y - 10, status, CYAN, f)
+    draw_text(pixels, sx, pb_y - LINE_H, status, CYAN)
 
     return img
 
 
-def right_text(draw: ImageDraw.ImageDraw, text: str, y: int, color, font) -> int:
-    w, _ = text_size(draw, text, font)
-    x = W - RM - w
-    draw_text(draw, x, y, text, color, font)
+def right_text(pixels, text: str, y: int, color) -> int:
+    x = W - RM - text_width(text)
+    draw_text(pixels, x, y, text, color)
     return x
 
 
-def draw_dashboard(mode: str) -> Image.Image:
-    assert mode in ('Discharge', 'Charge', 'Standby')
-    img, draw = new_canvas()
-    f = font_bitmap()
+def draw_trio_line(pixels, y: int, label: str, v: str, a: str, w: str) -> None:
+    draw_text(pixels, cell_to_x(COL_LABEL), y, label, CYAN)
+    volt_color = GRAY if v == PLACEHOLDER else ORANGE
+    curr_color = GRAY if a == PLACEHOLDER else RED
+    power_color = GRAY if w == PLACEHOLDER else GREEN
+    draw_value_right(pixels, COL_VOLT, VOLT_WIDTH_CELLS, y, v, volt_color)
+    draw_value_right(pixels, COL_CURR, CURRENT_WIDTH_CELLS, y, a, curr_color)
+    draw_value_right(pixels, COL_POWER, POWER_WIDTH_CELLS, y, w, power_color)
 
-    # Row topology (8px grid from top, starting at y=1)
-    row_y = [TM + i * 8 for i in range(4)]
+
+def draw_aux_line(pixels, y: int, temp_label: str, temp_c: int, fan_pct: int) -> None:
+    draw_text(pixels, cell_to_x(COL_LABEL), y, temp_label, CYAN)
+    digits = fmt_temp_digits(temp_c)
+    total_cells = len(digits) + 1
+    start_cell = AUX_TEMP_VALUE_COL if total_cells >= TEMP_VALUE_CELLS else AUX_TEMP_VALUE_COL + (TEMP_VALUE_CELLS - total_cells)
+    draw_celsius(pixels, cell_to_x(start_cell), y, digits, WHITE)
+    draw_text(pixels, cell_to_x(AUX_FAN_LABEL_COL), y, 'FAN', CYAN)
+    fan_text = fmt_fan(fan_pct)
+    draw_value_right(pixels, AUX_FAN_VALUE_COL, FAN_VALUE_CELLS, y, fan_text, WHITE)
+
+
+def draw_dashboard(mode: str, temp_slot: str) -> Image.Image:
+    assert mode in ('Discharge', 'Charge', 'Standby')
+    assert temp_slot in ('BAT', 'UPS')
+    img, draw, pixels = new_canvas()
+
+    # Row topology (12px line height from top, starting at y=1)
+    row_y = [TM + i * LINE_H for i in range(4)]
 
     # Row 1: MODE left, SoC right
     mode_color = {'Charge': CYAN, 'Discharge': WHITE, 'Standby': GRAY}[mode]
-    draw_text(draw, LM, row_y[0], f'MODE: {mode}', mode_color, f)
-    right_text(draw, '85%', row_y[0], WHITE, f)
+    draw_text(pixels, LM, row_y[0], f'MODE: {mode.upper()}', mode_color)
+    soc = fmt_soc(85)
+    right_text(pixels, soc, row_y[0], WHITE)
 
     # Row 2: IN V/A/W
-    x = LM
-    x = draw_text(draw, x, row_y[1], 'IN ', CYAN, f)
-    x = draw_text(draw, x, row_y[1], '48.0V', ORANGE, f)
-    x = draw_text(draw, x, row_y[1], ' ', WHITE, f)
-    x = draw_text(draw, x, row_y[1], '2.5A', RED, f)
-    x = draw_text(draw, x, row_y[1], ' ', WHITE, f)
-    x = draw_text(draw, x, row_y[1], '120W', GREEN, f)
+    draw_trio_line(
+        pixels,
+        row_y[1],
+        'IN',
+        fmt_voltage(48_000),
+        fmt_current(2_500),
+        fmt_power(120_000),
+    )
 
     # Row 3: depends on mode
+    temp_label = temp_slot
+    temp_value = 32 if temp_slot == 'BAT' else 36
     if mode == 'Discharge':
-        x = LM
-        x = draw_text(draw, x, row_y[2], 'OUT ', CYAN, f)
-        x = draw_text(draw, x, row_y[2], '48.0V', ORANGE, f)
-        x = draw_text(draw, x, row_y[2], ' ', WHITE, f)
-        x = draw_text(draw, x, row_y[2], '2.0A', RED, f)
-        x = draw_text(draw, x, row_y[2], ' ', WHITE, f)
-        x = draw_text(draw, x, row_y[2], '100W', GREEN, f)
+        draw_trio_line(
+            pixels,
+            row_y[2],
+            'OUT',
+            fmt_voltage(48_000),
+            fmt_current(2_000),
+            fmt_power(100_000),
+        )
     elif mode == 'Charge':
-        x = LM
-        x = draw_text(draw, x, row_y[2], 'CHG ', CYAN, f)
-        x = draw_text(draw, x, row_y[2], '80W', GREEN, f)
+        draw_trio_line(
+            pixels,
+            row_y[2],
+            'CHG',
+            PLACEHOLDER,
+            PLACEHOLDER,
+            fmt_power(80_000),
+        )
     else:  # Standby
-        x = LM
-        x = draw_text(draw, x, row_y[2], 'IDLE ', CYAN, f)
-        x = draw_text(draw, x, row_y[2], '01d02:03', WHITE, f)
+        draw_trio_line(
+            pixels,
+            row_y[2],
+            'IDLE',
+            fmt_idle(1 * 86_400 + 2 * 3_600 + 3 * 60),
+            PLACEHOLDER,
+            PLACEHOLDER,
+        )
 
-    # Row 4: temps + fan. Use flexible spacing to avoid overflow
-    # Compose segment images to measure widths
-    def seg_text(text, color):
-        return text, color
+    # Row 4: temperature (single slot) + fan
+    draw_aux_line(pixels, row_y[3], temp_label, temp_value, 45)
 
-    segs = [
-        seg_text('BAT ', CYAN),
-        seg_text('32C', WHITE),  # we'll draw degree dot before 'C'
-        seg_text('    ', WHITE),
-        seg_text('UPS ', CYAN),
-        seg_text('36C', WHITE),
-        seg_text('    ', WHITE),
-        seg_text('FAN ', CYAN),
-        seg_text('45%', WHITE),
-    ]
-
-    # Measure total width, then compress padding if needed
-    # Build a function to render with a given spacer width
-    def render_row4(spaces: int) -> None:
-        x = LM
-        # BAT
-        x = draw_text(draw, x, row_y[3], 'BAT ', CYAN, f)
-        x = draw_celsius(draw, x, row_y[3], '32C', WHITE, f)
-        x = draw_text(draw, x, row_y[3], ' ' * spaces, WHITE, f)
-        # UPS
-        x = draw_text(draw, x, row_y[3], 'UPS ', CYAN, f)
-        x = draw_celsius(draw, x, row_y[3], '36C', WHITE, f)
-        x = draw_text(draw, x, row_y[3], ' ' * spaces, WHITE, f)
-        # FAN
-        x = draw_text(draw, x, row_y[3], 'FAN ', CYAN, f)
-        x = draw_text(draw, x, row_y[3], '45%', WHITE, f)
-        # Nothing else; rely on margins
-
-    # Try with 4 spaces, fallback to fewer if needed
-    for spaces in (4, 3, 2, 1):
-        test_img, test_draw = new_canvas()
-        # dry run: compute width by drawing onto a temp image and getting last x
-        x = LM
-        x += text_size(test_draw, 'BAT ', f)[0]
-        x += text_size(test_draw, '32', f)[0]
-        # degree dot + 'C' adds roughly 3 px + width('C')
-        x += 3 + text_size(test_draw, 'C', f)[0]
-        x += text_size(test_draw, ' ' * spaces, f)[0]
-        x += text_size(test_draw, 'UPS ', f)[0]
-        x += text_size(test_draw, '36', f)[0]
-        x += 3 + text_size(test_draw, 'C', f)[0]
-        x += text_size(test_draw, ' ' * spaces, f)[0]
-        x += text_size(test_draw, 'FAN ', f)[0]
-        x += text_size(test_draw, '45%', f)[0]
-        if x <= W - RM:
-            # draw on real
-            render_row4(spaces)
-            break
-    else:
-        # ultimate fallback: no spaces
-        render_row4(1)
-
-    # Simple validation: ensure no pixel drawn beyond bounds by verifying last characters would fit
-    # (A stricter draw-time validator would require a DrawTarget abstraction; keep it simple here.)
     return img
 
 
@@ -257,12 +485,12 @@ def main():
     save_scaled(boot_img, 'boot.png')
 
     # Dashboards
-    for mode, name in (
-        ('Discharge', 'dashboard-discharge.png'),
-        ('Charge', 'dashboard-charge.png'),
-        ('Standby', 'dashboard-standby.png'),
+    for mode, temp_slot, name in (
+        ('Discharge', 'BAT', 'dashboard-discharge.png'),
+        ('Charge', 'UPS', 'dashboard-charge.png'),
+        ('Standby', 'BAT', 'dashboard-standby.png'),
     ):
-        img = draw_dashboard(mode)
+        img = draw_dashboard(mode, temp_slot)
         save_scaled(img, name)
 
     print('Generated: boot.png, dashboard-*.png')
@@ -270,4 +498,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
