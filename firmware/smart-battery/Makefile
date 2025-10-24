@@ -35,7 +35,7 @@ PROBE := probe-rs
 # 开发阶段按需打印信息，默认使用 info 级别（可通过环境变量覆盖）。
 DEFMT_LOG ?= info
 
-.PHONY: all build run attach reset reset-attach clean info run-force
+.PHONY: all build run run-ship attach reset reset-attach clean info run-force
 
 all: build
 
@@ -57,6 +57,9 @@ build:
 # Flash and run (prints defmt logs via probe-rs)
 run:
 	DEFMT_LOG=$(DEFMT_LOG) CARGO_TARGET_DIR=$(TARGET_DIR) $(CARGO) run --release $(CARGO_TARGET_FLAGS) --manifest-path $(CRATE_DIR)/Cargo.toml
+
+run-ship:
+	DEFMT_LOG=$(DEFMT_LOG) CARGO_TARGET_DIR=$(TARGET_DIR) $(CARGO) run --release $(CARGO_TARGET_FLAGS) --manifest-path $(CRATE_DIR)/Cargo.toml --features ship-mode
 
 # Force rebuild before flashing (useful when cache is suspicious)
 run-force: clean run

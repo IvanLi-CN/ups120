@@ -1,3 +1,5 @@
+#![cfg_attr(feature = "ship-mode", allow(dead_code))]
+
 use core::sync::atomic::{AtomicBool, Ordering};
 use defmt::*;
 
