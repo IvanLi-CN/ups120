@@ -7,6 +7,7 @@ Cargo.lock
 
 .DS_Store
 *.FCBak
+*.bak
 
 # Node.js dependencies
 node_modules/
