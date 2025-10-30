@@ -38,3 +38,4 @@ The schematic netlist exported from EasyEDA lives in `netlist_battery.enet`. Eac
 - `README.md` - High-level description of the smart battery PCB (this file).
 - `netlist_battery.enet` - EasyEDA JSON netlist for the smart battery design.
 - `tps62933_enable_control.md` - Notes about the TPS62933 enable and power-sequencing logic.
+- `vbats_cutoff_calibration.md` - SC8815 VBATS divider hardware plus 18 V charge-cutoff calibration procedure.
