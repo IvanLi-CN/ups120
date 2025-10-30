@@ -4,6 +4,7 @@ logs/
 Cargo.lock
 
 /.idea
+.serena/
 
 .DS_Store
 *.FCBak
