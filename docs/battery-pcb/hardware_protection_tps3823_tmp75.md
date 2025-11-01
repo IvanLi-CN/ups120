@@ -70,8 +70,8 @@
 思路是使用第一颗 NAND 生成 `FAULT_LATCH`，随后用单级反相器得到 `SAFE_OK = \lnot FAULT_LATCH = WD_RST_N · TEMP_ALERT_N`，最后再用第二颗 NAND 组合 `SAFE_OK` 与 `PSTOP_MCU`，输出 `PSTOP_CTL = SAFE_OK · PSTOP_MCU`。
 
 推荐选型：
-- 施密特 NAND 使用 `nand_gate_options_youxin.md` 中的 SN74LVC2G132DCUR（双路施密特输入，推挽输出）。
-- 反相器使用 `single_inverter_options.md` 中的 SN74LVC1G14DBVR（施密特输入，SOT-23-5）。
+- 施密特 NAND 使用 [`component-candidates/nand_gate_options_youxin.md`](component-candidates/nand_gate_options_youxin.md) 中的 SN74LVC2G132DCUR（双路施密特输入，推挽输出）。
+- 反相器使用 [`component-candidates/single_inverter_options.md`](component-candidates/single_inverter_options.md) 中的 SN74LVC1G14DBVR（施密特输入，SOT-23-5）。
 
 ```
 WD_RST_N ─┐
@@ -99,8 +99,8 @@ PSTOP_MCU ───────────────────────�
 在维持第一颗 NAND 生成 `FAULT_LATCH` 的同时，直接使用三输入与门计算 `PSTOP_CTL = WD_RST_N · TEMP_ALERT_N · PSTOP_MCU`。这样省去了单独的反相器，逻辑结构更加直接。
 
 推荐选型：
-- 施密特 NAND 选用 `schmitt_trigger_nand_options.md` 中的 74AUP1G00（全输入施密特迟滞，低功耗）。
-- 三输入与门选用 `three_input_and_gate_options_youxin.md` 中的 SN74LVC1G11DCKR（单门 3 输入，SC-70-6）。
+- 施密特 NAND 选用 [`component-candidates/schmitt_trigger_nand_options.md`](component-candidates/schmitt_trigger_nand_options.md) 中的 74AUP1G00（全输入施密特迟滞，低功耗）。
+- 三输入与门选用 [`component-candidates/three_input_and_gate_options_youxin.md`](component-candidates/three_input_and_gate_options_youxin.md) 中的 SN74LVC1G11DCKR（单门 3 输入，SC-70-6）。
 
 ```
 WD_RST_N ─┐                 ┌─────────> 三输入与门 ──> PSTOP_CTL ─> BOARD_INV → PSTOP
@@ -129,9 +129,9 @@ PSTOP_MCU ───────────────────────�
 此方案把故障检测与 MCU 请求统一成“停机请求”再反相：先用 NAND 得到 `FAULT_LATCH`，再将 `FAULT_LATCH` 与 `MCU_STOP = \lnot PSTOP_MCU` 经由两输入或门级联求和（两级或门即可覆盖三路条件），得到 `STOP_REQUEST = FAULT_LATCH + MCU_STOP`，最后使用单路施密特反相器生成 `PSTOP_CTL = \lnot STOP_REQUEST`。
 
 推荐选型：
-- 施密特 NAND：SN74LVC2G132DCUR（`nand_gate_options_youxin.md`）。
-- 两输入或门：74LVC1G32GV,125（`or_gate_options_youxin.md`）。
-- 反相器：SN74LVC1G14DBVR（`single_inverter_options.md`）。
+- 施密特 NAND：SN74LVC2G132DCUR（[`component-candidates/nand_gate_options_youxin.md`](component-candidates/nand_gate_options_youxin.md)）。
+- 两输入或门：74LVC1G32GV,125（[`component-candidates/or_gate_options_youxin.md`](component-candidates/or_gate_options_youxin.md)）。
+- 反相器：SN74LVC1G14DBVR（[`component-candidates/single_inverter_options.md`](component-candidates/single_inverter_options.md)）。
 
 ```
 WD_RST_N ─┐
@@ -214,9 +214,9 @@ PSTOP_MCU ────────────────► AND   │──►
 
 ## 5. 方案成本评估
 
-- **方案 A**（双 NAND + 反相器）：SN74LVC2G132DCUR 约 ¥0.91/片（`nand_gate_options_youxin.md`），SN74LVC1G14DBVR 约 ¥0.14/片（`single_inverter_options.md`），合计约 ¥1.05。  
-- **方案 B**（NAND + 三输入与门）：74AUP1G00 系列约 ¥0.49/片（`schmitt_trigger_nand_options.md`），SN74LVC1G11DCKR 约 ¥0.19/片（`three_input_and_gate_options_youxin.md`），合计约 ¥0.68。  
-- **方案 C**（NAND + 或门 + 反相器）：SN74LVC2G132DCUR 约 ¥0.91/片（`nand_gate_options_youxin.md`），74LVC1G32GV,125 约 ¥0.27/片（`or_gate_options_youxin.md`），SN74LVC1G14DBVR 约 ¥0.14/片（`single_inverter_options.md`），合计约 ¥1.32。  
+- **方案 A**（双 NAND + 反相器）：SN74LVC2G132DCUR 约 ¥0.91/片（[`component-candidates/nand_gate_options_youxin.md`](component-candidates/nand_gate_options_youxin.md)），SN74LVC1G14DBVR 约 ¥0.14/片（[`component-candidates/single_inverter_options.md`](component-candidates/single_inverter_options.md)），合计约 ¥1.05。  
+- **方案 B**（NAND + 三输入与门）：74AUP1G00 系列约 ¥0.49/片（[`component-candidates/schmitt_trigger_nand_options.md`](component-candidates/schmitt_trigger_nand_options.md)），SN74LVC1G11DCKR 约 ¥0.19/片（[`component-candidates/three_input_and_gate_options_youxin.md`](component-candidates/three_input_and_gate_options_youxin.md)），合计约 ¥0.68。  
+- **方案 C**（NAND + 或门 + 反相器）：SN74LVC2G132DCUR 约 ¥0.91/片（[`component-candidates/nand_gate_options_youxin.md`](component-candidates/nand_gate_options_youxin.md)），74LVC1G32GV,125 约 ¥0.27/片（[`component-candidates/or_gate_options_youxin.md`](component-candidates/or_gate_options_youxin.md)），SN74LVC1G14DBVR 约 ¥0.14/片（[`component-candidates/single_inverter_options.md`](component-candidates/single_inverter_options.md)），合计约 ¥1.32。  
 
 ## 6. 实施决策
 
@@ -232,5 +232,5 @@ PSTOP_MCU ────────────────► AND   │──►
 [1]: https://www.ti.com/lit/ds/symlink/tps3823.pdf  
 [2]: https://www.ti.com/lit/ds/symlink/tmp75.pdf  
 [3]: https://www.ti.com/lit/gpn/bq76920  
-[4]: `firmware/smart-battery/SOFTWARE_DESIGN.md` 章节 2 及公司内部原理图记录
-[^nand-price]: `docs/battery-pcb/schmitt_trigger_nand_options.md` 记录了多款单路施密特 NAND（74AUP1G00、SN74AHC1G00 等）参数，需在采购阶段确认实际单价后填入。
+[4]: [`firmware/smart-battery/SOFTWARE_DESIGN.md`](../../firmware/smart-battery/SOFTWARE_DESIGN.md) 章节 2 及公司内部原理图记录
+[^nand-price]: [`component-candidates/schmitt_trigger_nand_options.md`](component-candidates/schmitt_trigger_nand_options.md) 记录了多款单路施密特 NAND（74AUP1G00、SN74AHC1G00 等）参数，需在采购阶段确认实际单价后填入。

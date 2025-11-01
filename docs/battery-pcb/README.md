@@ -35,7 +35,10 @@ The schematic netlist exported from EasyEDA lives in `netlist_battery.enet`. Eac
 
 ## Directory Layout
 
-- `README.md` - High-level description of the smart battery PCB (this file).
-- `netlist_battery.enet` - EasyEDA JSON netlist for the smart battery design.
-- `tps62933_enable_control.md` - Notes about the TPS62933 enable and power-sequencing logic.
-- `vbats_cutoff_calibration.md` - SC8815 VBATS divider hardware plus 18 V charge-cutoff calibration procedure.
+- [`README.md`](README.md) - High-level description of the smart battery PCB (this file).
+- [`netlist_battery.enet`](netlist_battery.enet) - EasyEDA JSON netlist for the smart battery design.
+- [`tps62933_enable_control.md`](tps62933_enable_control.md) - Notes about the TPS62933 enable and power-sequencing logic.
+- [`vbats_cutoff_calibration.md`](vbats_cutoff_calibration.md) - SC8815 VBATS divider hardware plus 18 V charge-cutoff calibration procedure.
+- [`hardware_protection_tps3823_tmp75.md`](hardware_protection_tps3823_tmp75.md) - Consolidated hardware fault-chain design notes (final build uses scheme D: TMP75 + MCU AND gating).
+- [`battery_temp_sensing.md`](battery_temp_sensing.md) - Analog temperature sensing topology for the pack.
+- [`component-candidates/`](component-candidates) - Sourcing digests and option tables ([`schmitt_trigger_nand_options.md`](component-candidates/schmitt_trigger_nand_options.md), [`nand_gate_options_youxin.md`](component-candidates/nand_gate_options_youxin.md), [`or_gate_options_youxin.md`](component-candidates/or_gate_options_youxin.md), [`single_inverter_options.md`](component-candidates/single_inverter_options.md), [`three_input_and_gate_options_youxin.md`](component-candidates/three_input_and_gate_options_youxin.md), [`temperature_protection_tmp.md`](component-candidates/temperature_protection_tmp.md), [`watchdog_pricing_taobao.md`](component-candidates/watchdog_pricing_taobao.md), [`youxin_schmitt_single_nand.md`](component-candidates/youxin_schmitt_single_nand.md)).
