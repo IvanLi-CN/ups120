@@ -12,7 +12,6 @@
 | TPS3824-33DBVR | 3.70 | 0.00 | RESET(L) 与 RESET(H) 同步维持 | 双路推挽 | 单颗同时提供正/负极性复位[1] |
 | TPS3825-33DBVR | 4.70 | 0.00 | 超时保持 RESET=L | 推挽 | 集成手动复位，监控 3.3 V 轨[1] |
 | TPS3828-33DBVR | 0.65 | 1.50 | 超时保持 RESET=L | 推挽 | 上电延迟与看门狗定时共用网络[1] |
-| TPS3808G01DBVR | 0.71 | 1.50 | 欠压或超时拉低 RESET | 开漏 | CT 引脚设延迟，低静态电流[3] |
 | STWD100NYWY3F | 1.32 | 1.50 | WDO 超时持续低电平 | 推挽/开漏可选 | EN 可关断，多档超时窗口[2] |
 
 ## TPS3823-33DBVR（TI）
@@ -79,22 +78,6 @@
 | 深圳市集芯电子科技有限公司 | <https://item.taobao.com/item.htm?id=675303627806> | 0.74 | 1.50 |
 | 联科达电子 | <https://item.taobao.com/item.htm?id=676116060345> | 0.80 | 0.00 |
 
-## TPS3808G01DBVR（TI）
-
-### 器件简介
-
-- 典型静态电流 2.5 µA，适合电池与待机电流敏感设计。[3]
-- RESET 为开漏低有效输出，可与多器件线与共享告警线。[3]
-- 通过 CT 引脚设定上电延迟，WDI 输入提供可编程看门狗。[3]
-
-| 店铺 | 购买链接 | 单价 (¥) | 运费 (¥) |
-| --- | --- | --- | --- |
-| 深圳市远大芯程科技 | <https://item.taobao.com/item.htm?id=786076086194> | 0.49 | 1.00 |
-| 淼鑫电子科技 | <https://item.taobao.com/item.htm?id=889995730059> | 0.50 | 1.00 |
-| 深圳市恒芯科创电子 | <https://item.taobao.com/item.htm?id=778115997134> | 0.56 | 1.00 |
-| 深圳市垚鑫电子科技 | <https://item.taobao.com/item.htm?id=712109828425> | 0.60 | 1.00 |
-| 深圳市致帆科技有限公司 | <https://item.taobao.com/item.htm?id=778343283478> | 0.60 | 1.50 |
-
 ## STWD100NYWY3F（ST）
 
 ### 器件简介
@@ -115,4 +98,3 @@
 
 [1]: https://www.ti.com/lit/ds/symlink/tps3823.pdf
 [2]: https://www.st.com/resource/en/datasheet/stwd100.pdf
-[3]: https://www.ti.com/lit/ds/symlink/tps3808.pdf
