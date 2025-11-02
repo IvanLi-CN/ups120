@@ -4,10 +4,10 @@ version = "0.1.0"
 edition = "2024"
 authors = ["Ivan Li<ivanli2048@gmail.com>"]
 
+
 [features]
 default = []
 ship-mode = []
-
 
 [dependencies]
 embassy-stm32 = { path = "../../embassy/embassy-stm32", features = [
@@ -15,9 +15,7 @@ embassy-stm32 = { path = "../../embassy/embassy-stm32", features = [
   "time-driver-any",
   "stm32l051c8",
   "memory-x",
-  "exti",
 ] }
-embassy-sync = { path = "../../embassy/embassy-sync", features = ["defmt"] }
 embassy-executor = { path = "../../embassy/embassy-executor", features = [
   "arch-cortex-m",
   "executor-thread",
@@ -27,24 +25,12 @@ embassy-time = { path = "../../embassy/embassy-time", features = [
   "defmt",
   "tick-hz-1_000",
 ] }
-sc8815 = { path = "../../sc8815", features = ["async", "defmt"] }
 defmt = "1.0.1"
 defmt-rtt = { version = "1.0.0", features = ["disable-blocking-mode"] }
-embassy-embedded-hal = { path = "../../embassy/embassy-embedded-hal" }
-embassy-futures = { path = "../../embassy/embassy-futures" }
-bq769x0-async-rs = { path = "../../bq76920", features = ["async", "defmt"] }
-static_cell = "2.1.0"
-portable-atomic = { version = "1.11.0", features = ["critical-section"] }
-heapless = { version = "0.9.1", default-features = false }
-critical-section = "1.1"
-## binrw not required in firmware (avoid pulling alloc)
-
-cortex-m = { version = "0.7.7", features = [
-  "critical-section-single-core",
-] }
+cortex-m = { version = "0.7.7", features = ["critical-section-single-core"] }
 cortex-m-rt = "0.7.5"
 panic-probe = { version = "1.0.0", features = ["print-defmt"] }
-## no dynamic allocation required in firmware
+heapless = "0.7.16"
 
 [[bin]]
 name = "smart-battery"
