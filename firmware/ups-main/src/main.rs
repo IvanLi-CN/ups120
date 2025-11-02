@@ -17,6 +17,7 @@ const SIG_ADDR: usize = 0x00;
 const WINDOW_START: u8 = 0x08;
 const WINDOW_END: u8 = 0x0F;
 const WINDOW_VALUE_IDX: usize = WINDOW_START as usize;
+const WINDOW_LEN: usize = (WINDOW_END - WINDOW_START + 1) as usize;
 const TEST_VALUE_A: u8 = 0x5A;
 const TEST_VALUE_B: u8 = 0xA5;
 
@@ -66,6 +67,52 @@ where
         return Err(TestError::Check("wrap write failed"));
     }
     println!("test2 window tail: {:02x?}", buf);
+    Ok(())
+}
+
+fn bulk_window_fill<B>(i2c: &mut B) -> TestResult
+where
+    B: embedded_hal::i2c::I2c<Error = esp_hal::i2c::master::Error>,
+{
+    let mut payload = [0u8; 1 + WINDOW_LEN];
+    payload[0] = WINDOW_START;
+    for (offset, byte) in payload[1..].iter_mut().enumerate() {
+        *byte = 0xC0u8.wrapping_add(offset as u8);
+    }
+
+    i2c.write(STM32_ADDR, &payload)?;
+
+    let mut buf = [0u8; 16];
+    i2c.write_read(STM32_ADDR, &[0x00], &mut buf)?;
+    if buf[SIG_ADDR] != SIG_BYTES[0] || buf[SIG_ADDR + 1] != SIG_BYTES[1] {
+        return Err(TestError::Check(
+            "signature mismatch after bulk window write",
+        ));
+    }
+    for (offset, expected) in payload[1..].iter().enumerate() {
+        let index = WINDOW_START as usize + offset;
+        if buf[index] != *expected {
+            return Err(TestError::Check("bulk window contents mismatch"));
+        }
+    }
+    println!(
+        "test5 bulk window: {:02x?}",
+        &buf[WINDOW_START as usize..=WINDOW_END as usize]
+    );
+
+    Ok(())
+}
+
+fn measurement_snapshot<B>(i2c: &mut B) -> TestResult
+where
+    B: embedded_hal::i2c::I2c<Error = esp_hal::i2c::master::Error>,
+{
+    let mut bq = [0u8; 6];
+    i2c.write_read(STM32_ADDR, &[0x10], &mut bq)?;
+    let mut sc = [0u8; 10];
+    i2c.write_read(STM32_ADDR, &[0x40], &mut sc)?;
+    println!("test7 bq snapshot: {:02x?}", bq);
+    println!("test7 sc snapshot: {:02x?}", sc);
     Ok(())
 }
 
@@ -129,6 +176,22 @@ fn main() -> ! {
         println!("running wraparound-write");
         if let Err(err) = wraparound_write_read(&mut i2c) {
             report_error("wraparound-write", err);
+            failed = true;
+        }
+    }
+
+    if !failed {
+        println!("running bulk-window-fill");
+        if let Err(err) = bulk_window_fill(&mut i2c) {
+            report_error("bulk-window-fill", err);
+            failed = true;
+        }
+    }
+
+    if !failed {
+        println!("running measurement-snapshot");
+        if let Err(err) = measurement_snapshot(&mut i2c) {
+            report_error("measurement-snapshot", err);
             failed = true;
         }
     }
