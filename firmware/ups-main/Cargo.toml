@@ -18,7 +18,6 @@ embedded-hal = "1.0.0"
 embedded-hal-async = "1.0.0"
 embedded-hal-bus = { version = "0.3.0", default-features = false }
 embassy-embedded-hal = "0.3.2"
-tca6408a-async = { path = "../../tca6408a-async", features = ["defmt"] }
 sc8815 = { path = "../../sc8815", features = ["defmt"] }
 
 # Esp HAL stack (versions aligned with reference project)

@@ -25,6 +25,13 @@ use esp_hal::{
 };
 use esp_println as _; // install UART logger + defmt bridge
 use sc8815::{self, registers::constants::DEFAULT_ADDRESS as SC8815_ADDR};
+// STM32 smart-battery I2C slave (validation-only, single-shot)
+const STM32_ADDR: u8 = 0x35;
+const SB_SIG: [u8; 2] = [b'S', b'B'];
+const SB_WINDOW_START: u8 = 0x08;
+const SB_WINDOW_END: u8 = 0x0F;
+const TEST_A: u8 = 0x5A;
+const TEST_B: u8 = 0xA5;
 
 // Populate the ESP-IDF App Descriptor so espflash can read metadata
 esp_bootloader_esp_idf::esp_app_desc!();
@@ -155,6 +162,11 @@ fn main() -> ! {
         Err(_) => warn!("tca6408a: read IN_PG failed"),
     }
 
+    // One-shot STM32 I2C validation (no loops). Does not affect normal flow.
+    if let Err(_) = stm_one_shot_validate(&mut i2c) {
+        warn!("stm32: one-shot i2c validation failed");
+    }
+
     i2c = log_sc8815_temperature(i2c, &mut delay);
 
     // === Temperature sensor init ===
@@ -243,4 +255,43 @@ where
     }
 
     i2c
+}
+
+fn stm_one_shot_validate<I2C, E>(i2c: &mut I2C) -> Result<(), ()>
+where
+    I2C: embedded_hal::i2c::I2c<Error = E>,
+    E: embedded_hal::i2c::Error,
+{
+    // Write window byte at 0x08
+    let set_a = [SB_WINDOW_START, TEST_A];
+    i2c.write(STM32_ADDR, &set_a).map_err(|_| ())?;
+
+    // Read 16 bytes from 0x00, confirm signature and window value
+    let mut buf = [0u8; 16];
+    i2c.write_read(STM32_ADDR, &[0x00], &mut buf).map_err(|_| ())?;
+    if buf[0] != SB_SIG[0] || buf[1] != SB_SIG[1] {
+        warn!("stm32: signature mismatch {:02x} {:02x}", buf[0], buf[1]);
+        return Err(());
+    }
+    if buf[SB_WINDOW_START as usize] != TEST_A {
+        warn!(
+            "stm32: window mismatch at 0x08 -> {:02x}",
+            buf[SB_WINDOW_START as usize]
+        );
+        return Err(());
+    }
+    info!("stm32: dump[0..16]={=[u8]:02x}", &buf[..]);
+
+    // Wraparound check: write 0x0E two bytes, then read back 4
+    let set_tail = [SB_WINDOW_END - 1, TEST_A, TEST_B];
+    i2c.write(STM32_ADDR, &set_tail).map_err(|_| ())?;
+    let mut tail = [0u8; 4];
+    i2c.write_read(STM32_ADDR, &[SB_WINDOW_END - 1], &mut tail)
+        .map_err(|_| ())?;
+    info!("stm32: tail={=[u8]:02x}", &tail[..]);
+    if !(tail[0] == TEST_A && tail[1] == TEST_B) {
+        return Err(());
+    }
+
+    Ok(())
 }
