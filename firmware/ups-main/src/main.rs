@@ -68,10 +68,10 @@ fn main() -> ! {
         InputConfig::default().with_pull(Pull::Up),
     );
 
-    // I2C0 @ 400kHz (SDA=GPIO8, SCL=GPIO9)
+    // I2C0 @ 100kHz (SDA=GPIO8, SCL=GPIO9) — align with STM32 slave timing
     let mut i2c = I2c::new(
         peripherals.I2C0,
-        I2cConfig::default().with_frequency(Rate::from_khz(400)),
+        I2cConfig::default().with_frequency(Rate::from_khz(100)),
     )
     .unwrap()
     .with_sda(peripherals.GPIO8)
