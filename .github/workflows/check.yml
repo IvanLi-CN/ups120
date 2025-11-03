@@ -25,8 +25,12 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
+          # Normalize any SSH-style URLs to HTTPS first
           git config --global url.https://github.com/.insteadof git@github.com:
           git config --global url.https://github.com/.insteadof ssh://git@github.com/
+          # Inject GITHUB_TOKEN for private submodules fetched over HTTPS
+          # This ensures `git submodule update` can authenticate against private repos under the same owner
+          git config --global url."https://${GITHUB_ACTOR}:${GITHUB_TOKEN}@github.com/".insteadof https://github.com/
           git submodule sync --recursive
           git submodule update --init --recursive --depth 1
 
