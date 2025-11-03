@@ -16,12 +16,12 @@ jobs:
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - name: Checkout code (recursive submodules)
+      - name: Checkout code (no submodules)
         uses: actions/checkout@v4
         with:
-          submodules: recursive
+          submodules: false
 
-      - name: Force GitHub submodules over HTTPS
+      - name: Force GitHub submodules over HTTPS and init recursively
         shell: bash
         run: |
           set -euxo pipefail
