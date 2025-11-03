@@ -9,4 +9,4 @@
 	url = https://github.com/IvanLi-CN/sc8815-rs.git
 [submodule "tca6408a-async"]
     path = tca6408a-async
-    url = ../tca6408a-async-rs
+    url = https://github.com/IvanLi-CN/tca6408a-async-rs.git
