@@ -85,6 +85,12 @@ fn main() -> ! {
     delay.delay_ms(10u32);
     let _ = _rst.set_high();
 
+    // Before touching other devices on the bus, validate STM32 I2C once (aligned with fix/sb-comm-failure)
+    delay.delay_ms(2u32);
+    if let Err(_) = stm_one_shot_validate(&mut i2c) {
+        warn!("stm32: one-shot i2c validation failed");
+    }
+
     let mut _spi = Spi::new(
         peripherals.SPI2,
         SpiConfig::default()
@@ -129,7 +135,7 @@ fn main() -> ! {
         .configure(channel::config::Config {
             timer: &t_fan,
             duty_pct: 0,
-            pin_config: channel::config::PinConfig::PushPull,
+            drive_mode: esp_hal::gpio::DriveMode::PushPull,
         })
         .unwrap();
 
@@ -138,7 +144,7 @@ fn main() -> ! {
         .configure(channel::config::Config {
             timer: &t_buz,
             duty_pct: 0,
-            pin_config: channel::config::PinConfig::PushPull,
+            drive_mode: esp_hal::gpio::DriveMode::PushPull,
         })
         .unwrap();
 
@@ -160,11 +166,6 @@ fn main() -> ! {
     match io_expander::read_in_pg(&mut i2c) {
         Ok(pg) => info!("tca6408a: IN_PG={}", if pg { "high" } else { "low" }),
         Err(_) => warn!("tca6408a: read IN_PG failed"),
-    }
-
-    // One-shot STM32 I2C validation (no loops). Does not affect normal flow.
-    if let Err(_) = stm_one_shot_validate(&mut i2c) {
-        warn!("stm32: one-shot i2c validation failed");
     }
 
     i2c = log_sc8815_temperature(i2c, &mut delay);
