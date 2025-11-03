@@ -10,7 +10,7 @@ mod data_types;
 mod activity;
 mod failsafe;
 #[cfg(not(feature = "ship-mode"))]
-mod i2c1_slave;
+mod i2c_slave;
 #[cfg(not(feature = "ship-mode"))]
 mod irq_mux;
 #[cfg(not(feature = "ship-mode"))]
@@ -47,6 +47,9 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex;
 use embassy_time::{Duration, Instant, Timer};
 use static_cell::StaticCell;
+
+#[cfg(not(feature = "ship-mode"))]
+use shared::{Bq76920MeasurementsSubscriber, Sc8815MeasurementsSubscriber};
 
 type RuntimeI2c = I2c<'static, embassy_stm32::mode::Async, i2c::mode::Master>;
 type SharedI2cBus = Mutex<CriticalSectionRawMutex, RuntimeI2c>;
@@ -88,6 +91,24 @@ async fn enter_ship_mode_now(
             defmt::warn!("bq:ship err: {:?}", e);
             false
         }
+    }
+}
+
+#[cfg(not(feature = "ship-mode"))]
+#[embassy_executor::task]
+async fn sc_meas_mirror_task(mut sub: Sc8815MeasurementsSubscriber<'static>) {
+    loop {
+        let meas = sub.next_message_pure().await;
+        i2c_slave::update_sc_measurements(&meas);
+    }
+}
+
+#[cfg(not(feature = "ship-mode"))]
+#[embassy_executor::task]
+async fn bq_meas_mirror_task(mut sub: Bq76920MeasurementsSubscriber<'static, 5>) {
+    loop {
+        let meas = sub.next_message_pure().await;
+        i2c_slave::update_bq_measurements(&meas);
     }
 }
 
@@ -141,7 +162,7 @@ async fn main(_spawner: Spawner) {
         i2c1_cfg.frequency = Hertz(100_000);
         let i2c1_blocking = I2c::new_blocking(p.I2C1, p.PB6, p.PB7, i2c1_cfg);
         // (Optional: I2C1.CR1.WUPEN for wake-from-STOP is omitted to save flash; RTC remains primary wake source.)
-        i2c1_blocking.into_slave_multimaster(SlaveAddrConfig::basic(0x35))
+        i2c1_blocking.into_slave_multimaster(SlaveAddrConfig::basic(i2c_slave::SLAVE_ADDRESS))
     };
 
     // Keep SC8815 power stage disabled during configuration.
@@ -387,11 +408,18 @@ async fn main(_spawner: Spawner) {
 
         // (Optional) EXTI for BQ ALERT can be enabled here if needed for additional wake sources.
 
-        // Spawn合并后的 I2C1 从机 + 两路镜像状态机任务（保持日志与寄存器映射不变）
-        _spawner.spawn(
-            i2c1_slave::slave_mux_task(i2c1_dev, sc8815_meas_chan, bq76920_meas_chan)
-                .expect("i2c1-mux token"),
-        );
+        let sc_mirror_sub = sc8815_meas_chan
+            .subscriber()
+            .expect("Allocate SC8815 measurements subscriber for I2C mirror");
+        _spawner.spawn(sc_meas_mirror_task(sc_mirror_sub).expect("sc8815-mirror token"));
+
+        let bq_mirror_sub = bq76920_meas_chan
+            .subscriber()
+            .expect("Allocate BQ76920 measurements subscriber for I2C mirror");
+        _spawner.spawn(bq_meas_mirror_task(bq_mirror_sub).expect("bq-mirror token"));
+
+        let token = i2c_slave::task(i2c1_dev).expect("i2c1 task");
+        _spawner.spawn(token);
         // (omit gs_mirror_task to reduce flash)
 
         // Idle task: periodically yield; low-power executor controls STOP entry.

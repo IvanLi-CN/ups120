@@ -24,9 +24,15 @@ jobs:
       - name: Force GitHub submodules over HTTPS and init recursively
         shell: bash
         run: |
-          set -euxo pipefail
+          set -euo pipefail
           git config --global url.https://github.com/.insteadof git@github.com:
           git config --global url.https://github.com/.insteadof ssh://git@github.com/
+          auth_header="$(printf "x-access-token:%s" "${GITHUB_TOKEN}" | base64)"
+          cleanup() {
+            git config --global --unset http.https://github.com/.extraheader || true
+          }
+          trap cleanup EXIT
+          git config --global http.https://github.com/.extraheader "Authorization: Basic ${auth_header}"
           git submodule sync --recursive
           git submodule update --init --recursive --depth 1
 

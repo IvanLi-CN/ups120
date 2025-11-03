@@ -224,6 +224,14 @@ pub type Sc8815MeasurementsChannelType = PubSubChannel<
     SC8815_MEASUREMENTS_PUBSUB_READERS,
     1,
 >;
+pub type Sc8815MeasurementsSubscriber<'a> = Subscriber<
+    'a,
+    CriticalSectionRawMutex,
+    Sc8815Measurements,
+    SC8815_MEASUREMENTS_PUBSUB_DEPTH,
+    SC8815_MEASUREMENTS_PUBSUB_READERS,
+    1,
+>;
 pub type Bq76920MeasurementsChannelType<const N: usize> = PubSubChannel<
     CriticalSectionRawMutex,
     Bq76920Measurements<N>,

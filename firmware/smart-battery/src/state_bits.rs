@@ -1,6 +1,8 @@
 use core::sync::atomic::{AtomicU8, AtomicU16, Ordering};
 use critical_section::with;
 
+use crate::i2c_slave;
+
 /// Bit layout for `STATE_FLAGS` (lower 8 bits currently used).
 /// Naming kept short to minimise call‑sites and keep flash footprint low.
 pub mod bits {
@@ -21,11 +23,13 @@ static BLUE_CODE: AtomicU8 = AtomicU8::new(0);
 
 #[inline]
 pub fn update_flags(mask: u16, value_bits: u16) {
-    with(|_| {
+    let next = with(|_| {
         let current = STATE_FLAGS.load(Ordering::Relaxed);
         let next = (current & !mask) | (value_bits & mask);
         STATE_FLAGS.store(next, Ordering::Relaxed);
+        next
     });
+    i2c_slave::update_state_snapshot(next, blue_code());
 }
 
 #[inline]
@@ -36,23 +40,10 @@ pub fn flags() -> u16 {
 #[inline]
 pub fn set_blue_code(code: u8) {
     BLUE_CODE.store(code, Ordering::Relaxed);
+    i2c_slave::update_state_snapshot(flags(), code);
 }
 
 #[inline]
 pub fn blue_code() -> u8 {
     BLUE_CODE.load(Ordering::Relaxed)
-}
-
-#[derive(Copy, Clone)]
-pub struct Snapshot {
-    pub flags: u16,
-    pub blue_code: u8,
-}
-
-#[inline]
-pub fn snapshot() -> Snapshot {
-    Snapshot {
-        flags: flags(),
-        blue_code: blue_code(),
-    }
 }
