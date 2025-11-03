@@ -19,6 +19,8 @@ const SIG_BYTES: &[u8; 2] = b"SB";
 const PROTOCOL_MAJOR: u8 = 0x01;
 const WINDOW_START: u8 = 0x08;
 const WINDOW_END: u8 = 0x0F;
+const STATE_FLAGS_ADDR: u8 = 0x20;
+const STATE_BLUE_CODE_ADDR: u8 = 0x22;
 const I2C1_BASE: usize = 0x4000_5400;
 const I2C_ISR_OFFSET: usize = 0x18;
 const I2C_RXDR_OFFSET: usize = 0x24;
@@ -211,12 +213,6 @@ unsafe fn enforce_signature() {
     REGISTERS[2] = PROTOCOL_MAJOR;
 }
 
-pub fn write_register(addr: u8, value: u8) {
-    cortex_m::interrupt::free(|_| unsafe {
-        REGISTERS[addr as usize] = value;
-    });
-}
-
 pub fn write_registers(addr: u8, values: &[u8]) {
     cortex_m::interrupt::free(|_| unsafe {
         for (offset, &byte) in values.iter().enumerate() {
@@ -243,6 +239,14 @@ pub fn update_bq_measurements<const N: usize>(meas: &Bq76920Measurements<N>) {
     let pack_current = core.current_ma.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
     write_u16_le(0x10, pack_mv);
     write_i16_le(0x12, pack_current);
+}
+
+pub fn update_state_snapshot(flags: u16, blue_code: u8) {
+    cortex_m::interrupt::free(|_| unsafe {
+        REGISTERS[STATE_FLAGS_ADDR as usize] = (flags & 0xFF) as u8;
+        REGISTERS[(STATE_FLAGS_ADDR + 1) as usize] = (flags >> 8) as u8;
+        REGISTERS[STATE_BLUE_CODE_ADDR as usize] = blue_code;
+    });
 }
 
 fn write_u16_le(addr: u8, value: u16) {
