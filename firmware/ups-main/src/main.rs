@@ -221,7 +221,15 @@ fn main() -> ! {
 
     let mut sc = None;
     let mut sc_init_done: bool = false;
-    log_sc8815_temperature(&i2c_bus, &mut delay, &mut tca, &mut sc, &mut sc_init_done);
+    let mut last_adin_temp_c: Option<f32> = None;
+    log_sc8815_temperature(
+        &i2c_bus,
+        &mut delay,
+        &mut tca,
+        &mut sc,
+        &mut sc_init_done,
+        &mut last_adin_temp_c,
+    );
     let _ = ui::boot_update(&mut spi, &mut _cs, &mut _dc, 60, "SC8815 ADC Read");
 
     // === Temperature sensor init ===
@@ -252,9 +260,50 @@ fn main() -> ! {
         adin_elapsed_ms = adin_elapsed_ms.saturating_add(fan_control::SAMPLE_PERIOD_MS);
         if adin_elapsed_ms >= 1000 {
             adin_elapsed_ms -= 1000;
-            log_sc8815_temperature(&i2c_bus, &mut delay, &mut tca, &mut sc, &mut sc_init_done);
+            log_sc8815_temperature(
+                &i2c_bus,
+                &mut delay,
+                &mut tca,
+                &mut sc,
+                &mut sc_init_done,
+                &mut last_adin_temp_c,
+            );
             let smart_batt = read_smart_battery_temperatures(&i2c_bus);
             sb_temps = smart_batt;
+
+            // Render dashboard with real external highest temperature (exclude MCU TSENS)
+            let mut highest_ext: Option<f32> = None;
+            if let Some(sb) = sb_temps {
+                highest_ext = sb.highest();
+            }
+            if let Some(adin_c) = last_adin_temp_c {
+                highest_ext = match highest_ext {
+                    Some(h) => Some(h.max(adin_c)),
+                    None => Some(adin_c),
+                };
+            }
+
+            // Build a minimal dashboard model (real temp + placeholders for other values)
+            let temp_i16 = highest_ext
+                .map(|t| if t.is_sign_negative() { (t - 0.5) as i16 } else { (t + 0.5) as i16 })
+                .unwrap_or(i16::MIN + 1);
+            let model = ui::DashboardData {
+                mode: ui::Mode::Standby,
+                soc_pct: 0,
+                in_v_mv: 0,
+                in_a_ma: 0,
+                in_w_mw: 0,
+                chg_w_mw: 0,
+                out_v_mv: 0,
+                out_a_ma: 0,
+                out_w_mw: 0,
+                bat_temp_c: temp_i16,
+                ups_temp_c: 0,
+                fan_pct: 0,
+                idle_secs: 0,
+                temp_slot: ui::TempSlot::Battery,
+            };
+            let _ = ui::render_dashboard_once(&mut spi, &mut _cs, &mut _dc, &model);
         }
     }
 }
@@ -265,6 +314,7 @@ fn log_sc8815_temperature<'a, I2C, E>(
     tca: &mut Option<Tca6408a<RefCellDevice<'a, I2C>>>,
     sc: &mut Option<sc8815::SC8815<RefCellDevice<'a, I2C>>>,
     sc_init_done: &mut bool,
+    last_adin_temp_c: &mut Option<f32>,
 )
 where
     I2C: embedded_hal::i2c::I2c<Error = E>,
@@ -321,10 +371,13 @@ where
 
     if let Some(adin_mv) = adin_mv_sample {
         match adin_temp::adin_mv_to_celsius(adin_mv) {
-            Some(temp_c) => info!(
-                "sc8815: ADIN temp ≈ {=f32} °C (from {=u16} mV)",
-                temp_c, adin_mv
-            ),
+            Some(temp_c) => {
+                *last_adin_temp_c = Some(temp_c);
+                info!(
+                    "sc8815: ADIN temp ≈ {=f32} °C (from {=u16} mV)",
+                    temp_c, adin_mv
+                )
+            }
             None => warn!("sc8815: ADIN conversion out of range"),
         }
     }
