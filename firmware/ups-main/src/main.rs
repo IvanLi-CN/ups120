@@ -1,10 +1,11 @@
 #![no_std]
 #![no_main]
 
- mod adin_temp;
- mod fan_control;
- mod io_expander;
- mod tsens;
+mod adin_temp;
+mod fan_control;
+mod io_expander;
+mod batt_est;
+mod tsens;
  mod display;
  mod ui;
 
