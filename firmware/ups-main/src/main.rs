@@ -8,6 +8,7 @@ mod tsens;
 
 use defmt::{info, warn};
 use embedded_hal::delay::DelayNs;
+use embedded_hal::i2c::I2c as _; // bring trait into scope for write_read without naming conflict
 use esp_backtrace as _; // panic handler + backtrace/println
 use esp_hal::{
     delay::Delay,
@@ -24,6 +25,9 @@ use esp_hal::{
     time::Rate,
 };
 use esp_println as _; // install UART logger + defmt bridge
+use core::cell::RefCell;
+use embedded_hal_bus::i2c::RefCellDevice;
+use io_expander::Tca6408a;
 use sc8815::{self, registers::constants::DEFAULT_ADDRESS as SC8815_ADDR};
 // STM32 smart-battery I2C slave (validation-only, single-shot)
 const STM32_ADDR: u8 = 0x35;
@@ -72,13 +76,15 @@ fn main() -> ! {
     );
 
     // I2C0 @ 100kHz (SDA=GPIO8, SCL=GPIO9) — align with STM32 slave timing
-    let mut i2c = I2c::new(
+    let i2c = I2c::new(
         peripherals.I2C0,
         I2cConfig::default().with_frequency(Rate::from_khz(100)),
     )
     .unwrap()
     .with_sda(peripherals.GPIO8)
     .with_scl(peripherals.GPIO9);
+    // Shared-bus wrapper for single-threaded access
+    let i2c_bus = RefCell::new(i2c);
 
     // SPI for LCD (write-only): MOSI=11, SCLK=12, optional CS/DC/RST as GPIO
     let mut _dc = Output::new(peripherals.GPIO10, Level::Low, OutputConfig::default());
@@ -90,7 +96,9 @@ fn main() -> ! {
 
     // Before touching other devices on the bus, validate STM32 I2C once (aligned with fix/sb-comm-failure)
     delay.delay_ms(2u32);
-    if let Err(_) = stm_one_shot_validate(&mut i2c) {
+    // Use shared-bus device for one-shot validation
+    let mut i2c_dev_once = RefCellDevice::new(&i2c_bus);
+    if let Err(_) = stm_one_shot_validate(&mut i2c_dev_once) {
         warn!("stm32: one-shot i2c validation failed");
     }
 
@@ -161,17 +169,22 @@ fn main() -> ! {
     buzzer.set_duty(0).ok();
     fan_en.set_low();
 
-    match io_expander::init(&mut i2c) {
-        Ok(()) => info!("tca6408a: init ok (CE=high, PSTOP=high)"),
-        Err(_) => warn!("tca6408a: init failed (safe state not verified)"),
+    // Global single-instance drivers
+    let mut tca = Some(Tca6408a::new(RefCellDevice::new(&i2c_bus)));
+    if let Some(t) = tca.as_mut() {
+        match t.init() {
+            Ok(()) => info!("tca6408a: init ok (CE=high, PSTOP=high)"),
+            Err(_) => warn!("tca6408a: init failed (safe state not verified)"),
+        }
+        match t.read_in_pg() {
+            Ok(pg) => info!("tca6408a: IN_PG={}", if pg { "high" } else { "low" }),
+            Err(_) => warn!("tca6408a: read IN_PG failed"),
+        }
     }
 
-    match io_expander::read_in_pg(&mut i2c) {
-        Ok(pg) => info!("tca6408a: IN_PG={}", if pg { "high" } else { "low" }),
-        Err(_) => warn!("tca6408a: read IN_PG failed"),
-    }
-
-    i2c = log_sc8815_temperature(i2c, &mut delay);
+    let mut sc = None;
+    let mut sc_init_done: bool = false;
+    log_sc8815_temperature(&i2c_bus, &mut delay, &mut tca, &mut sc, &mut sc_init_done);
 
     // === Temperature sensor init ===
     tsens::init(&mut delay);
@@ -199,15 +212,20 @@ fn main() -> ! {
         adin_elapsed_ms = adin_elapsed_ms.saturating_add(fan_control::SAMPLE_PERIOD_MS);
         if adin_elapsed_ms >= 1000 {
             adin_elapsed_ms -= 1000;
-            i2c = log_sc8815_temperature(i2c, &mut delay);
-            let (next_i2c, smart_batt) = read_smart_battery_temperatures(i2c);
-            i2c = next_i2c;
+            log_sc8815_temperature(&i2c_bus, &mut delay, &mut tca, &mut sc, &mut sc_init_done);
+            let smart_batt = read_smart_battery_temperatures(&i2c_bus);
             sb_temps = smart_batt;
         }
     }
 }
 
-fn log_sc8815_temperature<I2C, E>(mut i2c: I2C, delay: &mut Delay) -> I2C
+fn log_sc8815_temperature<'a, I2C, E>(
+    i2c_bus: &'a RefCell<I2C>,
+    delay: &mut Delay,
+    tca: &mut Option<Tca6408a<RefCellDevice<'a, I2C>>>,
+    sc: &mut Option<sc8815::SC8815<RefCellDevice<'a, I2C>>>,
+    sc_init_done: &mut bool,
+)
 where
     I2C: embedded_hal::i2c::I2c<Error = E>,
     E: embedded_hal::i2c::Error,
@@ -215,40 +233,49 @@ where
     let mut adin_mv_sample: Option<u16> = None;
     let mut ce_enabled = false;
 
-    if let Err(_) = io_expander::set_sc_ce(&mut i2c, true) {
-        warn!("sc8815: failed to pull CE low via TCA6408A");
-    } else {
-        ce_enabled = true;
+    if let Some(t) = tca.as_mut() {
+        if let Err(_) = t.set_sc_ce(true) {
+            warn!("sc8815: failed to pull CE low via TCA6408A");
+        } else {
+            ce_enabled = true;
+        }
     }
 
     delay.delay_ms(5u32);
 
-    let mut sc = sc8815::SC8815::new(i2c, SC8815_ADDR);
     if ce_enabled {
-        match sc.init() {
-            Ok(()) => {
-                if let Err(_) = sc.set_adc_conversion(true) {
-                    warn!("sc8815: ADC start failed");
-                } else {
-                    delay.delay_ms(10u32);
-                    match sc.get_adc_measurements() {
-                        Ok(meas) => {
-                            adin_mv_sample = Some(meas.adin_mv);
-                        }
-                        Err(_) => warn!("sc8815: ADC read failed"),
-                    }
-                    let _ = sc.set_adc_conversion(false);
+        // Ensure instance exists
+        if sc.is_none() {
+            let dev = RefCellDevice::new(i2c_bus);
+            let mut drv = sc8815::SC8815::new(dev, SC8815_ADDR);
+            if !*sc_init_done {
+                match drv.init() {
+                    Ok(()) => *sc_init_done = true,
+                    Err(_) => warn!("sc8815: init failed"),
                 }
             }
-            Err(_) => warn!("sc8815: init failed"),
+            *sc = Some(drv);
+        }
+
+        if let Some(d) = sc.as_mut() {
+            if let Err(_) = d.set_adc_conversion(true) {
+                warn!("sc8815: ADC start failed");
+            } else {
+                delay.delay_ms(10u32);
+                match d.get_adc_measurements() {
+                    Ok(meas) => adin_mv_sample = Some(meas.adin_mv),
+                    Err(_) => warn!("sc8815: ADC read failed"),
+                }
+                let _ = d.set_adc_conversion(false);
+            }
         }
     }
 
-    i2c = sc.release();
-
-    if ce_enabled {
-        if let Err(_) = io_expander::set_sc_ce(&mut i2c, false) {
-            warn!("sc8815: failed to restore CE high");
+    if let Some(t) = tca.as_mut() {
+        if ce_enabled {
+            if let Err(_) = t.set_sc_ce(false) {
+                warn!("sc8815: failed to restore CE high");
+            }
         }
     }
 
@@ -261,13 +288,11 @@ where
             None => warn!("sc8815: ADIN conversion out of range"),
         }
     }
-
-    i2c
 }
 
-fn read_smart_battery_temperatures<I2C, E>(
-    mut i2c: I2C,
-) -> (I2C, Option<fan_control::SmartBatteryTemps>)
+fn read_smart_battery_temperatures<'a, I2C, E>(
+    i2c_bus: &'a RefCell<I2C>,
+) -> Option<fan_control::SmartBatteryTemps>
 where
     I2C: embedded_hal::i2c::I2c<Error = E>,
     E: embedded_hal::i2c::Error,
@@ -275,7 +300,8 @@ where
     // STM32 smart-battery slave currently exposes raw registers without CRC interleaving.
     // Use pointer write then read 4 bytes: [TPACK_L, TPACK_H, TMOS_L, TMOS_H] (i16 LE, 0.01°C; i16::MIN = invalid).
     let mut data = [0u8; 4];
-    match i2c.write_read(STM32_ADDR, &[SB_TEMP_BASE], &mut data) {
+    let mut dev = RefCellDevice::new(i2c_bus);
+    match dev.write_read(STM32_ADDR, &[SB_TEMP_BASE], &mut data) {
         Ok(()) => {
             let pack = i16::from_le_bytes([data[0], data[1]]);
             let mos = i16::from_le_bytes([data[2], data[3]]);
@@ -298,11 +324,11 @@ where
                     hottest_temp,
                     hottest_valid
                 );
-            (i2c, Some(temps))
+            Some(temps)
         }
         Err(_) => {
             warn!("stm32: temp read failed");
-            (i2c, None)
+            None
         }
     }
 }

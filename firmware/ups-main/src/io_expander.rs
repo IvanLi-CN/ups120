@@ -3,7 +3,7 @@ use embedded_hal::i2c::I2c;
 
 // Minimal TCA6408A helper (avoids external crate dependency)
 // Registers: 0x00=Input, 0x01=Output, 0x02=Polarity, 0x03=Configuration
-const DEFAULT_ADDRESS: u8 = 0x20; // A2..A0=0
+pub const DEFAULT_ADDRESS: u8 = 0x20; // A2..A0=0
 #[repr(u8)]
 #[derive(Copy, Clone)]
 enum Register {
@@ -125,4 +125,74 @@ where
         out &= !mask_clear;
         out
     })
+}
+
+// Lightweight driver instance to match project-wide "single-instance per chip" guideline.
+pub struct Tca6408a<I2C> {
+    i2c: I2C,
+    address: u8,
+}
+
+impl<I2C, E> Tca6408a<I2C>
+where
+    I2C: I2c<Error = E>,
+    E: embedded_hal::i2c::Error,
+{
+    pub fn new(i2c: I2C) -> Self {
+        Self {
+            i2c,
+            address: DEFAULT_ADDRESS,
+        }
+    }
+
+    pub fn release(self) -> I2C {
+        self.i2c
+    }
+
+    pub fn init(&mut self) -> Result<(), E> {
+        // mirror of free-function init
+        write_reg(&mut self.i2c, Register::Polarity, 0x00)?;
+
+        let cfg_inputs = (1 << PORT_IN_PG) | (1 << PORT_ALERT) | 0b1111_0000;
+        let cfg_outputs_clear = (1 << PORT_CE) | (1 << PORT_PSTOP);
+        let _ = update_register(&mut self.i2c, Register::Configuration, |mut cfg| {
+            cfg |= cfg_inputs;
+            cfg &= !cfg_outputs_clear;
+            cfg
+        })?;
+
+        let safe_mask_set = (1 << PORT_CE) | (1 << PORT_PSTOP);
+        set_outputs(&mut self.i2c, safe_mask_set, 0x00)?;
+
+        let cfg = read_reg(&mut self.i2c, Register::Configuration)?;
+        let out = read_reg(&mut self.i2c, Register::Output)?;
+        debug!("tca6408.init cfg=0x{:02X} out=0x{:02X}", cfg, out);
+        Ok(())
+    }
+
+    pub fn set_sc_ce(&mut self, enable: bool) -> Result<(), E> {
+        if enable {
+            set_outputs(&mut self.i2c, 0x00, 1 << PORT_CE)?;
+        } else {
+            set_outputs(&mut self.i2c, 1 << PORT_CE, 0x00)?;
+        }
+        Ok(())
+    }
+
+    pub fn set_sc_pstop(&mut self, stop: bool) -> Result<(), E> {
+        if stop {
+            set_outputs(&mut self.i2c, 1 << PORT_PSTOP, 0x00)?;
+        } else {
+            set_outputs(&mut self.i2c, 0x00, 1 << PORT_PSTOP)?;
+        }
+        Ok(())
+    }
+
+    pub fn read_in_pg(&mut self) -> Result<bool, E> {
+        Ok((read_reg(&mut self.i2c, Register::Input)? & (1 << PORT_IN_PG)) != 0)
+    }
+
+    pub fn read_alert(&mut self) -> Result<bool, E> {
+        Ok((read_reg(&mut self.i2c, Register::Input)? & (1 << PORT_ALERT)) == 0)
+    }
 }

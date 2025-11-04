@@ -75,7 +75,8 @@ async fn sc_end_and_dock(
             pin.set_low();
         }
         if let Some(pin) = ce_ctl_slot.as_mut() {
-            pin.set_low();
+            // Keep CE enabled when docked to allow INT and avoid re-init
+            pin.set_high();
         }
     }
 }
@@ -89,6 +90,8 @@ struct ScSession {
 
 // SC8815 INT → 事件通知（EXTI 边沿触发后唤醒本任务查询状态）
 static SC_INT_PENDING: AtomicBool = AtomicBool::new(false);
+// Ensure SC8815.init() is executed only once across device lifetime
+static SC_INIT_DONE: AtomicBool = AtomicBool::new(false);
 
 #[inline]
 pub fn set_sc_int_pending() {
@@ -110,13 +113,15 @@ impl ScSession {
         Timer::after(Duration::from_millis(100)).await;
 
         let mut sc = SC8815::new(i2c, address);
-        // init
-        if let Err(_e) = sc.init().await {
-            error!("sc_init_err");
-            let i2c_back = sc.release();
-            ce_pin.set_high();
-            defmt::debug!("sc_disable");
-            return Err((ce_pin, pstop_pin, i2c_back));
+        // Initialize only once; subsequent sessions reuse existing configuration
+        if !SC_INIT_DONE.load(portable_atomic::Ordering::Relaxed) {
+            if let Err(_e) = sc.init().await {
+                error!("sc_init_err");
+                let i2c_back = sc.release();
+                ce_pin.set_high();
+                return Err((ce_pin, pstop_pin, i2c_back));
+            }
+            SC_INIT_DONE.store(true, portable_atomic::Ordering::Relaxed);
         }
 
         // Per-session configuration
@@ -214,8 +219,8 @@ impl ScSession {
             error!("sc_adc_stop");
         }
         let i2c_back = self.sc.release();
-        // Keep charger disabled and power stage stopped on session end
-        self.ce_ctl.set_low();
+        // Keep power stage stopped, but leave CE enabled to preserve configuration
+        self.ce_ctl.set_high();
         self.pstop_ctl.set_low();
         (self.ce_ctl, self.pstop_ctl, i2c_back)
     }
@@ -806,7 +811,8 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                         pin.set_low();
                     }
                     if let Some(pin) = ce_ctl_slot.as_mut() {
-                        pin.set_low();
+                        // Leave CE enabled; session is missing but chip stays online
+                        pin.set_high();
                     }
                     charger_active = false;
                     charge_confirmed = false;
