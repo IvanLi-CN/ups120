@@ -3,7 +3,7 @@
 ## Project Structure & Module Organization
 
 - `firmware/smart-battery/`: STM32L051C8T6 firmware (Rust + Embassy); entrypoint `src/main.rs`.
-- `firmware/ups-main/`: ESP32S3 placeholder binary.
+- `firmware/ups-main/`: ESP32S3 UPS Main firmware (active development), entrypoint `src/main.rs`.
 - `embassy/`, `bq76920/`, `sc8815/`: local dependencies (git submodules).
 - `scripts/`: tooling (e.g., `probe_runner.sh`).  `docs/`, `models/`, `logs/` hold design notes and assets.
 - Initialize dependencies after clone: `git submodule update --init --recursive`.
@@ -51,3 +51,31 @@
 ## Security & Configuration Tips
 
 - Probe address and chip type are configured in the project’s own files (e.g., `firmware/smart-battery/.cargo/config.toml` or its Makefile). Override locally via environment variables (e.g., `PROBE_ADDR=XXXX make run`) instead of committing personal IDs.
+
+## I2C Device Instance Management (Supplement)
+
+- Single instance per chip: Only one driver instance per physical I2C chip at a time. Share the bus using `embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice` instead of cloning chip driver instances.
+- Option-wrapped ownership: Manage chip drivers with `Option<T>` so you can explicitly drop the old instance before creating a new one. Rebuild flow: set the holder to `None` (or let it go out of scope), call `release()` if provided to return the bus, then construct the new instance and store it back as `Some(new)`.
+- Initialize once per power cycle: Call `init()` exactly once after power-up. Later sessions should only gate power stages, tweak configuration, and start/stop ADCs. If you intentionally power-cycle the device (e.g., CE low), that starts a new cycle and allows a fresh `init()`.
+- Power gating policy: Prefer keeping the chip online across sessions (e.g., keep `CE=High`, stop power stage via `PSTOP`) to avoid re-initialization and preserve configuration unless a quiesce/failsafe policy requires a full power-down.
+- Review checklist for PRs touching I2C/driver code:
+  - Only one instance exists per chip at any time.
+  - Instance holder uses `Option<T>` to allow explicit teardown before rebuild.
+  - `release()` is called before re-creating an instance when applicable.
+  - `init()` is not called repeatedly in normal operation.
+  - Bus sharing uses `I2cDevice` rather than multiple chip instances.
+
+Example pattern:
+
+```rust
+// Holder
+static mut SC: Option<SC8815<I2cDev>> = None;
+
+// Rebuild safely
+if let Some(old) = unsafe { SC.take() } {
+    let _i2c = old.release(); // free bus handle
+}
+let mut sc = SC8815::new(i2c, addr);
+if !SC_INIT_DONE.load(Relaxed) { sc.init().await?; SC_INIT_DONE.store(true, Relaxed); }
+unsafe { SC = Some(sc); }
+```

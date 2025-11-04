@@ -15,6 +15,27 @@ pub const SAMPLE_PERIOD_MS: u32 = 500;
 const LOG_INTERVAL_TICKS: u8 = 4; // 500 ms * 4 = 2 s
 const FILTER_WINDOW: usize = 3;
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SmartBatteryTemps {
+    pub pack_c: Option<f32>,
+    pub mos_c: Option<f32>,
+}
+
+impl SmartBatteryTemps {
+    pub fn new(pack_c: Option<f32>, mos_c: Option<f32>) -> Self {
+        Self { pack_c, mos_c }
+    }
+
+    pub fn highest(&self) -> Option<f32> {
+        match (self.pack_c, self.mos_c) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
+        }
+    }
+}
+
 const TARGET_TEMP_C: f32 = 45.0;
 const VIN_ON_THRESHOLD_C: f32 = 35.0;
 const NOVIN_ON_THRESHOLD_C: f32 = 40.0;
@@ -64,6 +85,8 @@ pub struct FanController<'a> {
     mode: Mode,
     fault: Option<FaultReason>,
     filtered_temp: f32,
+    control_temp: f32,
+    battery_temps: Option<SmartBatteryTemps>,
     last_reading: Option<tsens::Reading>,
     filter_buf: [f32; FILTER_WINDOW],
     filter_count: usize,
@@ -98,6 +121,8 @@ impl<'a> FanController<'a> {
             mode: Mode::Normal,
             fault: None,
             filtered_temp: 0.0,
+            control_temp: 0.0,
+            battery_temps: None,
             last_reading: None,
             filter_buf: [0.0; FILTER_WINDOW],
             filter_count: 0,
@@ -108,14 +133,20 @@ impl<'a> FanController<'a> {
         }
     }
 
-    pub fn tick(&mut self, delay: &mut Delay) {
+    pub fn tick(&mut self, delay: &mut Delay, smart_batt_temp: Option<SmartBatteryTemps>) {
         let reading = tsens::read_celsius(delay);
         let corrected = reading.base_celsius - self.delta_c;
         let filtered = self.push_sample(corrected);
         self.filtered_temp = filtered;
+        self.battery_temps = smart_batt_temp;
+        let controlling = match self.battery_temps.and_then(|t| t.highest()) {
+            Some(ext) => ext.max(filtered),
+            None => filtered,
+        };
+        self.control_temp = controlling;
         self.last_reading = Some(reading);
 
-        self.update_outputs(filtered, &reading);
+        self.update_outputs(controlling, &reading);
         self.maybe_log();
 
         delay.delay_ms(SAMPLE_PERIOD_MS);
@@ -331,9 +362,24 @@ impl<'a> FanController<'a> {
                 } else {
                     0.0
                 };
+                let temps = self.battery_temps.unwrap_or_default();
+                let pack_temp = temps.pack_c.unwrap_or(f32::NAN);
+                let pack_valid = temps.pack_c.is_some();
+                let mos_temp = temps.mos_c.unwrap_or(f32::NAN);
+                let mos_valid = temps.mos_c.is_some();
+                let highest_option = temps.highest();
+                let highest_temp = highest_option.unwrap_or(f32::NAN);
+                let highest_valid = highest_option.is_some();
                 info!(
-                    "fan.report TEMP={=f32}°C RAW={=u8} ATTR={=u8} DELTA={=f32}°C DUTY={=u8}% MODE={} VOUT≈{=f32}V",
+                    "fan.temps tsens={=f32}°C sb_pack={=f32}°C sb_pack_valid={} sb_mos={=f32}°C sb_mos_valid={} sb_highest={=f32}°C sb_highest_valid={} ctrl={=f32}°C raw={=u8} attr={=u8} delta={=f32}°C duty={=u8}% mode={} vout≈{=f32}V",
                     self.filtered_temp,
+                    pack_temp,
+                    pack_valid,
+                    mos_temp,
+                    mos_valid,
+                    highest_temp,
+                    highest_valid,
+                    self.control_temp,
                     reading.raw,
                     reading.dac,
                     self.delta_c,

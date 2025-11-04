@@ -3,14 +3,14 @@
 This repository now hosts two firmware targets under a unified workspace:
 
 - Smart Battery Controller: `STM32L051C8T6` (battery BMS + charger orchestration)
-- UPS Main Controller: `ESP32S3FH4R2` (system coordination; placeholder for now)
+- UPS Main Controller: `ESP32S3FH4R2` (system coordination; active development)
 
 Refer to [WORKFLOW.md](WORKFLOW.md) and [DESIGN_MEMORANDUM.md](DESIGN_MEMORANDUM.md) for project context.
 
 ## Repository Layout
 
 - `firmware/smart-battery/`: Rust + Embassy firmware for `STM32L051C8T6`
-- `firmware/ups-main/`: Placeholder for `ESP32S3FH4R2` UPS main controller
+- `firmware/ups-main/`: Rust firmware for `ESP32S3FH4R2` UPS main controller (active development)
 - `embassy/`, `bq76920/`, `sc8815/`: Local dependencies and submodules
 
 ## Smart Battery (STM32L051C8T6)
@@ -51,7 +51,7 @@ Config uses `probe-rs` runner with chip `STM32L051C8Tx`. Update if your package 
 
 ## UPS Main (ESP32S3FH4R2)
 
-`firmware/ups-main` is a placeholder. ESP‑IDF (C/C++) or Rust (esp‑idf‑hal) integration will be added later.
+`firmware/ups-main` is an actively developed Rust firmware using `esp-hal` on ESP32-S3. System coordination, fan control, and I2C integrations (e.g., smart‑battery telemetry) are incrementally landing here.
 
 ## License
 

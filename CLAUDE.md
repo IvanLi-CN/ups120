@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 UPS120 是一个双固件架构的 UPS 项目：
 - **Smart Battery Controller** (STM32L051C8T6): 基于 Rust + Embassy 的电池 BMS + 充电器编排控制器
-- **UPS Main Controller** (ESP32-S3): 系统协调控制器（目前为占位实现）
+- **UPS Main Controller** (ESP32-S3): 系统协调控制器（正在开发）
 
 两个固件是完全独立的项目，不使用 Cargo workspace。
 
@@ -102,7 +102,7 @@ GPIO 映射（参考 smart-battery.ioc）:
 
 ### UPS Main Firmware Structure
 
-当前实现（占位）:
+当前实现:
 - 基于 esp-hal 的裸机程序（非 Embassy executor）
 - 包含 TSENS（ESP32-S3 内部温度传感器）驱动测试
 - GPIO 配置: 按钮输入、TCA6408A I/O 扩展、SPI/I2C 外设初始化
