@@ -237,8 +237,18 @@ pub fn update_bq_measurements<const N: usize>(meas: &Bq76920Measurements<N>) {
     let core = &meas.core_measurements;
     let pack_mv = core.total_voltage_mv.clamp(0, u16::MAX as i32) as u16;
     let pack_current = core.current_ma.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+    let temps = &core.temperatures;
+    let mut hottest = temps.ts1;
+    if let Some(ts2) = temps.ts2 {
+        hottest = hottest.max(ts2);
+    }
+    if let Some(ts3) = temps.ts3 {
+        hottest = hottest.max(ts3);
+    }
     write_u16_le(0x10, pack_mv);
     write_i16_le(0x12, pack_current);
+    write_i16_le(0x14, hottest);
+    write_i16_le(0x16, temps.ts1);
 }
 
 pub fn update_state_snapshot(flags: u16, blue_code: u8) {

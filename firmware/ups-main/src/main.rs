@@ -30,6 +30,9 @@ const STM32_ADDR: u8 = 0x35;
 const SB_SIG: [u8; 2] = [b'S', b'B'];
 const SB_WINDOW_START: u8 = 0x08;
 const SB_WINDOW_END: u8 = 0x0F;
+const SB_TEMP_BASE: u8 = 0x14;
+const SB_TEMP_DATA_BYTES: usize = 4;
+const SB_TEMP_FRAME_BYTES: usize = SB_TEMP_DATA_BYTES * 2;
 const TEST_A: u8 = 0x5A;
 const TEST_B: u8 = 0xA5;
 
@@ -189,13 +192,17 @@ fn main() -> ! {
     let vin_present = true; // VIN presence sensor pending, default to true per spec
     let mut controller = fan_control::FanController::new(fan_pwm, fan_en, delta_opt, vin_present);
     let mut adin_elapsed_ms: u32 = 0;
+    let mut sb_temps: Option<fan_control::SmartBatteryTemps> = None;
 
     loop {
-        controller.tick(&mut delay);
+        controller.tick(&mut delay, sb_temps);
         adin_elapsed_ms = adin_elapsed_ms.saturating_add(fan_control::SAMPLE_PERIOD_MS);
         if adin_elapsed_ms >= 1000 {
             adin_elapsed_ms -= 1000;
             i2c = log_sc8815_temperature(i2c, &mut delay);
+            let (next_i2c, smart_batt) = read_smart_battery_temperatures(i2c);
+            i2c = next_i2c;
+            sb_temps = smart_batt;
         }
     }
 }
@@ -258,6 +265,73 @@ where
     i2c
 }
 
+fn read_smart_battery_temperatures<I2C, E>(
+    mut i2c: I2C,
+) -> (I2C, Option<fan_control::SmartBatteryTemps>)
+where
+    I2C: embedded_hal::i2c::I2c<Error = E>,
+    E: embedded_hal::i2c::Error,
+{
+    // STM32 smart-battery slave currently exposes raw registers without CRC interleaving.
+    // Use pointer write then read 4 bytes: [TPACK_L, TPACK_H, TMOS_L, TMOS_H] (i16 LE, 0.01°C; i16::MIN = invalid).
+    let mut data = [0u8; 4];
+    match i2c.write_read(STM32_ADDR, &[SB_TEMP_BASE], &mut data) {
+        Ok(()) => {
+            let pack = i16::from_le_bytes([data[0], data[1]]);
+            let mos = i16::from_le_bytes([data[2], data[3]]);
+            let pack_c = temp_from_centi(pack);
+            let mos_c = temp_from_centi(mos);
+            let temps = fan_control::SmartBatteryTemps::new(pack_c, mos_c);
+            let hottest = temps.highest();
+            let pack_temp = pack_c.unwrap_or(f32::NAN);
+            let mos_temp = mos_c.unwrap_or(f32::NAN);
+            let pack_valid = pack_c.is_some();
+            let mos_valid = mos_c.is_some();
+            let hottest_temp = hottest.unwrap_or(f32::NAN);
+            let hottest_valid = hottest.is_some();
+            info!(
+                    "smart-battery: sb_pack={=f32}°C sb_pack_valid={} sb_mos={=f32}°C sb_mos_valid={} sb_hottest={=f32}°C sb_hottest_valid={}",
+                    pack_temp,
+                    pack_valid,
+                    mos_temp,
+                    mos_valid,
+                    hottest_temp,
+                    hottest_valid
+                );
+            (i2c, Some(temps))
+        }
+        Err(_) => {
+            warn!("stm32: temp read failed");
+            (i2c, None)
+        }
+    }
+}
+
+fn temp_from_centi(raw: i16) -> Option<f32> {
+    if raw == i16::MIN {
+        None
+    } else {
+        Some(raw as f32 / 100.0)
+    }
+}
+
+// (reserved) SMBus CRC8 helper left here if smart-battery read switches to interleaved CRC in future
+#[allow(dead_code)]
+fn crc8(bytes: &[u8]) -> u8 {
+    let mut crc: u8 = 0;
+    for &byte in bytes {
+        crc ^= byte;
+        for _ in 0..8 {
+            if crc & 0x80 != 0 {
+                crc = (crc << 1) ^ 0x07;
+            } else {
+                crc <<= 1;
+            }
+        }
+    }
+    crc
+}
+
 fn stm_one_shot_validate<I2C, E>(i2c: &mut I2C) -> Result<(), ()>
 where
     I2C: embedded_hal::i2c::I2c<Error = E>,
@@ -269,7 +343,8 @@ where
 
     // Read 16 bytes from 0x00, confirm signature and window value
     let mut buf = [0u8; 16];
-    i2c.write_read(STM32_ADDR, &[0x00], &mut buf).map_err(|_| ())?;
+    i2c.write_read(STM32_ADDR, &[0x00], &mut buf)
+        .map_err(|_| ())?;
     if buf[0] != SB_SIG[0] || buf[1] != SB_SIG[1] {
         warn!("stm32: signature mismatch {:02x} {:02x}", buf[0], buf[1]);
         return Err(());
