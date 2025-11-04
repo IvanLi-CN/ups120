@@ -1,10 +1,12 @@
 #![no_std]
 #![no_main]
 
-mod adin_temp;
-mod fan_control;
-mod io_expander;
-mod tsens;
+ mod adin_temp;
+ mod fan_control;
+ mod io_expander;
+ mod tsens;
+ mod display;
+ mod ui;
 
 use defmt::{info, warn};
 use embedded_hal::delay::DelayNs;
@@ -86,10 +88,11 @@ fn main() -> ! {
     // Shared-bus wrapper for single-threaded access
     let i2c_bus = RefCell::new(i2c);
 
-    // SPI for LCD (write-only): MOSI=11, SCLK=12, optional CS/DC/RST as GPIO
+    // SPI for LCD (write-only): MOSI=11, SCLK=12, optional CS/DC/RST/BL as GPIO
     let mut _dc = Output::new(peripherals.GPIO10, Level::Low, OutputConfig::default());
     let mut _cs = Output::new(peripherals.GPIO13, Level::High, OutputConfig::default());
     let mut _rst = Output::new(peripherals.GPIO14, Level::High, OutputConfig::default());
+    // Backlight via LEDC will be configured below; keep BL pin as PWM (GPIO15)
     let _ = _rst.set_low();
     delay.delay_ms(10u32);
     let _ = _rst.set_high();
@@ -102,15 +105,18 @@ fn main() -> ! {
         warn!("stm32: one-shot i2c validation failed");
     }
 
-    let mut _spi = Spi::new(
+    let mut spi = Spi::new(
         peripherals.SPI2,
         SpiConfig::default()
-            .with_frequency(Rate::from_mhz(40))
+            // Use conservative 6 MHz per UI branch final; Mode 0 per main
+            .with_frequency(Rate::from_mhz(6))
             .with_mode(Mode::_0),
     )
     .unwrap()
     .with_sck(peripherals.GPIO12)
     .with_mosi(peripherals.GPIO11);
+    // Reflect STM32 self-check completion on boot screen
+    let _ = ui::boot_update(&mut spi, &mut _cs, &mut _dc, 15, "STM32 I2C Selfcheck");
 
     // USB2_PG (STAT) input – GPIO21 (pull-up)
     let _usb2_pg = Input::new(
@@ -158,6 +164,26 @@ fn main() -> ! {
             drive_mode: esp_hal::gpio::DriveMode::PushPull,
         })
         .unwrap();
+    let _ = ui::boot_update(&mut spi, &mut _cs, &mut _dc, 25, "GPIO/LEDC PWM");
+
+    // LCD Backlight on GPIO15 (LowSpeed@20kHz)
+    let mut t_bl = ledc.timer::<LowSpeed>(timer::Number::Timer2);
+    t_bl
+        .configure(timer::config::Config {
+            duty: timer::config::Duty::Duty8Bit,
+            clock_source: timer::LSClockSource::APBClk,
+            frequency: Rate::from_khz(20),
+        })
+        .unwrap();
+    let mut backlight = ledc.channel(channel::Number::Channel2, peripherals.GPIO15);
+    backlight
+        .configure(channel::config::Config {
+            timer: &t_bl,
+            duty_pct: 85,
+            drive_mode: esp_hal::gpio::DriveMode::PushPull,
+        })
+        .unwrap();
+    info!("LCD backlight set to 85% (20kHz)");
 
     info!("UPS main firmware booting…");
     info!("GPIO mappings: buttons center/up/right/down/left = 0/1/2/4/5");
@@ -168,6 +194,16 @@ fn main() -> ! {
     // Keep buzzer idle; fan controller will manage enable/duty automatically
     buzzer.set_duty(0).ok();
     fan_en.set_low();
+
+    // Initialize LCD and draw boot UI once (non-blocking afterwards)
+    info!("Initializing GC9D01 panel (160x50)...");
+    if let Err(_) = display::init(&mut spi, &mut _cs, &mut _dc, &mut _rst, &mut delay) {
+        warn!("gc9d01: init failed");
+    } else {
+        let _ = ui::boot_init_begin(&mut spi, &mut _cs, &mut _dc);
+        let _ = ui::boot_update(&mut spi, &mut _cs, &mut _dc, 5, "SPI/LCD Ready");
+        info!("Boot UI rendered");
+    }
 
     // Global single-instance drivers
     let mut tca = Some(Tca6408a::new(RefCellDevice::new(&i2c_bus)));
@@ -181,10 +217,12 @@ fn main() -> ! {
             Err(_) => warn!("tca6408a: read IN_PG failed"),
         }
     }
+    let _ = ui::boot_update(&mut spi, &mut _cs, &mut _dc, 40, "TCA6408A");
 
     let mut sc = None;
     let mut sc_init_done: bool = false;
     log_sc8815_temperature(&i2c_bus, &mut delay, &mut tca, &mut sc, &mut sc_init_done);
+    let _ = ui::boot_update(&mut spi, &mut _cs, &mut _dc, 60, "SC8815 ADC Read");
 
     // === Temperature sensor init ===
     tsens::init(&mut delay);
@@ -201,9 +239,11 @@ fn main() -> ! {
         );
     }
     delay.delay_ms(200u32);
+    let _ = ui::boot_update(&mut spi, &mut _cs, &mut _dc, 80, "TSENS Calibrated");
 
     let vin_present = true; // VIN presence sensor pending, default to true per spec
     let mut controller = fan_control::FanController::new(fan_pwm, fan_en, delta_opt, vin_present);
+    let _ = ui::boot_update(&mut spi, &mut _cs, &mut _dc, 100, "Ready");
     let mut adin_elapsed_ms: u32 = 0;
     let mut sb_temps: Option<fan_control::SmartBatteryTemps> = None;
 
