@@ -2,16 +2,19 @@
 #![no_main]
 
 mod adin_temp;
+mod batt_est;
+mod display;
 mod fan_control;
 mod io_expander;
-mod batt_est;
 mod tsens;
-mod display;
 mod ui;
+
+use core::cell::RefCell;
 
 use defmt::{info, warn};
 use embedded_hal::delay::DelayNs;
 use embedded_hal::i2c::I2c as _; // bring trait into scope for write_read without naming conflict
+use embedded_hal_bus::i2c::RefCellDevice;
 use esp_backtrace as _; // panic handler + backtrace/println
 use esp_hal::{
     delay::Delay,
@@ -28,8 +31,6 @@ use esp_hal::{
     time::Rate,
 };
 use esp_println as _; // install UART logger + defmt bridge
-use core::cell::RefCell;
-use embedded_hal_bus::i2c::RefCellDevice;
 use io_expander::Tca6408a;
 use sc8815::{self, registers::constants::DEFAULT_ADDRESS as SC8815_ADDR};
 // STM32 smart-battery I2C slave (validation-only, single-shot)
@@ -174,13 +175,12 @@ fn main() -> ! {
 
     // LCD Backlight on GPIO15 (LowSpeed@20kHz)
     let mut t_bl = ledc.timer::<LowSpeed>(timer::Number::Timer2);
-    t_bl
-        .configure(timer::config::Config {
-            duty: timer::config::Duty::Duty8Bit,
-            clock_source: timer::LSClockSource::APBClk,
-            frequency: Rate::from_khz(20),
-        })
-        .unwrap();
+    t_bl.configure(timer::config::Config {
+        duty: timer::config::Duty::Duty8Bit,
+        clock_source: timer::LSClockSource::APBClk,
+        frequency: Rate::from_khz(20),
+    })
+    .unwrap();
     let mut backlight = ledc.channel(channel::Number::Channel2, peripherals.GPIO15);
     backlight
         .configure(channel::config::Config {
@@ -259,6 +259,9 @@ fn main() -> ! {
     let mut controller = fan_control::FanController::new(fan_pwm, fan_en, delta_opt, vin_present);
     let _ = ui::boot_update(&mut spi, &mut _cs, &mut _dc, 100, "Ready");
     let mut adin_elapsed_ms: u32 = 0;
+    // UI: alternate SoC% and VBAT every ~2 seconds
+    let mut soc_alt_counter: u8 = 0; // seconds within current phase
+    let mut soc_alt_voltage: bool = false; // false => show %, true => show voltage
     let mut sb_temps: Option<fan_control::SmartBatteryTemps> = None;
 
     loop {
@@ -266,6 +269,12 @@ fn main() -> ! {
         adin_elapsed_ms = adin_elapsed_ms.saturating_add(fan_control::SAMPLE_PERIOD_MS);
         if adin_elapsed_ms >= 1000 {
             adin_elapsed_ms -= 1000;
+            // advance SoC display alternation (2-second cadence)
+            soc_alt_counter = soc_alt_counter.saturating_add(1);
+            if soc_alt_counter >= 2 {
+                soc_alt_counter = 0;
+                soc_alt_voltage = !soc_alt_voltage;
+            }
             log_sc8815_temperature(
                 &i2c_bus,
                 &mut delay,
@@ -291,17 +300,27 @@ fn main() -> ! {
 
             // Estimate SoC from VBAT (do not probe CELLS_PRESENT at runtime)
             let vbat_mv = read_smart_battery_vbat_mv(&i2c_bus);
-            let soc_pct = vbat_mv
-                .map(|v| estimate_soc_from_vbat(v))
-                .unwrap_or(0);
+            let soc_pct = vbat_mv.map(|v| estimate_soc_from_vbat(v)).unwrap_or(0);
 
             // Build a minimal dashboard model (real temp + SoC; other fields placeholder)
             let temp_i16 = highest_ext
-                .map(|t| if t.is_sign_negative() { (t - 0.5) as i16 } else { (t + 0.5) as i16 })
+                .map(|t| {
+                    if t.is_sign_negative() {
+                        (t - 0.5) as i16
+                    } else {
+                        (t + 0.5) as i16
+                    }
+                })
                 .unwrap_or(i16::MIN + 1);
             let model = ui::DashboardData {
                 mode: ui::Mode::Standby,
                 soc_pct: soc_pct,
+                vbat_mv: vbat_mv,
+                soc_display: if soc_alt_voltage {
+                    ui::SocDisplay::Voltage
+                } else {
+                    ui::SocDisplay::Percent
+                },
                 in_v_mv: 0,
                 in_a_ma: 0,
                 in_w_mw: 0,
@@ -327,8 +346,7 @@ fn log_sc8815_temperature<'a, I2C, E>(
     sc: &mut Option<sc8815::SC8815<RefCellDevice<'a, I2C>>>,
     sc_init_done: &mut bool,
     last_adin_temp_c: &mut Option<f32>,
-)
-where
+) where
     I2C: embedded_hal::i2c::I2c<Error = E>,
     E: embedded_hal::i2c::Error,
 {

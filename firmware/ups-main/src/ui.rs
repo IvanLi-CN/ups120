@@ -231,6 +231,24 @@ fn draw_text(fb: &mut FrameBuffer, mut x: u16, y: u16, s: &str, color: Rgb565) -
     x
 }
 
+fn draw_text_clipped(
+    fb: &mut FrameBuffer,
+    mut x: u16,
+    y: u16,
+    s: &str,
+    color: Rgb565,
+    max_width_px: u16,
+) -> u16 {
+    let start_x = x;
+    for &b in s.as_bytes() {
+        if x.saturating_sub(start_x) + CELL_W > max_width_px {
+            break;
+        }
+        x += draw_char(fb, x, y, b.to_ascii_uppercase(), color);
+    }
+    x
+}
+
 fn text_width(s: &str) -> u16 {
     (s.as_bytes().len() as u16) * CELL_W
 }
@@ -432,7 +450,14 @@ where
         }
         // draw label line above bar
         let y_text = bar_y - LINE_H;
-        fill_rect_buffer(fb, MARGIN_LR, y_text, LOGICAL_WIDTH - MARGIN_LR - 1, bar_y - 1, BLACK);
+        fill_rect_buffer(
+            fb,
+            MARGIN_LR,
+            y_text,
+            LOGICAL_WIDTH - MARGIN_LR - 1,
+            bar_y - 1,
+            BLACK,
+        );
         let x = center_x(label);
         draw_text(fb, x, y_text, label, WHITE);
     });
@@ -448,6 +473,8 @@ pub enum TempSlot {
 pub struct DashboardData {
     pub mode: Mode,
     pub soc_pct: u8,
+    pub vbat_mv: Option<u32>,
+    pub soc_display: SocDisplay,
     pub in_v_mv: u32,
     pub in_a_ma: u32,
     pub in_w_mw: u32,
@@ -508,10 +535,46 @@ fn fmt_power(mw: u32, buf: &mut heapless::String<16>) {
     }
 }
 
-fn fmt_soc(pct: u8, buf: &mut heapless::String<8>) {
+fn fmt_soc<const N: usize>(pct: u8, buf: &mut heapless::String<N>) {
     buf.clear();
     let capped = pct.min(100);
     let _ = write!(buf, "{:>3}%", capped);
+}
+
+#[derive(Clone, Copy)]
+pub enum SocDisplay {
+    Percent,
+    Voltage,
+}
+
+fn build_soc_text_and_color(
+    soc: u8,
+    vbat_mv: Option<u32>,
+    which: SocDisplay,
+) -> (heapless::String<16>, Rgb565) {
+    let mut s: heapless::String<16> = heapless::String::new();
+    match which {
+        SocDisplay::Percent => {
+            fmt_soc(soc, &mut s);
+            let color = if soc <= 15 {
+                RED
+            } else if soc <= 30 {
+                YELLOW
+            } else {
+                WHITE
+            };
+            (s, color)
+        }
+        SocDisplay::Voltage => {
+            if let Some(mv) = vbat_mv {
+                fmt_voltage(mv, &mut s);
+                (s, ORANGE)
+            } else {
+                let _ = s.push_str(PLACEHOLDER);
+                (s, GRAY)
+            }
+        }
+    }
 }
 
 fn fmt_temp_digits(c: i16, buf: &mut heapless::String<8>) {
@@ -533,13 +596,12 @@ fn fmt_idle_dur(secs: u32, buf: &mut heapless::String<16>) {
     let _ = write!(buf, "{:02}D{:02}:{:02}", d, h, m);
 }
 
-fn draw_mode(fb: &mut FrameBuffer, y: u16, mode: Mode) {
-    let (text, color) = match mode {
+fn mode_text_and_color(mode: Mode) -> (&'static str, Rgb565) {
+    match mode {
         Mode::Standby => ("MODE: STANDBY", GRAY),
         Mode::Charge => ("MODE: CHARGE", CYAN),
         Mode::Discharge => ("MODE: DISCHARGE", WHITE),
-    };
-    let _ = draw_text(fb, MARGIN_LR, y, text, color);
+    }
 }
 
 fn draw_soc(fb: &mut FrameBuffer, y: u16, soc: u8) {
@@ -611,8 +673,17 @@ where
         let mut ws: heapless::String<16> = heapless::String::new();
 
         let y0 = MARGIN_TB;
-        draw_mode(fb, y0, model.mode);
-        draw_soc(fb, y0, model.soc_pct);
+        // Compose top-right battery area (percent or voltage)
+        let (soc_text, soc_color) =
+            build_soc_text_and_color(model.soc_pct, model.vbat_mv, model.soc_display);
+        let soc_w = text_width(&soc_text);
+        let soc_x = LOGICAL_WIDTH - MARGIN_LR - soc_w;
+        let _ = draw_text(fb, soc_x, y0, &soc_text, soc_color);
+
+        // Draw mode left, clipped to avoid overlap with right area
+        let (mode_text, mode_color) = mode_text_and_color(model.mode);
+        let max_mode_width = soc_x.saturating_sub(MARGIN_LR);
+        let _ = draw_text_clipped(fb, MARGIN_LR, y0, mode_text, mode_color, max_mode_width);
 
         fmt_voltage(model.in_v_mv, &mut vs);
         fmt_current(model.in_a_ma, &mut as_);
