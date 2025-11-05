@@ -17,3 +17,6 @@ yarn-debug.log*
 yarn-error.log*/target-off/
 downloads/
 tmp/
+
+# Local virtual environments
+.venv/

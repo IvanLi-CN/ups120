@@ -4,7 +4,10 @@
 mod adin_temp;
 mod fan_control;
 mod io_expander;
+mod batt_est;
 mod tsens;
+mod display;
+mod ui;
 
 use defmt::{info, warn};
 use embedded_hal::delay::DelayNs;
@@ -39,6 +42,11 @@ const SB_TEMP_DATA_BYTES: usize = 4;
 const SB_TEMP_FRAME_BYTES: usize = SB_TEMP_DATA_BYTES * 2;
 const TEST_A: u8 = 0x5A;
 const TEST_B: u8 = 0xA5;
+
+// Battery pack configuration (per project spec; do not probe at runtime)
+const PACK_CELLS_S: u8 = 5; // 5S Li-ion (BQ76920 max 5S)
+const SOC_EMPTY_VBAT_MV: u32 = 12_500; // Cutoff threshold (pack)
+const SOC_FULL_VBAT_MV: u32 = 18_500; // Full threshold (pack)
 
 // Populate the ESP-IDF App Descriptor so espflash can read metadata
 esp_bootloader_esp_idf::esp_app_desc!();
@@ -86,10 +94,11 @@ fn main() -> ! {
     // Shared-bus wrapper for single-threaded access
     let i2c_bus = RefCell::new(i2c);
 
-    // SPI for LCD (write-only): MOSI=11, SCLK=12, optional CS/DC/RST as GPIO
+    // SPI for LCD (write-only): MOSI=11, SCLK=12, optional CS/DC/RST/BL as GPIO
     let mut _dc = Output::new(peripherals.GPIO10, Level::Low, OutputConfig::default());
     let mut _cs = Output::new(peripherals.GPIO13, Level::High, OutputConfig::default());
     let mut _rst = Output::new(peripherals.GPIO14, Level::High, OutputConfig::default());
+    // Backlight via LEDC will be configured below; keep BL pin as PWM (GPIO15)
     let _ = _rst.set_low();
     delay.delay_ms(10u32);
     let _ = _rst.set_high();
@@ -102,15 +111,18 @@ fn main() -> ! {
         warn!("stm32: one-shot i2c validation failed");
     }
 
-    let mut _spi = Spi::new(
+    let mut spi = Spi::new(
         peripherals.SPI2,
         SpiConfig::default()
-            .with_frequency(Rate::from_mhz(40))
+            // Use conservative 6 MHz per UI branch final; Mode 0 per main
+            .with_frequency(Rate::from_mhz(6))
             .with_mode(Mode::_0),
     )
     .unwrap()
     .with_sck(peripherals.GPIO12)
     .with_mosi(peripherals.GPIO11);
+    // Reflect STM32 self-check completion on boot screen
+    let _ = ui::boot_update(&mut spi, &mut _cs, &mut _dc, 15, "STM32 I2C Selfcheck");
 
     // USB2_PG (STAT) input – GPIO21 (pull-up)
     let _usb2_pg = Input::new(
@@ -158,6 +170,26 @@ fn main() -> ! {
             drive_mode: esp_hal::gpio::DriveMode::PushPull,
         })
         .unwrap();
+    let _ = ui::boot_update(&mut spi, &mut _cs, &mut _dc, 25, "GPIO/LEDC PWM");
+
+    // LCD Backlight on GPIO15 (LowSpeed@20kHz)
+    let mut t_bl = ledc.timer::<LowSpeed>(timer::Number::Timer2);
+    t_bl
+        .configure(timer::config::Config {
+            duty: timer::config::Duty::Duty8Bit,
+            clock_source: timer::LSClockSource::APBClk,
+            frequency: Rate::from_khz(20),
+        })
+        .unwrap();
+    let mut backlight = ledc.channel(channel::Number::Channel2, peripherals.GPIO15);
+    backlight
+        .configure(channel::config::Config {
+            timer: &t_bl,
+            duty_pct: 85,
+            drive_mode: esp_hal::gpio::DriveMode::PushPull,
+        })
+        .unwrap();
+    info!("LCD backlight set to 85% (20kHz)");
 
     info!("UPS main firmware booting…");
     info!("GPIO mappings: buttons center/up/right/down/left = 0/1/2/4/5");
@@ -168,6 +200,16 @@ fn main() -> ! {
     // Keep buzzer idle; fan controller will manage enable/duty automatically
     buzzer.set_duty(0).ok();
     fan_en.set_low();
+
+    // Initialize LCD and draw boot UI once (non-blocking afterwards)
+    info!("Initializing GC9D01 panel (160x50)...");
+    if let Err(_) = display::init(&mut spi, &mut _cs, &mut _dc, &mut _rst, &mut delay) {
+        warn!("gc9d01: init failed");
+    } else {
+        let _ = ui::boot_init_begin(&mut spi, &mut _cs, &mut _dc);
+        let _ = ui::boot_update(&mut spi, &mut _cs, &mut _dc, 5, "SPI/LCD Ready");
+        info!("Boot UI rendered");
+    }
 
     // Global single-instance drivers
     let mut tca = Some(Tca6408a::new(RefCellDevice::new(&i2c_bus)));
@@ -181,10 +223,20 @@ fn main() -> ! {
             Err(_) => warn!("tca6408a: read IN_PG failed"),
         }
     }
+    let _ = ui::boot_update(&mut spi, &mut _cs, &mut _dc, 40, "TCA6408A");
 
     let mut sc = None;
     let mut sc_init_done: bool = false;
-    log_sc8815_temperature(&i2c_bus, &mut delay, &mut tca, &mut sc, &mut sc_init_done);
+    let mut last_adin_temp_c: Option<f32> = None;
+    log_sc8815_temperature(
+        &i2c_bus,
+        &mut delay,
+        &mut tca,
+        &mut sc,
+        &mut sc_init_done,
+        &mut last_adin_temp_c,
+    );
+    let _ = ui::boot_update(&mut spi, &mut _cs, &mut _dc, 60, "SC8815 ADC Read");
 
     // === Temperature sensor init ===
     tsens::init(&mut delay);
@@ -201,9 +253,11 @@ fn main() -> ! {
         );
     }
     delay.delay_ms(200u32);
+    let _ = ui::boot_update(&mut spi, &mut _cs, &mut _dc, 80, "TSENS Calibrated");
 
     let vin_present = true; // VIN presence sensor pending, default to true per spec
     let mut controller = fan_control::FanController::new(fan_pwm, fan_en, delta_opt, vin_present);
+    let _ = ui::boot_update(&mut spi, &mut _cs, &mut _dc, 100, "Ready");
     let mut adin_elapsed_ms: u32 = 0;
     let mut sb_temps: Option<fan_control::SmartBatteryTemps> = None;
 
@@ -212,9 +266,56 @@ fn main() -> ! {
         adin_elapsed_ms = adin_elapsed_ms.saturating_add(fan_control::SAMPLE_PERIOD_MS);
         if adin_elapsed_ms >= 1000 {
             adin_elapsed_ms -= 1000;
-            log_sc8815_temperature(&i2c_bus, &mut delay, &mut tca, &mut sc, &mut sc_init_done);
+            log_sc8815_temperature(
+                &i2c_bus,
+                &mut delay,
+                &mut tca,
+                &mut sc,
+                &mut sc_init_done,
+                &mut last_adin_temp_c,
+            );
             let smart_batt = read_smart_battery_temperatures(&i2c_bus);
             sb_temps = smart_batt;
+
+            // Render dashboard with real external highest temperature (exclude MCU TSENS)
+            let mut highest_ext: Option<f32> = None;
+            if let Some(sb) = sb_temps {
+                highest_ext = sb.highest();
+            }
+            if let Some(adin_c) = last_adin_temp_c {
+                highest_ext = match highest_ext {
+                    Some(h) => Some(h.max(adin_c)),
+                    None => Some(adin_c),
+                };
+            }
+
+            // Estimate SoC from VBAT (do not probe CELLS_PRESENT at runtime)
+            let vbat_mv = read_smart_battery_vbat_mv(&i2c_bus);
+            let soc_pct = vbat_mv
+                .map(|v| estimate_soc_from_vbat(v))
+                .unwrap_or(0);
+
+            // Build a minimal dashboard model (real temp + SoC; other fields placeholder)
+            let temp_i16 = highest_ext
+                .map(|t| if t.is_sign_negative() { (t - 0.5) as i16 } else { (t + 0.5) as i16 })
+                .unwrap_or(i16::MIN + 1);
+            let model = ui::DashboardData {
+                mode: ui::Mode::Standby,
+                soc_pct: soc_pct,
+                in_v_mv: 0,
+                in_a_ma: 0,
+                in_w_mw: 0,
+                chg_w_mw: 0,
+                out_v_mv: 0,
+                out_a_ma: 0,
+                out_w_mw: 0,
+                bat_temp_c: temp_i16,
+                ups_temp_c: 0,
+                fan_pct: 0,
+                idle_secs: 0,
+                temp_slot: ui::TempSlot::Battery,
+            };
+            let _ = ui::render_dashboard_once(&mut spi, &mut _cs, &mut _dc, &model);
         }
     }
 }
@@ -225,6 +326,7 @@ fn log_sc8815_temperature<'a, I2C, E>(
     tca: &mut Option<Tca6408a<RefCellDevice<'a, I2C>>>,
     sc: &mut Option<sc8815::SC8815<RefCellDevice<'a, I2C>>>,
     sc_init_done: &mut bool,
+    last_adin_temp_c: &mut Option<f32>,
 )
 where
     I2C: embedded_hal::i2c::I2c<Error = E>,
@@ -281,10 +383,13 @@ where
 
     if let Some(adin_mv) = adin_mv_sample {
         match adin_temp::adin_mv_to_celsius(adin_mv) {
-            Some(temp_c) => info!(
-                "sc8815: ADIN temp ≈ {=f32} °C (from {=u16} mV)",
-                temp_c, adin_mv
-            ),
+            Some(temp_c) => {
+                *last_adin_temp_c = Some(temp_c);
+                info!(
+                    "sc8815: ADIN temp ≈ {=f32} °C (from {=u16} mV)",
+                    temp_c, adin_mv
+                )
+            }
             None => warn!("sc8815: ADIN conversion out of range"),
         }
     }
@@ -331,6 +436,33 @@ where
             None
         }
     }
+}
+
+fn read_smart_battery_vbat_mv<'a, I2C, E>(i2c_bus: &'a RefCell<I2C>) -> Option<u32>
+where
+    I2C: embedded_hal::i2c::I2c<Error = E>,
+    E: embedded_hal::i2c::Error,
+{
+    let mut dev = RefCellDevice::new(i2c_bus);
+    let mut vbuf = [0u8; 2];
+    if dev.write_read(STM32_ADDR, &[0x10], &mut vbuf).is_ok() {
+        let v = u16::from_le_bytes(vbuf) as u32;
+        Some(v)
+    } else {
+        None
+    }
+}
+
+fn estimate_soc_from_vbat(vbat_mv: u32) -> u8 {
+    if vbat_mv <= SOC_EMPTY_VBAT_MV {
+        return 0;
+    }
+    if vbat_mv >= SOC_FULL_VBAT_MV {
+        return 100;
+    }
+    let span = SOC_FULL_VBAT_MV - SOC_EMPTY_VBAT_MV;
+    let val = ((vbat_mv - SOC_EMPTY_VBAT_MV) * 100) / span;
+    val as u8
 }
 
 fn temp_from_centi(raw: i16) -> Option<f32> {
