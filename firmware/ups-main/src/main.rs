@@ -6,8 +6,8 @@ mod fan_control;
 mod io_expander;
 mod batt_est;
 mod tsens;
- mod display;
- mod ui;
+mod display;
+mod ui;
 
 use defmt::{info, warn};
 use embedded_hal::delay::DelayNs;
@@ -42,6 +42,11 @@ const SB_TEMP_DATA_BYTES: usize = 4;
 const SB_TEMP_FRAME_BYTES: usize = SB_TEMP_DATA_BYTES * 2;
 const TEST_A: u8 = 0x5A;
 const TEST_B: u8 = 0xA5;
+
+// Battery pack configuration (per project spec; do not probe at runtime)
+const PACK_CELLS_S: u8 = 5; // 5S Li-ion (BQ76920 max 5S)
+const SOC_EMPTY_VBAT_MV: u32 = 12_500; // Cutoff threshold (pack)
+const SOC_FULL_VBAT_MV: u32 = 18_500; // Full threshold (pack)
 
 // Populate the ESP-IDF App Descriptor so espflash can read metadata
 esp_bootloader_esp_idf::esp_app_desc!();
@@ -284,13 +289,19 @@ fn main() -> ! {
                 };
             }
 
-            // Build a minimal dashboard model (real temp + placeholders for other values)
+            // Estimate SoC from VBAT (do not probe CELLS_PRESENT at runtime)
+            let vbat_mv = read_smart_battery_vbat_mv(&i2c_bus);
+            let soc_pct = vbat_mv
+                .map(|v| estimate_soc_from_vbat(v))
+                .unwrap_or(0);
+
+            // Build a minimal dashboard model (real temp + SoC; other fields placeholder)
             let temp_i16 = highest_ext
                 .map(|t| if t.is_sign_negative() { (t - 0.5) as i16 } else { (t + 0.5) as i16 })
                 .unwrap_or(i16::MIN + 1);
             let model = ui::DashboardData {
                 mode: ui::Mode::Standby,
-                soc_pct: 0,
+                soc_pct: soc_pct,
                 in_v_mv: 0,
                 in_a_ma: 0,
                 in_w_mw: 0,
@@ -425,6 +436,33 @@ where
             None
         }
     }
+}
+
+fn read_smart_battery_vbat_mv<'a, I2C, E>(i2c_bus: &'a RefCell<I2C>) -> Option<u32>
+where
+    I2C: embedded_hal::i2c::I2c<Error = E>,
+    E: embedded_hal::i2c::Error,
+{
+    let mut dev = RefCellDevice::new(i2c_bus);
+    let mut vbuf = [0u8; 2];
+    if dev.write_read(STM32_ADDR, &[0x10], &mut vbuf).is_ok() {
+        let v = u16::from_le_bytes(vbuf) as u32;
+        Some(v)
+    } else {
+        None
+    }
+}
+
+fn estimate_soc_from_vbat(vbat_mv: u32) -> u8 {
+    if vbat_mv <= SOC_EMPTY_VBAT_MV {
+        return 0;
+    }
+    if vbat_mv >= SOC_FULL_VBAT_MV {
+        return 100;
+    }
+    let span = SOC_FULL_VBAT_MV - SOC_EMPTY_VBAT_MV;
+    let val = ((vbat_mv - SOC_EMPTY_VBAT_MV) * 100) / span;
+    val as u8
 }
 
 fn temp_from_centi(raw: i16) -> Option<f32> {
