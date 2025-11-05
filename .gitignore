@@ -4,12 +4,16 @@ logs/
 Cargo.lock
 
 /.idea
+.serena/
 
 .DS_Store
 *.FCBak
+*.bak
 
 # Node.js dependencies
 node_modules/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*/target-off/
+downloads/
+tmp/
