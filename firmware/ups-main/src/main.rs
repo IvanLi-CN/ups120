@@ -64,6 +64,9 @@ fn main() -> ! {
     // Initialise chip peripherals
     let peripherals = esp_hal::init(esp_hal::Config::default());
     let mut delay = Delay::new();
+    let boot_millis = esp_hal::time::Instant::now()
+        .duration_since_epoch()
+        .as_millis() as u64;
 
     // === Restore board bring-up so other subsystems remain functional ===
     // Buttons (internal pull-up, active-low)
@@ -301,6 +304,13 @@ fn main() -> ! {
             // Estimate SoC from VBAT (do not probe CELLS_PRESENT at runtime)
             let vbat_mv = read_smart_battery_vbat_mv(&i2c_bus);
             let soc_pct = vbat_mv.map(|v| estimate_soc_from_vbat(v)).unwrap_or(0);
+            let now_millis = esp_hal::time::Instant::now()
+                .duration_since_epoch()
+                .as_millis() as u64;
+            let uptime_secs = now_millis
+                .saturating_sub(boot_millis)
+                .saturating_div(1000)
+                .min(u64::from(u32::MAX)) as u32;
 
             // Build a minimal dashboard model (real temp + SoC; other fields placeholder)
             let temp_i16 = highest_ext
@@ -331,7 +341,7 @@ fn main() -> ! {
                 bat_temp_c: temp_i16,
                 ups_temp_c: 0,
                 fan_pct: 0,
-                idle_secs: 0,
+                uptime_secs,
                 temp_slot: ui::TempSlot::Battery,
             };
             let _ = ui::render_dashboard_once(&mut spi, &mut _cs, &mut _dc, &model);
