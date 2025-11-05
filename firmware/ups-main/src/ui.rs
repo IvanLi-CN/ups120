@@ -485,7 +485,7 @@ pub struct DashboardData {
     pub bat_temp_c: i16,
     pub ups_temp_c: i16,
     pub fan_pct: u8,
-    pub idle_secs: u32,
+    pub uptime_secs: u32,
     pub temp_slot: TempSlot,
 }
 
@@ -589,11 +589,20 @@ fn fmt_fan(pct: u8, buf: &mut heapless::String<8>) {
     let _ = write!(buf, "{:>3}%", capped);
 }
 
-fn fmt_idle_dur(secs: u32, buf: &mut heapless::String<16>) {
-    let d = secs / 86400;
-    let h = (secs % 86400) / 3600;
-    let m = (secs % 3600) / 60;
-    let _ = write!(buf, "{:02}D{:02}:{:02}", d, h, m);
+fn fmt_uptime(secs: u32, buf: &mut heapless::String<16>) {
+    buf.clear();
+    const THRESHOLD: u32 = 72 * 3600;
+    if secs < THRESHOLD {
+        let h = secs / 3600;
+        let m = (secs % 3600) / 60;
+        let s = secs % 60;
+        let _ = write!(buf, "{:02}:{:02}:{:02}", h, m, s);
+    } else {
+        let d = secs / 86400;
+        let h = (secs % 86400) / 3600;
+        let m = (secs % 3600) / 60;
+        let _ = write!(buf, "{:02}D{:02}:{:02}", d, h, m);
+    }
 }
 
 fn mode_text_and_color(mode: Mode) -> (&'static str, Rgb565) {
@@ -699,9 +708,9 @@ where
                 draw_trio_line(fb, y2, "CHG", PLACEHOLDER, PLACEHOLDER, &ws);
             }
             Mode::Standby => {
-                let mut idle: heapless::String<16> = heapless::String::new();
-                fmt_idle_dur(model.idle_secs, &mut idle);
-                draw_trio_line(fb, y2, "IDLE", &idle, PLACEHOLDER, PLACEHOLDER);
+                let mut uptime: heapless::String<16> = heapless::String::new();
+                fmt_uptime(model.uptime_secs, &mut uptime);
+                draw_trio_line(fb, y2, "RUN ", &uptime, PLACEHOLDER, PLACEHOLDER);
             }
             Mode::Discharge => {
                 vs.clear();
