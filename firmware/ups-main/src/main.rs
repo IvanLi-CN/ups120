@@ -265,6 +265,9 @@ fn main() -> ! {
     // UI: alternate SoC% and VBAT every ~2 seconds
     let mut soc_alt_counter: u8 = 0; // seconds within current phase
     let mut soc_alt_voltage: bool = false; // false => show %, true => show voltage
+                                           // UI: rotate through available temperature sources every ~2 seconds
+    let mut temp_alt_counter: u8 = 0;
+    let mut temp_cycle_index: usize = 0;
     let mut sb_temps: Option<fan_control::SmartBatteryTemps> = None;
 
     loop {
@@ -289,17 +292,40 @@ fn main() -> ! {
             let smart_batt = read_smart_battery_temperatures(&i2c_bus);
             sb_temps = smart_batt;
 
-            // Render dashboard with real external highest temperature (exclude MCU TSENS)
-            let mut highest_ext: Option<f32> = None;
-            if let Some(sb) = sb_temps {
-                highest_ext = sb.highest();
+            let pack_temp = convert_temp_to_i16(sb_temps.and_then(|t| t.pack_c));
+            let charger_temp = convert_temp_to_i16(sb_temps.and_then(|t| t.charger_c));
+            let adin_temp = convert_temp_to_i16(last_adin_temp_c);
+
+            let temp_sources = [
+                (ui::TempSlot::Battery, pack_temp),
+                (ui::TempSlot::Charger, charger_temp),
+                (ui::TempSlot::Ups, adin_temp),
+            ];
+
+            let mut active_slots = [0usize; 3];
+            let mut active_count = 0;
+            for (idx, (_, value)) in temp_sources.iter().enumerate() {
+                if value.is_some() {
+                    active_slots[active_count] = idx;
+                    active_count += 1;
+                }
             }
-            if let Some(adin_c) = last_adin_temp_c {
-                highest_ext = match highest_ext {
-                    Some(h) => Some(h.max(adin_c)),
-                    None => Some(adin_c),
-                };
+            if active_count == 0 {
+                active_slots[0] = 0;
+                active_count = 1;
             }
+            if temp_cycle_index >= active_count {
+                temp_cycle_index = 0;
+            }
+            temp_alt_counter = temp_alt_counter.saturating_add(1);
+            if temp_alt_counter >= 2 {
+                temp_alt_counter = 0;
+                if active_count > 0 {
+                    temp_cycle_index = (temp_cycle_index + 1) % active_count;
+                }
+            }
+            let current_slot_idx = active_slots[temp_cycle_index];
+            let display_slot = temp_sources[current_slot_idx].0;
 
             // Estimate SoC from VBAT (do not probe CELLS_PRESENT at runtime)
             let vbat_mv = read_smart_battery_vbat_mv(&i2c_bus);
@@ -312,16 +338,7 @@ fn main() -> ! {
                 .saturating_div(1000)
                 .min(u64::from(u32::MAX)) as u32;
 
-            // Build a minimal dashboard model (real temp + SoC; other fields placeholder)
-            let temp_i16 = highest_ext
-                .map(|t| {
-                    if t.is_sign_negative() {
-                        (t - 0.5) as i16
-                    } else {
-                        (t + 0.5) as i16
-                    }
-                })
-                .unwrap_or(i16::MIN + 1);
+            // Build a minimal dashboard model (real temps + SoC; other fields placeholder)
             let model = ui::DashboardData {
                 mode: ui::Mode::Standby,
                 soc_pct: soc_pct,
@@ -338,11 +355,12 @@ fn main() -> ! {
                 out_v_mv: 0,
                 out_a_ma: 0,
                 out_w_mw: 0,
-                bat_temp_c: temp_i16,
-                ups_temp_c: 0,
+                bat_temp_c: pack_temp,
+                charger_temp_c: charger_temp,
+                ups_temp_c: adin_temp,
                 fan_pct: 0,
                 uptime_secs,
-                temp_slot: ui::TempSlot::Battery,
+                temp_slot: display_slot,
             };
             let _ = ui::render_dashboard_once(&mut spi, &mut _cs, &mut _dc, &model);
         }
@@ -431,29 +449,29 @@ where
     E: embedded_hal::i2c::Error,
 {
     // STM32 smart-battery slave currently exposes raw registers without CRC interleaving.
-    // Use pointer write then read 4 bytes: [TPACK_L, TPACK_H, TMOS_L, TMOS_H] (i16 LE, 0.01°C; i16::MIN = invalid).
+    // Use pointer write then read 4 bytes: [TPACK_L, TPACK_H, TCHG_L, TCHG_H] (i16 LE, 0.01°C; i16::MIN = invalid).
     let mut data = [0u8; 4];
     let mut dev = RefCellDevice::new(i2c_bus);
     match dev.write_read(STM32_ADDR, &[SB_TEMP_BASE], &mut data) {
         Ok(()) => {
             let pack = i16::from_le_bytes([data[0], data[1]]);
-            let mos = i16::from_le_bytes([data[2], data[3]]);
+            let charger = i16::from_le_bytes([data[2], data[3]]);
             let pack_c = temp_from_centi(pack);
-            let mos_c = temp_from_centi(mos);
-            let temps = fan_control::SmartBatteryTemps::new(pack_c, mos_c);
+            let charger_c = temp_from_centi(charger);
+            let temps = fan_control::SmartBatteryTemps::new(pack_c, charger_c);
             let hottest = temps.highest();
             let pack_temp = pack_c.unwrap_or(f32::NAN);
-            let mos_temp = mos_c.unwrap_or(f32::NAN);
+            let charger_temp = charger_c.unwrap_or(f32::NAN);
             let pack_valid = pack_c.is_some();
-            let mos_valid = mos_c.is_some();
+            let charger_valid = charger_c.is_some();
             let hottest_temp = hottest.unwrap_or(f32::NAN);
             let hottest_valid = hottest.is_some();
             info!(
-                    "smart-battery: sb_pack={=f32}°C sb_pack_valid={} sb_mos={=f32}°C sb_mos_valid={} sb_hottest={=f32}°C sb_hottest_valid={}",
+                    "smart-battery: sb_pack={=f32}°C sb_pack_valid={} sb_charger={=f32}°C sb_charger_valid={} sb_hottest={=f32}°C sb_hottest_valid={}",
                     pack_temp,
                     pack_valid,
-                    mos_temp,
-                    mos_valid,
+                    charger_temp,
+                    charger_valid,
                     hottest_temp,
                     hottest_valid
                 );
@@ -491,6 +509,18 @@ fn estimate_soc_from_vbat(vbat_mv: u32) -> u8 {
     let span = SOC_FULL_VBAT_MV - SOC_EMPTY_VBAT_MV;
     let val = ((vbat_mv - SOC_EMPTY_VBAT_MV) * 100) / span;
     val as u8
+}
+
+fn round_temp_to_i16(temp: f32) -> i16 {
+    if temp.is_sign_negative() {
+        (temp - 0.5) as i16
+    } else {
+        (temp + 0.5) as i16
+    }
+}
+
+fn convert_temp_to_i16(temp: Option<f32>) -> Option<i16> {
+    temp.filter(|t| t.is_finite()).map(|t| round_temp_to_i16(t))
 }
 
 fn temp_from_centi(raw: i16) -> Option<f32> {

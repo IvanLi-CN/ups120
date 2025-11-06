@@ -420,7 +420,7 @@ def draw_aux_line(pixels, y: int, temp_label: str, temp_c: int, fan_pct: int) ->
 
 def draw_dashboard(mode: str, temp_slot: str) -> Image.Image:
     assert mode in ('Discharge', 'Charge', 'Standby')
-    assert temp_slot in ('BAT', 'UPS')
+    assert temp_slot in ('BAT', 'CHG', 'UPS')
     img, draw, pixels = new_canvas()
 
     # Row topology (12px line height from top, starting at y=1)
@@ -444,7 +444,11 @@ def draw_dashboard(mode: str, temp_slot: str) -> Image.Image:
 
     # Row 3: depends on mode
     temp_label = temp_slot
-    temp_value = 32 if temp_slot == 'BAT' else 36
+    temp_value = {
+        'BAT': 32,
+        'CHG': 34,
+        'UPS': 36,
+    }[temp_slot]
     if mode == 'Discharge':
         draw_trio_line(
             pixels,
@@ -487,8 +491,8 @@ def main():
     # Dashboards
     for mode, temp_slot, name in (
         ('Discharge', 'BAT', 'dashboard-discharge.png'),
-        ('Charge', 'UPS', 'dashboard-charge.png'),
-        ('Standby', 'BAT', 'dashboard-standby.png'),
+        ('Charge', 'CHG', 'dashboard-charge.png'),
+        ('Standby', 'UPS', 'dashboard-standby.png'),
     ):
         img = draw_dashboard(mode, temp_slot)
         save_scaled(img, name)

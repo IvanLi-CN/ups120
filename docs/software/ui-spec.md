@@ -237,6 +237,7 @@
   "output_current_ma": 2000,
   "output_power_mw": 100000,
   "battery_temp_c": 32,
+  "charger_temp_c": 34,                    // 智能电池充电器模块温度
   "ups_temp_c": 36,                        // SC8815 ADIN 转换后的摄氏度
   "fan_duty_pct": 45,
   "idle_since_last_discharge_s": 93780,    // 待机：用于格式化为 01d02:03
