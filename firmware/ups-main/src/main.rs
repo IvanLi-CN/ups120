@@ -410,9 +410,8 @@ fn log_sc8815_temperature<'a, I2C, E>(
                 warn!("sc8815: ADC start failed");
             } else {
                 delay.delay_ms(10u32);
-                match d.get_adc_measurements() {
-                    Ok(meas) => adin_mv_sample = Some(meas.adin_mv),
-                    Err(_) => warn!("sc8815: ADC read failed"),
+                if let Ok(meas) = d.get_adc_measurements() {
+                    adin_mv_sample = Some(meas.adin_mv);
                 }
                 let _ = d.set_adc_conversion(false);
             }
@@ -428,15 +427,8 @@ fn log_sc8815_temperature<'a, I2C, E>(
     }
 
     if let Some(adin_mv) = adin_mv_sample {
-        match adin_temp::adin_mv_to_celsius(adin_mv) {
-            Some(temp_c) => {
-                *last_adin_temp_c = Some(temp_c);
-                info!(
-                    "sc8815: ADIN temp ≈ {=f32} °C (from {=u16} mV)",
-                    temp_c, adin_mv
-                )
-            }
-            None => warn!("sc8815: ADIN conversion out of range"),
+        if let Some(temp_c) = adin_temp::adin_mv_to_celsius(adin_mv) {
+            *last_adin_temp_c = Some(temp_c);
         }
     }
 }
@@ -459,22 +451,12 @@ where
             let pack_c = temp_from_centi(pack);
             let charger_c = temp_from_centi(charger);
             let temps = fan_control::SmartBatteryTemps::new(pack_c, charger_c);
-            let hottest = temps.highest();
-            let pack_temp = pack_c.unwrap_or(f32::NAN);
-            let charger_temp = charger_c.unwrap_or(f32::NAN);
-            let pack_valid = pack_c.is_some();
-            let charger_valid = charger_c.is_some();
-            let hottest_temp = hottest.unwrap_or(f32::NAN);
-            let hottest_valid = hottest.is_some();
             info!(
-                    "smart-battery: sb_pack={=f32}°C sb_pack_valid={} sb_charger={=f32}°C sb_charger_valid={} sb_hottest={=f32}°C sb_hottest_valid={}",
-                    pack_temp,
-                    pack_valid,
-                    charger_temp,
-                    charger_valid,
-                    hottest_temp,
-                    hottest_valid
-                );
+                "smart-battery temps => pack={=f32}°C charger={=f32}°C hottest={=f32}°C",
+                pack_c.unwrap_or(f32::NAN),
+                charger_c.unwrap_or(f32::NAN),
+                temps.highest().unwrap_or(f32::NAN)
+            );
             Some(temps)
         }
         Err(_) => {
