@@ -467,6 +467,7 @@ where
 #[derive(Clone, Copy)]
 pub enum TempSlot {
     Battery,
+    Charger,
     Ups,
 }
 
@@ -482,8 +483,9 @@ pub struct DashboardData {
     pub out_v_mv: u32,
     pub out_a_ma: u32,
     pub out_w_mw: u32,
-    pub bat_temp_c: i16,
-    pub ups_temp_c: i16,
+    pub bat_temp_c: Option<i16>,
+    pub charger_temp_c: Option<i16>,
+    pub ups_temp_c: Option<i16>,
     pub fan_pct: u8,
     pub uptime_secs: u32,
     pub temp_slot: TempSlot,
@@ -637,9 +639,18 @@ fn draw_trio_line(fb: &mut FrameBuffer, y: u16, head: &str, v: &str, a: &str, w:
     let _ = draw_value_right(fb, COL_POWER, POWER_WIDTH_CELLS, y, w, power_color);
 }
 
-fn draw_aux_line(fb: &mut FrameBuffer, y: u16, slot: TempSlot, bat_c: i16, ups_c: i16, fan: u8) {
+fn draw_aux_line(
+    fb: &mut FrameBuffer,
+    y: u16,
+    slot: TempSlot,
+    bat_c: Option<i16>,
+    charger_c: Option<i16>,
+    ups_c: Option<i16>,
+    fan: u8,
+) {
     let (label, temp) = match slot {
         TempSlot::Battery => ("BAT", bat_c),
+        TempSlot::Charger => ("CHG", charger_c),
         TempSlot::Ups => ("UPS", ups_c),
     };
 
@@ -647,7 +658,13 @@ fn draw_aux_line(fb: &mut FrameBuffer, y: u16, slot: TempSlot, bat_c: i16, ups_c
     let _ = draw_text(fb, temp_label_x, y, label, CYAN);
 
     let mut temp_digits: heapless::String<8> = heapless::String::new();
-    fmt_temp_digits(temp, &mut temp_digits);
+    let color = if let Some(value) = temp {
+        fmt_temp_digits(value, &mut temp_digits);
+        WHITE
+    } else {
+        let _ = temp_digits.push_str(PLACEHOLDER);
+        GRAY
+    };
     let total_cells = temp_digits.as_bytes().len() + 1; // digits + 'C'
     let start_cell = if total_cells >= TEMP_VALUE_CELLS {
         AUX_TEMP_VALUE_COL
@@ -655,8 +672,8 @@ fn draw_aux_line(fb: &mut FrameBuffer, y: u16, slot: TempSlot, bat_c: i16, ups_c
         AUX_TEMP_VALUE_COL + (TEMP_VALUE_CELLS - total_cells)
     };
     let digits_x = cell_to_x(start_cell);
-    let x_after_digits = draw_text(fb, digits_x, y, &temp_digits, WHITE);
-    let _ = draw_celsius(fb, x_after_digits, y, WHITE);
+    let x_after_digits = draw_text(fb, digits_x, y, &temp_digits, color);
+    let _ = draw_celsius(fb, x_after_digits, y, color);
 
     let _ = draw_text(fb, cell_to_x(AUX_FAN_LABEL_COL), y, "FAN", CYAN);
     let mut fan_buf: heapless::String<8> = heapless::String::new();
@@ -729,6 +746,7 @@ where
             y3,
             model.temp_slot,
             model.bat_temp_c,
+            model.charger_temp_c,
             model.ups_temp_c,
             model.fan_pct,
         );

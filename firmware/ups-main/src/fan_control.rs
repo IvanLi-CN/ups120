@@ -18,16 +18,16 @@ const FILTER_WINDOW: usize = 3;
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SmartBatteryTemps {
     pub pack_c: Option<f32>,
-    pub mos_c: Option<f32>,
+    pub charger_c: Option<f32>,
 }
 
 impl SmartBatteryTemps {
-    pub fn new(pack_c: Option<f32>, mos_c: Option<f32>) -> Self {
-        Self { pack_c, mos_c }
+    pub fn new(pack_c: Option<f32>, charger_c: Option<f32>) -> Self {
+        Self { pack_c, charger_c }
     }
 
     pub fn highest(&self) -> Option<f32> {
-        match (self.pack_c, self.mos_c) {
+        match (self.pack_c, self.charger_c) {
             (Some(a), Some(b)) => Some(a.max(b)),
             (Some(a), None) => Some(a),
             (None, Some(b)) => Some(b),
@@ -365,18 +365,18 @@ impl<'a> FanController<'a> {
                 let temps = self.battery_temps.unwrap_or_default();
                 let pack_temp = temps.pack_c.unwrap_or(f32::NAN);
                 let pack_valid = temps.pack_c.is_some();
-                let mos_temp = temps.mos_c.unwrap_or(f32::NAN);
-                let mos_valid = temps.mos_c.is_some();
+                let charger_temp = temps.charger_c.unwrap_or(f32::NAN);
+                let charger_valid = temps.charger_c.is_some();
                 let highest_option = temps.highest();
                 let highest_temp = highest_option.unwrap_or(f32::NAN);
                 let highest_valid = highest_option.is_some();
                 info!(
-                    "fan.temps tsens={=f32}°C sb_pack={=f32}°C sb_pack_valid={} sb_mos={=f32}°C sb_mos_valid={} sb_highest={=f32}°C sb_highest_valid={} ctrl={=f32}°C raw={=u8} attr={=u8} delta={=f32}°C duty={=u8}% mode={} vout≈{=f32}V",
+                    "fan.temps tsens={=f32}°C sb_pack={=f32}°C sb_pack_valid={} sb_charger={=f32}°C sb_charger_valid={} sb_highest={=f32}°C sb_highest_valid={} ctrl={=f32}°C raw={=u8} attr={=u8} delta={=f32}°C duty={=u8}% mode={} vout≈{=f32}V",
                     self.filtered_temp,
                     pack_temp,
                     pack_valid,
-                    mos_temp,
-                    mos_valid,
+                    charger_temp,
+                    charger_valid,
                     highest_temp,
                     highest_valid,
                     self.control_temp,
