@@ -1,29 +1,30 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ELF="$1"
-BIN="${ELF}.bin"
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
+ENSURE_STM32_PROBE="$SCRIPT_DIR/ensure_stm32_probe.sh"
+DEFAULT_PROBE_ADDR=0d28:0204:2BDC77EE006DCE9B589D7AD8F22BD989
 
-if command -v llvm-objcopy >/dev/null 2>&1; then
-  OBJCOPY=llvm-objcopy
-elif command -v rust-objcopy >/dev/null 2>&1; then
-  OBJCOPY=rust-objcopy
-else
-  echo "Error: llvm-objcopy or rust-objcopy not found. Install with:"
-  echo "  rustup component add llvm-tools-preview"
-  exit 127
+# Resolve probe selection if not provided via ENV
+if [ -z "${PROBE_ADDR:-}" ] && [ -x "$ENSURE_STM32_PROBE" ]; then
+  PROBE_ADDR=$(PROBE="$PROBE" "$ENSURE_STM32_PROBE")
 fi
 
-"$OBJCOPY" -O binary "$ELF" "$BIN"
+PROBE_ADDR=${PROBE_ADDR:-$DEFAULT_PROBE_ADDR}
 
-probe-rs download \
-  --chip STM32L051C8Tx \
-  --probe 0d28:0204:2BDC77EE006DCE9B589D7AD8F22BD989 \
-  --binary-format bin \
-  --base-address 0x08000000 \
-  "$BIN"
+ELF="$1"
 
-# Reset the target to start executing
-probe-rs reset \
+if [ -z "$ELF" ] || [ ! -f "$ELF" ]; then
+  echo "[probe-runner] ELF not found: $ELF" >&2
+  exit 2
+fi
+
+LOGFMT=${LOGFMT:-"{s}"}
+
+# Keep RTT/defmt output available by using probe-rs run directly.
+exec probe-rs run \
   --chip STM32L051C8Tx \
-  --probe 0d28:0204:2BDC77EE006DCE9B589D7AD8F22BD989
+  --probe "$PROBE_ADDR" \
+  --log-format "$LOGFMT" \
+  "$ELF"

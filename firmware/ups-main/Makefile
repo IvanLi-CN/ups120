@@ -6,6 +6,13 @@ PORT    ?=
 BAUD    ?= 115200
 CHIP    ?= esp32s3
 LOGFMT  ?= defmt
+ENSURE_ESP32_PORT ?= $(abspath ../../scripts/ensure_esp32_port.sh)
+
+ifeq ($(PORT),)
+  ifneq ($(wildcard $(ENSURE_ESP32_PORT)),)
+    PORT := $(shell $(ENSURE_ESP32_PORT))
+  endif
+endif
 
 ifeq ($(PROFILE),release)
   CARGO_FLAGS := --release

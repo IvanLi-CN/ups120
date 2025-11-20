@@ -5,10 +5,10 @@ SHELL := /bin/sh
 CHIP           ?= STM32L051C8Tx
 TARGET_TRIPLE  ?= thumbv6m-none-eabi
 BIN_NAME       ?= smart-battery
-
-# Probe address default (hardcoded) — can be overridden by env
-# Example override: `PROBE_ADDR=xxxx make attach`
-PROBE_ADDR  ?= 0d28:0204:2BDC77EE006DCE9B589D7AD8F22BD989
+PROBE          ?=
+PROBE_ADDR     ?=
+DEFAULT_PROBE_ADDR := 0d28:0204:2BDC77EE006DCE9B589D7AD8F22BD989
+ENSURE_STM32_PROBE ?= $(abspath ../../scripts/ensure_stm32_probe.sh)
 
 # Resolve workspace root and target dir reliably even when invoked from elsewhere
 THIS_MAKEFILE := $(abspath $(lastword $(MAKEFILE_LIST)))
@@ -29,11 +29,24 @@ ELF         := $(RELEASE_DIR)/$(BIN_NAME)
 CARGO_TARGET_FLAGS := --target $(TARGET_TRIPLE)
 
 CARGO := cargo
-PROBE := probe-rs
+PROBE_CMD := probe-rs
 
 # Default defmt log level for release builds; can be overridden by env.
 # 开发阶段按需打印信息，默认使用 info 级别（可通过环境变量覆盖）。
 DEFMT_LOG ?= info
+
+# Auto-select and cache debug probe if not explicitly provided
+ifeq ($(strip $(PROBE_ADDR)),)
+  ifneq ($(strip $(PROBE)),)
+    PROBE_ADDR := $(PROBE)
+  else ifneq ($(wildcard $(ENSURE_STM32_PROBE)),)
+    PROBE_ADDR := $(shell PROBE=$(PROBE) $(ENSURE_STM32_PROBE))
+  endif
+endif
+
+ifeq ($(strip $(PROBE_ADDR)),)
+  PROBE_ADDR := $(DEFAULT_PROBE_ADDR)
+endif
 
 .PHONY: all build run run-ship attach reset reset-attach clean info run-force
 
@@ -42,7 +55,7 @@ all: build
 # Build release firmware every time (do not rely on ELF timestamp)
 build:
 	@echo "[build] crate=$(CRATE_DIR) target=$(TARGET_TRIPLE)"
-	DEFMT_LOG=$(DEFMT_LOG) CARGO_TARGET_DIR=$(TARGET_DIR) $(CARGO) build --release $(CARGO_TARGET_FLAGS) --manifest-path $(CRATE_DIR)/Cargo.toml
+	DEFMT_LOG=$(DEFMT_LOG) PROBE_ADDR=$(PROBE_ADDR) CARGO_TARGET_DIR=$(TARGET_DIR) $(CARGO) build --release $(CARGO_TARGET_FLAGS) --manifest-path $(CRATE_DIR)/Cargo.toml
 	@echo "[build] ELF=$(ELF)"; \
 	if [ -f "$(ELF)" ]; then \
 	  stat_cmd=$$(command -v gstat || command -v stat); \
@@ -56,10 +69,10 @@ build:
 
 # Flash and run (prints defmt logs via probe-rs)
 run:
-	DEFMT_LOG=$(DEFMT_LOG) CARGO_TARGET_DIR=$(TARGET_DIR) $(CARGO) run --release $(CARGO_TARGET_FLAGS) --manifest-path $(CRATE_DIR)/Cargo.toml
+	DEFMT_LOG=$(DEFMT_LOG) PROBE_ADDR=$(PROBE_ADDR) CARGO_TARGET_DIR=$(TARGET_DIR) $(CARGO) run --release $(CARGO_TARGET_FLAGS) --manifest-path $(CRATE_DIR)/Cargo.toml
 
 run-ship:
-	DEFMT_LOG=$(DEFMT_LOG) CARGO_TARGET_DIR=$(TARGET_DIR) $(CARGO) run --release $(CARGO_TARGET_FLAGS) --manifest-path $(CRATE_DIR)/Cargo.toml --features ship-mode
+	DEFMT_LOG=$(DEFMT_LOG) PROBE_ADDR=$(PROBE_ADDR) CARGO_TARGET_DIR=$(TARGET_DIR) $(CARGO) run --release $(CARGO_TARGET_FLAGS) --manifest-path $(CRATE_DIR)/Cargo.toml --features ship-mode
 
 # Force rebuild before flashing (useful when cache is suspicious)
 run-force: clean run
@@ -67,12 +80,12 @@ run-force: clean run
 # Attach to the running target with release ELF symbols loaded
 attach: build
 	@echo "[attach] chip=$(CHIP) probe=$(PROBE_ADDR) elf=$(ELF)"
-	$(PROBE) attach --chip $(CHIP) --probe $(PROBE_ADDR) $(ELF)
+	$(PROBE_CMD) attach --chip $(CHIP) --probe $(PROBE_ADDR) $(ELF)
 
 # Reset the target MCU
 reset:
 	@echo "[reset] chip=$(CHIP) probe=$(PROBE_ADDR)"
-	$(PROBE) reset --chip $(CHIP) --probe $(PROBE_ADDR)
+	$(PROBE_CMD) reset --chip $(CHIP) --probe $(PROBE_ADDR)
 
 # Reset then attach in one go
 reset-attach: reset attach

@@ -1,5 +1,5 @@
 [target.'cfg(all(target_arch = "arm", target_os = "none"))']
-runner = "probe-rs run --chip STM32L051C8Tx --probe 0d28:0204:2BDC77EE006DCE9B589D7AD8F22BD989"
+runner = "../../scripts/probe_runner.sh"
 
 rustflags = [
   # Linker scripts for this crate (avoid workspace-level duplication)

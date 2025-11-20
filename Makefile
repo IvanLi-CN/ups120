@@ -9,7 +9,8 @@ DRIVER_PROBE_FLAGS := $(if $(PROBE),--non-interactive --probe $(PROBE),)
 .PHONY: help \
         sb-build sb-run sb-run-ship sb-attach sb-reset sb-reset-attach \
         driver-demo-build driver-demo-run driver-demo-attach driver-demo-reset-attach \
-        ups-build ups-run ups-attach ups-ports ups-clean ups-env \
+        ups-build ups-run ups-attach ups-ports ups-clean ups-env ups-select-port \
+        sb-select-probe \
         clean
 
 help:
@@ -20,6 +21,7 @@ help:
 	@echo "  sb-attach           Attach to smart-battery"
 	@echo "  sb-reset            Reset smart-battery"
 	@echo "  sb-reset-attach     Reset then attach smart-battery"
+	@echo "  sb-select-probe     Force reselect and cache STM32 debug probe"
 	@echo "  driver-demo-build   Build STM32G0 demo (features via DEMO_FEATURES)"
 	@echo "  driver-demo-run     Flash+run STM32G0 demo (no auto-build)"
 	@echo "  driver-demo-attach  Attach to STM32G0 demo (optional CHIP/PROBE)"
@@ -28,6 +30,7 @@ help:
 	@echo "  ups-run             Flash+monitor UPS main (optional PORT/BAUD/LOGFMT/ESPFLASH_ARGS)"
 	@echo "  ups-attach          Monitor UPS main (requires prior build)"
 	@echo "  ups-ports           List serial ports via espflash"
+	@echo "  ups-select-port     Force reselect and cache UPS serial port"
 	@echo "  ups-clean           Clean UPS main build artifacts"
 	@echo "  ups-env             Show UPS main env (target/paths)"
 	@echo "Vars: CHIP=$(CHIP) PROBE=$(PROBE) DEMO_FEATURES=$(DEMO_FEATURES)"
@@ -52,6 +55,11 @@ sb-reset:
 # Reset then attach smart-battery (delegates to project Makefile)
 sb-reset-attach:
 	$(MAKE) -C firmware/smart-battery reset-attach
+
+# explicit reselection: forget cached probe and pick again
+sb-select-probe:
+	rm -f .stm32-probe
+	./scripts/select_stm32_probe.sh
 
 # Driver demo (optional arguments; not required)
 driver-demo-build:
@@ -88,6 +96,10 @@ ups-attach:
 
 ups-ports:
 	$(MAKE) -C firmware/ups-main ports
+
+ups-select-port:
+	rm -f .esp32-port
+	PORT=$${PORT:-} ./scripts/ensure_esp32_port.sh
 
 ups-clean:
 	$(MAKE) -C firmware/ups-main clean
