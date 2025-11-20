@@ -18,5 +18,9 @@ yarn-error.log*/target-off/
 downloads/
 tmp/
 
+# Local flashing caches
+.stm32-probe
+.esp32-port
+
 # Local virtual environments
 .venv/
