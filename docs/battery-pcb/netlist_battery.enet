@@ -5844,8 +5844,8 @@
             "2": "REGOUT",
             "3": "$1N116175",
             "4": "VIN_TPS",
-            "5": "$1N116178",
-            "6": "$1N116178"
+            "5": "$1N135546",
+            "6": "$1N135543"
         }
     },
     "gge388": {
@@ -5886,7 +5886,7 @@
         },
         "pins": {
             "1": "VIN_TPS",
-            "2": "$1N116178"
+            "2": "$1N135546"
         }
     },
     "gge390": {
@@ -5969,48 +5969,6 @@
         "pins": {
             "1": "BGND",
             "2": "EN_TPS"
-        }
-    },
-    "gge391": {
-        "props": {
-            "LCSC Part Name": "SMFJ5.0A",
-            "Supplier Part": "C61216",
-            "Manufacturer": "RUILON(瑞隆源)",
-            "Manufacturer Part": "SMFJ5.0A",
-            "Supplier Footprint": "SOD-123",
-            "JLCPCB Part Class": "扩展库",
-            "Datasheet": "https://item.szlcsc.com/datasheet/SMFJ5.0A/62268.html",
-            "Supplier": "LCSC",
-            "Add into BOM": "yes",
-            "Convert to PCB": "yes",
-            "Footprint": "d70f77babdea484c82758a7d50e9312f",
-            "3D Model": "7884390a25fb4c08947731ebfba7e3f8",
-            "3D Model Title": "SOD-123_L2.8-W1.8-LS3.7-RD",
-            "3D Model Transform": "144.8816,62.992,0,0,0,0,0,0,0",
-            "Reverse Stand-Off Voltage (Vrwm)": "5V",
-            "Clamping Voltage": "9.6V",
-            "Peak Pulse Current (Ipp)": "20.8A@10/1000us",
-            "Peak Pulse Power Dissipation (Ppp)": "200W@10/1000us",
-            "Voltage - Breakdown": "7.07V",
-            "Reverse Leakage Current (Ir)": "400uA",
-            "Operating Temperature": "-55℃~+150℃",
-            "Type": "TVS",
-            "Description": "反向截止电压(Vrwm):5V;钳位电压:9.6V;峰值脉冲电流(Ipp):20.8A@10/1000us;峰值脉冲功率(Ppp):200W@10/1000us;击穿电压:7.07V;",
-            "Symbol": "11ba242d34464606b97cb64472c2d145",
-            "Designator": "D4",
-            "Name": "={Manufacturer Part}",
-            "Device": "8a7c5fc91d8f44eb87bd756072da7af2",
-            "Reuse Block": "",
-            "Group ID": "",
-            "Channel ID": "$1e116202",
-            "Unique ID": "gge391",
-            "FootprintName": "SOD-123_L2.8-W1.8-LS3.7-RD",
-            "DeviceName": "SMFJ5.0A_C61216",
-            "SymbolName": "SMFJ5.0A"
-        },
-        "pins": {
-            "1": "$1N116178",
-            "2": "BGND"
         }
     },
     "gge358": {
@@ -6757,6 +6715,7 @@
             "Supplier": "LCSC",
             "Add into BOM": "yes",
             "Convert to PCB": "yes",
+            "Footprint": "6cfdcdfe4db5423b8ed9870bfd6bb136",
             "3D Model": "36a51122f27c49738f86b3bfa98863e0",
             "3D Model Title": "C0402_L1.0-W0.5-H0.5",
             "3D Model Transform": "39.37,19.685,0,0,0,0,0,0,0",
@@ -6764,7 +6723,6 @@
             "Voltage Rated": "50V",
             "Temperature Coefficient": "X7R",
             "Description": "容值:1nF;精度:±10%;额定电压:50V;材质(温度系数):X7R;",
-            "Footprint": "6cfdcdfe4db5423b8ed9870bfd6bb136",
             "Symbol": "62dea9d7125443b99f8b705a8d636fb6",
             "Designator": "C66",
             "Supplier Part": "",
@@ -6795,6 +6753,7 @@
             "Supplier": "LCSC",
             "Add into BOM": "yes",
             "Convert to PCB": "yes",
+            "Footprint": "6cfdcdfe4db5423b8ed9870bfd6bb136",
             "3D Model": "36a51122f27c49738f86b3bfa98863e0",
             "3D Model Title": "C0402_L1.0-W0.5-H0.5",
             "3D Model Transform": "39.37,19.685,0,0,0,0,0,0,0",
@@ -6802,7 +6761,6 @@
             "Voltage Rated": "50V",
             "Temperature Coefficient": "X7R",
             "Description": "容值:1nF;精度:±10%;额定电压:50V;材质(温度系数):X7R;",
-            "Footprint": "6cfdcdfe4db5423b8ed9870bfd6bb136",
             "Symbol": "62dea9d7125443b99f8b705a8d636fb6",
             "Designator": "C67",
             "Supplier Part": "",
@@ -7365,6 +7323,92 @@
             "3": "BGND",
             "4": "PSTOP_CTL",
             "5": "3V3"
+        }
+    },
+    "gge409": {
+        "props": {
+            "Symbol": "509ad72a48354233a97528db6a54d378",
+            "Designator": "D4",
+            "LCSC Part Name": "单向ESD 5V截止 峰值脉冲电流：13A",
+            "Supplier Part": "C77807",
+            "Manufacturer": "CJ(江苏长电/长晶)",
+            "Manufacturer Part": "CESD5V0D5",
+            "Supplier Footprint": "SOD-523",
+            "JLCPCB Part Class": "扩展库",
+            "Datasheet": "https://item.szlcsc.com/datasheet/CESD5V0D5/78940.html",
+            "Supplier": "LCSC",
+            "Add into BOM": "yes",
+            "Convert to PCB": "yes",
+            "Footprint": "c2909e68521747078fe84892aafa819c",
+            "3D Model": "1a3524270898456e95fda80dc56db1b2",
+            "3D Model Title": "SOD-523F_L1.2-W0.8-H0.6-LS1.6",
+            "3D Model Transform": "62.992,31.496,0,0,0,0,-0.005,0.16,0",
+            "Polarity": "单向",
+            "Reverse Stand-Off Voltage (Vrwm)": "5V",
+            "Clamping Voltage": "13V",
+            "Peak Pulse Current (Ipp)": "13A",
+            "Peak Pulse Power Dissipation (Ppp)": "170W@8/20us",
+            "Voltage - Breakdown": "6.2V",
+            "Reverse Leakage Current (Ir)": "10uA",
+            "Number of Channels": "单路",
+            "level of protection": "IEC 61000-4-2",
+            "Type": "ESD",
+            "Junction Capacitance": "95pF",
+            "Name": "={Manufacturer Part}",
+            "Description": "极性:单向;反向截止电压(Vrwm):5V;钳位电压:13V;峰值脉冲电流(Ipp):13A;峰值脉冲功率(Ppp):170W@8/20us;击穿电压:6.2V;",
+            "Device": "7f741d70f5bf423dbd1b4df791bf781d",
+            "Reuse Block": "",
+            "Group ID": "",
+            "Channel ID": "$1e135548",
+            "Unique ID": "gge409",
+            "FootprintName": "SOD-523F_L1.2-W0.8-LS1.7-RD",
+            "DeviceName": "CESD5V0D5",
+            "SymbolName": "CESD5V0D5"
+        },
+        "pins": {
+            "1": "VIN_TPS",
+            "2": "$1N135546"
+        }
+    },
+    "gge410": {
+        "props": {
+            "Symbol": "864c2143d96a46778ed70604c0ca41f8",
+            "Designator": "R59",
+            "LCSC Part Name": "470kΩ ±1% 62.5mW 厚膜电阻",
+            "Supplier Part": "C25790",
+            "Manufacturer": "UNI-ROYAL(厚声)",
+            "Manufacturer Part": "0402WGF4703TCE",
+            "Supplier Footprint": "0402",
+            "JLCPCB Part Class": "扩展库",
+            "Datasheet": "https://item.szlcsc.com/datasheet/0402WGF4703TCE/26533.html",
+            "Supplier": "LCSC",
+            "Add into BOM": "yes",
+            "Convert to PCB": "yes",
+            "Footprint": "cf2e3a1361b44b07b7da4210bbe163b8",
+            "3D Model": "98c88bc2b9094f218f3a3e30a7012738",
+            "3D Model Title": "R0402_L1.0-W0.5-H0.4",
+            "3D Model Transform": "39.37,19.685,0,0,0,0,0,0,0",
+            "Type": "厚膜电阻",
+            "Value": "470kΩ",
+            "Tolerance": "±1%",
+            "Power(Watts)": "62.5mW",
+            "Voltage-Supply(Max)": "50V",
+            "Temperature Coefficient": "±100ppm/℃",
+            "Operating Temperature": "-55℃~+155℃",
+            "Name": "={Value}",
+            "Description": "电阻类型:厚膜电阻;阻值:470kΩ;精度:±1%;功率:62.5mW;工作电压:50V;温度系数:±100ppm/℃;",
+            "Device": "c7c0ca4f4a01436f8b24c1fedceaf1f7",
+            "Reuse Block": "",
+            "Group ID": "",
+            "Channel ID": "$1e135659",
+            "Unique ID": "gge410",
+            "FootprintName": "R0402",
+            "DeviceName": "0402WGF4703TCE",
+            "SymbolName": "0402WGF4703TCE"
+        },
+        "pins": {
+            "1": "$1N135543",
+            "2": "$1N135546"
         }
     }
 }

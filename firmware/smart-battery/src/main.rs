@@ -61,6 +61,9 @@ const LED_CYCLE_MS: u64 = 300;
 #[cfg(feature = "ship-mode")]
 const LED_FLASH_MS: u64 = 250;
 
+#[cfg(not(feature = "ship-mode"))]
+const SHIP_BUTTON_HOLD_MS: u64 = 5_000;
+
 #[cfg(feature = "ship-mode")]
 fn led_on(pin: &mut Output<'static>) {
     pin.set_low();
@@ -71,7 +74,6 @@ fn led_off(pin: &mut Output<'static>) {
     pin.set_high();
 }
 
-#[cfg(feature = "ship-mode")]
 async fn enter_ship_mode_now(
     i2c_bus: &'static SharedI2cBus,
     address: u8,
@@ -91,6 +93,39 @@ async fn enter_ship_mode_now(
             defmt::warn!("bq:ship err: {:?}", e);
             false
         }
+    }
+}
+
+#[cfg(not(feature = "ship-mode"))]
+#[embassy_executor::task]
+async fn ship_button_task(
+    mut button: ExtiInput<'static>,
+    i2c_bus: &'static SharedI2cBus,
+    address: u8,
+) {
+    loop {
+        button.wait_for_rising_edge().await;
+        // 简单消抖
+        Timer::after(Duration::from_millis(30)).await;
+        if !button.is_high() {
+            continue;
+        }
+
+        let pressed_at = Instant::now();
+        let deadline = pressed_at + Duration::from_millis(SHIP_BUTTON_HOLD_MS);
+        while button.is_high() && Instant::now() < deadline {
+            Timer::after(Duration::from_millis(50)).await;
+        }
+
+        if button.is_high() {
+            defmt::info!("btn:ship long-press detected");
+            crate::failsafe::request_pstop();
+            let ship_ok = enter_ship_mode_now(i2c_bus, address, 3).await;
+            defmt::info!("btn:ship result={}", ship_ok);
+        }
+
+        // 等待松开，避免重复触发
+        button.wait_for_falling_edge().await;
     }
 }
 
@@ -328,6 +363,7 @@ async fn main(_spawner: Spawner) {
         // 初始化完成后再启动相关任务（IRQ → LED → SC → BQ main）
         let sc_int = ExtiInput::new(p.PB2, p.EXTI2, Pull::Up);
         let bq_alert = ExtiInput::new(p.PB1, p.EXTI1, Pull::None);
+        let ship_button = ExtiInput::new(p.PB8, p.EXTI8, Pull::None);
         _spawner.spawn(irq_mux::irq_mux_task(sc_int, bq_alert).expect("irq-mux token"));
 
         let led_r = Output::new(p.PA5, Level::High, Speed::Low);
@@ -399,6 +435,10 @@ async fn main(_spawner: Spawner) {
                 balancing_cv_publisher: balancing_cv_pub,
             })
             .expect("bq token"),
+        );
+
+        _spawner.spawn(
+            ship_button_task(ship_button, i2c_bus, bq_runtime_addr).expect("ship-button token"),
         );
 
         // 保留软件睡眠管理器（轻度 SLEEP 策略），由默认执行器 WFE 驱动。
