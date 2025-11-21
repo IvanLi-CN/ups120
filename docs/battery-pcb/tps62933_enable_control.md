@@ -45,24 +45,27 @@ The converter also has an internal VIN UVLO (~3.3–3.6 V), but an external di
                │                   │           │
                │                 R48 12 kΩ     │  (pull-down)
                │                   │           │
-               └─R49 100 kΩ────────┴───●───────┘
-                                Gate node
+               └─R39 100 kΩ────────┴───●───────┘
+                                 Gate node (Q11 pin5)
+                                       │
+                             R59 470 kΩ│
+                                       ▼
+                          Q11 pin6 (N MOS drain)
                                        │
                         NX3008 (N-channel, TR1) controlled by REGOUT
                                        │
                                       GND
 
-        Gate node ↔ VIN_TPS : SMFJ5.0A (TVS clamp, keeps |VGS| < 8 V)
+        Gate node ↔ VIN_TPS : CESD5V0D5 (SOD-523 TVS/ESD)
 ```
 
-**Key points**
+**Key points（rev4.1 调整后）**
 
 1. The P-MOSFET (TR2) forms a high-side switch between `VIN_TPS` and the EN divider R47/R48.
-2. The N-MOSFET (TR1) accepts `REGOUT` and pulls the P-gate low only when REGOUT = 3.3 V.
-3. R49 biases the P-gate back to VIN_TPS whenever REGOUT is low or floating.
-4. SMFJ5.0A protects the MOSFET: NX3008CBKS allows at most ±8 V on VGS; the TVS clamps at ≈6.5–7 V.
-5. The divider (100 kΩ / 12 kΩ) feeds EN with ≈1.09×10⁻¹·VIN, so VIN around 11–12 V yields ≈1.2 V and satisfies TPS62933’s enable requirement.
-6. R48 keeps EN near 0 V when the divider is disconnected, guaranteeing shutdown.
+2. The N-MOSFET (TR1) accepts `REGOUT` and, via **R59=470 kΩ**, pulls the P-gate low only when REGOUT = 3.3 V; the large series resistor limits gate/TVS current to <0.1 mA even at 5‑cell full charge.
+3. R39=100 kΩ biases the P-gate back to `VIN_TPS` whenever REGOUT is low or floating.
+4. **TVS 改为 CESD5V0D5 (SOD‑523)**，仍跨 `VIN_TPS`（阴极）↔ Gate 节点（阳极），只负责尖峰钳位；静态 |VGS| 由 100 k/470 k 分压决定，5S 满充时 |VGS| ≈ 0.176·VIN ≈ 3.7 V，远低于 NX3008 ±8 V 额定。
+5. EN 分压不变（100 kΩ / 12 kΩ），VIN≈11–12 V 时 EN≈1.2 V 触发 TPS62933；R48 继续保持 EN 下拉确保关断。
 
 ---
 
