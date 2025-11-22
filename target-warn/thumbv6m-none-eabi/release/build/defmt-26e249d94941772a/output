@@ -1,4 +1,0 @@
-cargo:rustc-link-search=/Users/ivan/Projects/Ivan/ups120/target-warn/thumbv6m-none-eabi/release/build/defmt-26e249d94941772a/out
-cargo:rustc-cfg=no_cas
-cargo:rustc-check-cfg=cfg(c_variadic)
-cargo:rustc-check-cfg=cfg(no_cas)
