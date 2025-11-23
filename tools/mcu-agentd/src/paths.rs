@@ -18,7 +18,16 @@ pub struct Paths {
 
 impl Paths {
     pub fn new() -> Result<Self> {
-        let root = std::env::current_dir()?;
+        let cwd = std::env::current_dir()?;
+        let mut root = cwd.clone();
+        for dir in cwd.ancestors() {
+            let mf = dir.join("Makefile");
+            let fw = dir.join("firmware");
+            if mf.exists() && fw.exists() {
+                root = dir.to_path_buf();
+                break;
+            }
+        }
         let logs_dir = root.join("logs/agentd");
         let sock = logs_dir.join("agentd.sock");
         let lock = logs_dir.join("agentd.lock");

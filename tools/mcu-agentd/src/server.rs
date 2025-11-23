@@ -486,7 +486,7 @@ async fn ensure_elf(paths: &Paths, mcu: &McuKind, elf: Option<PathBuf>) -> Resul
                 paths,
                 "ups-build",
                 "firmware/ups-main/target/xtensa-esp32s3-none-elf/release/ups-main",
-                true,
+                false,
             )
             .await
         }
@@ -495,7 +495,7 @@ async fn ensure_elf(paths: &Paths, mcu: &McuKind, elf: Option<PathBuf>) -> Resul
                 paths,
                 "sb-build",
                 "target/thumbv6m-none-eabi/release/smart-battery",
-                true,
+                false,
             )
             .await
         }
