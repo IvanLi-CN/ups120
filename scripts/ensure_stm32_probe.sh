@@ -2,18 +2,19 @@
 set -euo pipefail
 
 # Ensure a unique STM32 debug probe selector is available.
-# Prints selector to stdout and caches in .stm32-probe.
+# Prints selector to stdout and caches in .stm32-port (legacy: .stm32-probe).
 # Resolution order:
 # 1) PROBE env (if present in probe-rs list)
 # 2) PORT env alias (if present)
-# 3) cached .stm32-probe (if still connected)
+# 3) cached .stm32-port (or .stm32-probe) if still connected
 # 4) single ST-Link present
 # 5) single probe present
 # 6) interactive selection (scripts/select_stm32_probe.sh)
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
-CACHE_FILE="$REPO_ROOT/.stm32-probe"
+CACHE_FILE="$REPO_ROOT/.stm32-port"
+LEGACY_CACHE="$REPO_ROOT/.stm32-probe"
 
 if ! command -v probe-rs >/dev/null 2>&1; then
   echo "[error] probe-rs not found; install via 'cargo install probe-rs'" >&2
@@ -45,10 +46,23 @@ if [ -n "${PORT:-}" ] && has_token "$PORT"; then
   exit 0
 fi
 
-if [ -f "$CACHE_FILE" ]; then
-  cached=$(cat "$CACHE_FILE" || true)
+read_cache() {
+  local file="$1"
+  [ -f "$file" ] || return 1
+  cat "$file" 2>/dev/null || true
+}
+
+if cached=$(read_cache "$CACHE_FILE"); then
   if [ -n "$cached" ] && has_token "$cached"; then
     echo "$cached"
+    exit 0
+  fi
+fi
+
+# Legacy fallback: migrate .stm32-probe -> .stm32-port once it is valid
+if legacy=$(read_cache "$LEGACY_CACHE"); then
+  if [ -n "$legacy" ] && has_token "$legacy"; then
+    pick_and_cache "$legacy"
     exit 0
   fi
 fi

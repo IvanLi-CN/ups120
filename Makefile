@@ -58,7 +58,7 @@ sb-reset-attach:
 
 # explicit reselection: forget cached probe and pick again
 sb-select-probe:
-	rm -f .stm32-probe
+	rm -f .stm32-probe .stm32-port
 	./scripts/select_stm32_probe.sh
 
 # Driver demo (optional arguments; not required)
