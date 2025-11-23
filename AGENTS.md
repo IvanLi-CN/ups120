@@ -13,19 +13,28 @@
 - Setup (once): `rustup target add thumbv6m-none-eabi` and install `probe-rs` and `llvm-tools-preview`.
 - Root-level operations use Makefile targets only. Do NOT run Cargo from the repository root.
   - Build smart-battery (release): `make sb-build`
-  - Flash & run smart-battery: `make sb-run`
-  - Attach/Reset: `make sb-attach` / `make sb-reset`
-  - Driver example (STM32G0C8U6): `make driver-demo-build` / `make driver-demo-run`
-- Per-project usage: you may also `make -C firmware/smart-battery run` (or `build`, `attach`, `reset`).
+  - Build ups-main (release): `make -C firmware/ups-main build`
+  - Driver example (STM32G0C8U6): `make driver-demo-build`
+- Per-project Make targets are for builds only; on-target run/flash/reset/monitor must go through `mcu-agentd` (no `run/attach/reset` Make targets).
 - Format: run `cargo fmt` inside the specific crate directory. Optional lint: run `cargo clippy --target thumbv6m-none-eabi` inside that crate.
 - Host-side tests for dependency crates: from that crate directory run `cargo test` (e.g., `bq76920`, `sc8815`).
+
+## Hardware Flashing & Logging (mcu-agentd)
+
+- All on-target flash/reset/run monitoring/log queries must go through `tools/mcu-agentd` (see `tools/mcu-agentd/README.md`). Do not call `espflash`, `probe-rs`, or Make `run/attach/reset` targets directly.
+- Daemon control: `just agentd start|status|stop`; ensure `status` is healthy before use.
+- Port selection: `just agentd set-port esp32|stm32` (interactive or explicit port/Probe ID); verify with `get-port`.
+- Flash/reset: `just agentd flash --mcu esp32|stm32 --elf <path>` or `just agentd reset --mcu ...`; commands pause/resume background monitoring automatically.
+- Live logs: `just agentd monitor esp32|stm32` (supports `--duration`/`--lines`); history via `just agentd logs ...`.
+- Default ELF paths: ESP32 `firmware/ups-main/target/xtensa-esp32s3-none-elf/release/ups-main`; STM32 `target/thumbv6m-none-eabi/release/smart-battery`. Build them first if missing.
 
 ## Prohibited Operations (Mandatory)
 
 - Do NOT create or reintroduce a Cargo workspace at the repository root.
 - Do NOT add or rely on a root-level `.cargo/config.toml` for targets or runners.
 - Do NOT run `cargo build`, `cargo run`, or any firmware-related Cargo command from the repository root.
-- All firmware builds, flashing, and attach/reset must be invoked via Makefiles (root Makefile delegates to the project Makefiles) or by running Cargo within the specific project directory.
+- All on-target flash/reset/monitor/log capture must use `just agentd ...`; do not use `make sb-run/sb-attach/sb-reset`, `make -C ... run/attach/reset`, or raw `espflash`/`probe-rs`.
+- All firmware builds must be invoked via Makefiles (root Makefile delegates to the project Makefiles) or by running Cargo within the specific project directory.
 - Keep projects fully independent. Cross-crate paths must be explicit within each crate’s `Cargo.toml`; never depend on root workspace injection.
 
 ## Coding Style & Naming Conventions
@@ -36,7 +45,7 @@
 
 ## Testing Guidelines
 
-- Firmware targets are `no_std` and run on hardware; prefer hardware‑in‑the‑loop via `cargo run` (RTT/defmt output).
+- Firmware targets are `no_std` and run on hardware; for HIL, flash with `just agentd flash ...` then observe with `just agentd monitor/logs`. Never `cargo run` on targets.
 - Place pure‑logic tests in dependency crates or new host‑runnable modules; name files `*_test.rs` or inline `mod tests` with `#[cfg(test)]`.
 - Aim for unit coverage of parsing/math and critical safety checks in `bq76920`/`sc8815` crates.
 
@@ -50,7 +59,7 @@
 
 ## Security & Configuration Tips
 
-- Probe address and chip type are configured in the project’s own files (e.g., `firmware/smart-battery/.cargo/config.toml` or its Makefile). Override locally via environment variables (e.g., `PROBE_ADDR=XXXX make run`) instead of committing personal IDs.
+- Probe address and chip type are configured in each project (e.g., `firmware/smart-battery/.cargo/config.toml` or its Makefile). You may override locally via env vars (e.g., `PROBE_ADDR=XXXX`) for builds, but on-target flashing/monitoring still must use `just agentd ...`.
 
 ## I2C Device Instance Management (Supplement)
 
