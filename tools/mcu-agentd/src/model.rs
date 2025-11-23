@@ -38,6 +38,8 @@ pub enum ClientRequest {
     Monitor {
         mcu: McuKind,
         elf: Option<PathBuf>,
+        duration: Option<u64>, // milliseconds
+        lines: Option<usize>,
     },
     Logs {
         mcu: Option<McuKind>,
