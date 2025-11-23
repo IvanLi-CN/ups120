@@ -53,12 +53,28 @@ enum Cmd {
         #[arg(value_enum)]
         mcu: McuOpt,
     },
+    /// Stop auto monitor for MCU.
+    StopAuto {
+        #[arg(value_enum)]
+        mcu: McuOpt,
+    },
+    /// Start auto monitor for MCU.
+    StartAuto {
+        #[arg(value_enum)]
+        mcu: McuOpt,
+    },
     /// Monitor MCU logs (attach/monitor without auto-flash unless required).
     Monitor {
         #[arg(value_enum)]
         mcu: McuOpt,
         /// Optional ELF path; if省略则尝试默认构建产物。
         elf: Option<PathBuf>,
+        /// Auto-stop after duration, e.g. 30s/2m/1h (0 = unlimited).
+        #[arg(long, value_parser = humantime::parse_duration, default_value = "0")]
+        duration: std::time::Duration,
+        /// Auto-stop after N lines (0 = unlimited).
+        #[arg(long, default_value = "0")]
+        lines: usize,
     },
     /// Fetch logs (server-side filtered).
     Logs {
@@ -149,10 +165,31 @@ async fn main() -> Result<()> {
             let resp = Server::client_send(ClientRequest::Reset { mcu: mcu.into() }).await?;
             println!("{}", serde_json::to_string_pretty(&resp)?);
         }
-        Cmd::Monitor { mcu, elf } => {
+        Cmd::StopAuto { mcu } => {
+            let resp =
+                Server::client_send(ClientRequest::StopAutoMonitor { mcu: mcu.into() }).await?;
+            println!("{}", serde_json::to_string_pretty(&resp)?);
+        }
+        Cmd::StartAuto { mcu } => {
+            let resp =
+                Server::client_send(ClientRequest::StartAutoMonitor { mcu: mcu.into() }).await?;
+            println!("{}", serde_json::to_string_pretty(&resp)?);
+        }
+        Cmd::Monitor {
+            mcu,
+            elf,
+            duration,
+            lines,
+        } => {
             let resp = Server::client_send(ClientRequest::Monitor {
                 mcu: mcu.into(),
                 elf,
+                duration: if duration.as_millis() == 0 {
+                    None
+                } else {
+                    Some(duration.as_millis() as u64)
+                },
+                lines: if lines == 0 { None } else { Some(lines) },
             })
             .await?;
             println!("{}", serde_json::to_string_pretty(&resp)?);

@@ -14,3 +14,5 @@ chrono = { version = "0.4", features = ["serde", "clock"] }
 rand = "0.8"
 fs2 = "0.4"
 directories = "5.0"
+humantime = "2.3.0"
+nix = { version = "0.30.1", features = ["signal"] }

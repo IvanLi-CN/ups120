@@ -67,4 +67,12 @@ impl Paths {
     pub fn lock_path(&self) -> &Path {
         self.lock.as_path()
     }
+
+    pub fn auto_pid(&self, mcu: crate::model::McuKind) -> PathBuf {
+        let name = match mcu {
+            crate::model::McuKind::Esp32 => "auto-esp32.pid",
+            crate::model::McuKind::Stm32 => "auto-stm32.pid",
+        };
+        self.logs_dir.join(name)
+    }
 }

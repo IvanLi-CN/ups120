@@ -27,6 +27,12 @@ pub enum ClientRequest {
     GetPort {
         mcu: McuKind,
     },
+    StartAutoMonitor {
+        mcu: McuKind,
+    },
+    StopAutoMonitor {
+        mcu: McuKind,
+    },
     Flash {
         mcu: McuKind,
         elf: PathBuf,
@@ -38,6 +44,8 @@ pub enum ClientRequest {
     Monitor {
         mcu: McuKind,
         elf: Option<PathBuf>,
+        duration: Option<u64>, // milliseconds
+        lines: Option<usize>,
     },
     Logs {
         mcu: Option<McuKind>,
