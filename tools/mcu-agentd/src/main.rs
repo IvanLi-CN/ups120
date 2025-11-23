@@ -10,6 +10,9 @@ use clap::{Parser, Subcommand, ValueEnum};
 use model::{ClientRequest, McuKind};
 use server::Server;
 use std::path::PathBuf;
+use std::time::Instant;
+use tokio::fs::OpenOptions as TokioOpen;
+use tokio::io::{AsyncBufReadExt, AsyncSeekExt, BufReader};
 
 /// MCU agentd – single-instance service to flash/reset/monitor ESP32-S3 & STM32L0.
 #[derive(Parser, Debug)]
@@ -60,7 +63,7 @@ enum Cmd {
         /// Optional ELF path; if省略则尝试默认构建产物。
         elf: Option<PathBuf>,
         /// Auto-stop after duration, e.g. 30s/2m/1h (0 = unlimited).
-        #[arg(long, value_parser = humantime::parse_duration, default_value = "5s")]
+        #[arg(long, value_parser = humantime::parse_duration, default_value = "0")]
         duration: std::time::Duration,
         /// Auto-stop after N lines (0 = unlimited).
         #[arg(long, default_value = "0")]
@@ -157,39 +160,11 @@ async fn main() -> Result<()> {
         }
         Cmd::Monitor {
             mcu,
-            elf,
             duration,
             lines,
+            ..
         } => {
-            let resp = Server::client_send(ClientRequest::Monitor {
-                mcu: mcu.into(),
-                elf,
-                duration: if duration.as_millis() == 0 {
-                    None
-                } else {
-                    Some(duration.as_millis() as u64)
-                },
-                lines: if lines == 0 { None } else { Some(lines) },
-            })
-            .await?;
-            if resp.ok {
-                if let Some(arr) = resp.payload.get("lines").and_then(|v| v.as_array()) {
-                    for line in arr {
-                        if let Some(s) = line.as_str() {
-                            // try parse JSON line and extract 'text'
-                            if let Ok(val) = serde_json::from_str::<serde_json::Value>(s) {
-                                if let Some(txt) = val.get("text").and_then(|t| t.as_str()) {
-                                    println!("{}", txt);
-                                    continue;
-                                }
-                            }
-                            println!("{}", s);
-                        }
-                    }
-                }
-            } else {
-                eprintln!("{}", serde_json::to_string_pretty(&resp)?);
-            }
+            monitor_tail(mcu.into(), duration, lines).await?;
         }
         Cmd::Logs {
             mcu,
@@ -238,4 +213,75 @@ impl From<OptionAfter> for model::AfterPolicy {
             OptionAfter::HardReset => model::AfterPolicy::HardReset,
         }
     }
+}
+
+async fn monitor_tail(mcu: McuKind, duration: std::time::Duration, lines: usize) -> Result<()> {
+    let paths = paths::Paths::new()?;
+    let dir = paths.session_dir(mcu.clone());
+    let session =
+        latest_session(dir)?.ok_or_else(|| anyhow::anyhow!("no session log for {:?}", mcu))?;
+
+    let mut file = TokioOpen::new().read(true).open(&session).await?;
+    // tail-only: start at end
+    file.seek(std::io::SeekFrom::End(0)).await?;
+    let mut reader = BufReader::new(file);
+
+    let deadline = if duration.as_millis() == 0 {
+        None
+    } else {
+        Some(Instant::now() + duration)
+    };
+    let mut printed = 0usize;
+
+    loop {
+        let mut buf = String::new();
+        let n = tokio::select! {
+            res = reader.read_line(&mut buf) => res?,
+            _ = async { if let Some(dl)=deadline { tokio::time::sleep_until(dl.into()).await; } }, if deadline.is_some() => 0,
+        };
+        if n == 0 {
+            if let Some(dl) = deadline {
+                if Instant::now() >= dl {
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            continue;
+        }
+        let line = buf.trim_end();
+        // try extract text field if JSON line
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(line) {
+            if let Some(txt) = val.get("text").and_then(|t| t.as_str()) {
+                println!("{}", txt);
+            } else {
+                println!("{}", line);
+            }
+        } else {
+            println!("{}", line);
+        }
+        printed += 1;
+        if lines > 0 && printed >= lines {
+            break;
+        }
+    }
+    Ok(())
+}
+
+fn latest_session(dir: &std::path::Path) -> Result<Option<std::path::PathBuf>> {
+    if !dir.exists() {
+        return Ok(None);
+    }
+    let mut latest: Option<(std::time::SystemTime, std::path::PathBuf)> = None;
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("log") {
+            continue;
+        }
+        let mt = entry.metadata()?.modified()?;
+        if latest.as_ref().map(|(t, _)| mt > *t).unwrap_or(true) {
+            latest = Some((mt, path));
+        }
+    }
+    Ok(latest.map(|(_, p)| p))
 }
