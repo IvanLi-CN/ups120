@@ -21,7 +21,7 @@ use tokio::io::{AsyncBufReadExt, AsyncSeekExt, AsyncWriteExt, BufReader as Tokio
 use tokio::net::UnixListener;
 use tokio::net::UnixStream;
 use tokio::process::Command;
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc};
 
 pub struct Server;
 
@@ -42,8 +42,9 @@ impl Server {
 
         let clock = Clock::new();
         let listener = UnixListener::bind(&paths.sock)?;
-        println!("mcu-agentd listening at {:?}", paths.sock);
+        println!("ups120-agentd listening at {:?}", paths.sock);
         let running = Arc::new(AtomicBool::new(true));
+        let notify = Arc::new(Notify::new());
 
         // auto-start monitors if ports + ELF 存在（不触发构建）
         let auto_paths = paths.clone();
@@ -55,27 +56,50 @@ impl Server {
             }
         });
 
-        while running.load(Ordering::SeqCst) {
-            let (stream, _) = listener.accept().await?;
-            let paths_cl = paths.clone();
-            let clock_cl = clock;
-            let running_cl = running.clone();
-            tokio::spawn(async move {
-                if let Err(e) = handle_conn(stream, paths_cl, clock_cl, running_cl).await {
-                    eprintln!("conn error: {e:?}");
+        loop {
+            tokio::select! {
+                _ = notify.notified() => {
+                    break;
                 }
-            });
+                res = listener.accept() => {
+                    let (stream, _) = res?;
+                    let paths_cl = paths.clone();
+                    let clock_cl = clock;
+                    let running_cl = running.clone();
+                    let notify_cl = notify.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = handle_conn(stream, paths_cl, clock_cl, running_cl, notify_cl).await {
+                            eprintln!("conn error: {e:?}");
+                        }
+                    });
+                }
+            }
+            if !running.load(Ordering::SeqCst) {
+                break;
+            }
         }
+
+        // cleanup socket on graceful exit
+        let _ = std::fs::remove_file(&paths.sock);
         Ok(())
     }
 
     pub async fn spawn_background() -> Result<()> {
         let exe = std::env::current_exe()?;
-        let mut cmd = Command::new(exe);
+        let mut cmd = std::process::Command::new(exe);
         cmd.arg("serve")
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .stdin(std::process::Stdio::null());
+
+        // detach from controlling terminal to survive parent exit (avoid SIGHUP)
+        unsafe {
+            std::os::unix::process::CommandExt::pre_exec(&mut cmd, || {
+                nix::unistd::setsid()
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+                Ok(())
+            });
+        }
         cmd.spawn().context("spawn daemon")?;
         Ok(())
     }
@@ -100,13 +124,14 @@ async fn handle_conn(
     paths: Paths,
     clock: Clock,
     running: Arc<AtomicBool>,
+    notify: Arc<Notify>,
 ) -> Result<()> {
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = TokioBuf::new(read_half);
     let mut buf = String::new();
     reader.read_line(&mut buf).await?;
     let req: ClientRequest = serde_json::from_str(&buf)?;
-    let resp = handle_request(req, &paths, &clock, &running)
+    let resp = handle_request(req, &paths, &clock, &running, &notify)
         .await
         .unwrap_or_else(|e| ClientResponse::err(format!("{e:#}")));
     let line = serde_json::to_string(&resp)? + "\n";
@@ -119,11 +144,12 @@ async fn handle_request(
     paths: &Paths,
     clock: &Clock,
     running: &Arc<AtomicBool>,
+    notify: &Arc<Notify>,
 ) -> Result<ClientResponse> {
     match req {
         ClientRequest::Shutdown => {
-            std::fs::remove_file(&paths.sock).ok();
             running.store(false, Ordering::SeqCst);
+            notify.notify_waiters();
             Ok(ClientResponse::ok(json!({"status":"stopping"})))
         }
         ClientRequest::Status => {

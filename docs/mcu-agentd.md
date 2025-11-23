@@ -1,4 +1,4 @@
-# MCU Agent 服务设计说明
+# UPS120 Agent 服务设计说明
 
 ## 目的与范围
 
@@ -9,6 +9,9 @@
 
 - 语言/框架：Rust（tokio + clap）。
 - 工程位置：`tools/mcu-agentd/`（独立二进制 crate，隔离于固件工程）。
+- 二进制/包名：`ups120-agentd`，保持与项目前缀一致以避免系统冲突。
+- 根目录提供 `Justfile` 快捷入口：`just agentd-start|agentd-status|agentd-stop|agentd-set-port|agentd-get-port`；也可用通用 `just agentd <subcommand...>` 直传子命令。
+  - `just agentd-set-port esp32` 可省路径，终端会弹出可用串口列表，↑↓选择后写入 `.esp32-port`；STM32 仍需显式传入 probe/path。
 - 实例模型：同一可执行文件兼具守护与客户端，通过 Unix socket + 锁文件保证单实例；per-MCU 资源锁避免占用串口/探针冲突。
 - 端口缓存：仓根 `.esp32-port`、`.stm32-port`（兼容读取 `.stm32-probe`）；提供 set/get/list 命令。
 - 运行策略：烧录/复位默认不自动运行；仅在日志采集（monitor/attach）时启动目标。若底层命令必须复位，日志里显式标注事件。
@@ -64,7 +67,7 @@
 | 复位控制 | 分 MCU 调用 espflash/probe-rs reset | 复位事件入元数据，附时间戳 | 已实现 |  |
 | 日志采集 | 后台监控捕获输出 + session/元数据；monitor 仅尾随显示 | logs 可按 MCU/时间过滤；tail N 生效 | 已实现（未引入 SQLite 索引） |  |
 | 构建兜底 | 缺 ELF 自动 make 对应目标 | 默认 ELF 不存在即报错；不自动构建 | 已移除 | 需手动先构建 |
-| 配置文件 | `configs/mcu-agentd.toml` 覆盖默认 | 配置生效，env 可覆盖 | 未实现 |  |
+| 配置文件 | `configs/ups120-agentd.toml` 覆盖默认 | 配置生效，env 可覆盖 | 未实现 |  |
 
 ## 非目标
 
