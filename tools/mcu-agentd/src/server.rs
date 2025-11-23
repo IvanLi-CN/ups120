@@ -165,15 +165,6 @@ async fn handle_request(
             let res = reset_mcu(paths, &mcu, &ts).await?;
             Ok(ClientResponse::ok(res))
         }
-        ClientRequest::StartMonitor { mcu } => {
-            let ts = clock.now();
-            let res = start_monitor_bg(paths, &mcu, Some(ts)).await?;
-            Ok(ClientResponse::ok(res))
-        }
-        ClientRequest::StopMonitor { mcu } => {
-            stop_monitor_bg(paths, &mcu)?;
-            Ok(ClientResponse::ok(json!({"stopped": mcu})))
-        }
         ClientRequest::Monitor {
             mcu,
             elf: _,
@@ -205,13 +196,14 @@ async fn handle_request(
 
 async fn autostart_monitors(paths: Paths, clock: Clock, running: Arc<AtomicBool>) -> Result<()> {
     // ESP32
+    // by default start background monitor if ports exist; caller can rely on
+    // stop_monitor_bg/start_monitor_bg internally without explicit commands
     if port_cache::read_port(&paths, McuKind::Esp32)?.is_some() {
         let ts = clock.now();
         if let Err(e) = start_monitor_bg(&paths, &McuKind::Esp32, Some(ts)).await {
             eprintln!("auto monitor esp32 failed: {e:#}");
         }
     }
-    // STM32
     if port_cache::read_port(&paths, McuKind::Stm32)?.is_some() {
         let ts = clock.now();
         if let Err(e) = start_monitor_bg(&paths, &McuKind::Stm32, Some(ts)).await {

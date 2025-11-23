@@ -53,16 +53,6 @@ enum Cmd {
         #[arg(value_enum)]
         mcu: McuOpt,
     },
-    /// Stop background monitor for MCU.
-    StopMon {
-        #[arg(value_enum)]
-        mcu: McuOpt,
-    },
-    /// Start background monitor for MCU.
-    StartMon {
-        #[arg(value_enum)]
-        mcu: McuOpt,
-    },
     /// Monitor MCU logs (attach/monitor without auto-flash unless required).
     Monitor {
         #[arg(value_enum)]
@@ -163,14 +153,6 @@ async fn main() -> Result<()> {
         }
         Cmd::Reset { mcu } => {
             let resp = Server::client_send(ClientRequest::Reset { mcu: mcu.into() }).await?;
-            println!("{}", serde_json::to_string_pretty(&resp)?);
-        }
-        Cmd::StopMon { mcu } => {
-            let resp = Server::client_send(ClientRequest::StopMonitor { mcu: mcu.into() }).await?;
-            println!("{}", serde_json::to_string_pretty(&resp)?);
-        }
-        Cmd::StartMon { mcu } => {
-            let resp = Server::client_send(ClientRequest::StartMonitor { mcu: mcu.into() }).await?;
             println!("{}", serde_json::to_string_pretty(&resp)?);
         }
         Cmd::Monitor {
