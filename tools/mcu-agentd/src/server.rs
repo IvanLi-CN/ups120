@@ -165,13 +165,13 @@ async fn handle_request(
             let res = reset_mcu(paths, &mcu, &ts).await?;
             Ok(ClientResponse::ok(res))
         }
-        ClientRequest::StartAutoMonitor { mcu } => {
+        ClientRequest::StartMonitor { mcu } => {
             let ts = clock.now();
-            let res = start_auto_monitor(paths, &mcu, Some(ts)).await?;
+            let res = start_monitor_bg(paths, &mcu, Some(ts)).await?;
             Ok(ClientResponse::ok(res))
         }
-        ClientRequest::StopAutoMonitor { mcu } => {
-            stop_auto_monitor(paths, &mcu)?;
+        ClientRequest::StopMonitor { mcu } => {
+            stop_monitor_bg(paths, &mcu)?;
             Ok(ClientResponse::ok(json!({"stopped": mcu})))
         }
         ClientRequest::Monitor {
@@ -207,14 +207,14 @@ async fn autostart_monitors(paths: Paths, clock: Clock, running: Arc<AtomicBool>
     // ESP32
     if port_cache::read_port(&paths, McuKind::Esp32)?.is_some() {
         let ts = clock.now();
-        if let Err(e) = start_auto_monitor(&paths, &McuKind::Esp32, Some(ts)).await {
+        if let Err(e) = start_monitor_bg(&paths, &McuKind::Esp32, Some(ts)).await {
             eprintln!("auto monitor esp32 failed: {e:#}");
         }
     }
     // STM32
     if port_cache::read_port(&paths, McuKind::Stm32)?.is_some() {
         let ts = clock.now();
-        if let Err(e) = start_auto_monitor(&paths, &McuKind::Stm32, Some(ts)).await {
+        if let Err(e) = start_monitor_bg(&paths, &McuKind::Stm32, Some(ts)).await {
             eprintln!("auto monitor stm32 failed: {e:#}");
         }
     }
@@ -223,13 +223,13 @@ async fn autostart_monitors(paths: Paths, clock: Clock, running: Arc<AtomicBool>
     Ok(())
 }
 
-async fn start_auto_monitor(
+async fn start_monitor_bg(
     paths: &Paths,
     mcu: &McuKind,
     ts_opt: Option<Timestamp>,
 ) -> Result<serde_json::Value> {
     // stop any existing monitor for same MCU to free port
-    stop_auto_monitor(paths, mcu)?;
+    stop_monitor_bg(paths, mcu)?;
 
     let ts = ts_opt.unwrap_or_else(|| Timestamp {
         wall: Local::now(),
@@ -273,7 +273,7 @@ async fn start_auto_monitor(
 
     let mut child = cmd.spawn().context("spawn auto monitor")?;
     let pid = child.id().unwrap_or(0);
-    std::fs::write(paths.auto_pid(mcu.clone()), pid.to_string())?;
+    std::fs::write(paths.monitor_pid(mcu.clone()), pid.to_string())?;
 
     // writer task
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
@@ -354,7 +354,7 @@ async fn start_auto_monitor(
         paths,
         mcu,
         &ts,
-        "auto-monitor-start",
+        "monitor-bg-start",
         &crate::process::RunResult {
             status: 0,
             duration_ms: 0,
@@ -369,14 +369,24 @@ async fn start_auto_monitor(
     }))
 }
 
-fn stop_auto_monitor(paths: &Paths, mcu: &McuKind) -> Result<()> {
-    let pid_file = paths.auto_pid(mcu.clone());
-    if let Ok(pid_txt) = std::fs::read_to_string(&pid_file) {
-        if let Ok(pid_num) = pid_txt.trim().parse::<i32>() {
-            let _ = kill(Pid::from_raw(pid_num), Signal::SIGTERM);
+fn stop_monitor_bg(paths: &Paths, mcu: &McuKind) -> Result<()> {
+    // remove legacy auto pid if exists
+    let legacy = paths.logs_dir.join(format!(
+        "auto-{}.pid",
+        match mcu {
+            McuKind::Esp32 => "esp32",
+            McuKind::Stm32 => "stm32",
         }
+    ));
+    let pid_file = paths.monitor_pid(mcu.clone());
+    for pf in [&pid_file, &legacy] {
+        if let Ok(pid_txt) = std::fs::read_to_string(pf) {
+            if let Ok(pid_num) = pid_txt.trim().parse::<i32>() {
+                let _ = kill(Pid::from_raw(pid_num), Signal::SIGTERM);
+            }
+        }
+        let _ = std::fs::remove_file(pf);
     }
-    let _ = std::fs::remove_file(pid_file);
     Ok(())
 }
 
@@ -388,7 +398,7 @@ async fn flash_mcu(
     ts: &Timestamp,
 ) -> Result<serde_json::Value> {
     // free port from auto monitor first
-    stop_auto_monitor(paths, mcu)?;
+    stop_monitor_bg(paths, mcu)?;
 
     let cmd = match mcu {
         McuKind::Esp32 => {
@@ -423,7 +433,7 @@ async fn flash_mcu(
     write_meta(paths, mcu, ts, "flash", &res)?;
 
     // restart auto monitor
-    let _ = start_auto_monitor(paths, mcu, None).await;
+    let _ = start_monitor_bg(paths, mcu, None).await;
 
     Ok(json!({
         "ts": ts.iso(),
@@ -435,7 +445,7 @@ async fn flash_mcu(
 }
 
 async fn reset_mcu(paths: &Paths, mcu: &McuKind, ts: &Timestamp) -> Result<serde_json::Value> {
-    stop_auto_monitor(paths, mcu)?;
+    stop_monitor_bg(paths, mcu)?;
 
     let cmd = match mcu {
         McuKind::Esp32 => {
@@ -462,7 +472,7 @@ async fn reset_mcu(paths: &Paths, mcu: &McuKind, ts: &Timestamp) -> Result<serde
     let res = run_mcu_cmd(paths, mcu, ts, cmd).await?;
     write_meta(paths, mcu, ts, "reset", &res)?;
 
-    let _ = start_auto_monitor(paths, mcu, None).await;
+    let _ = start_monitor_bg(paths, mcu, None).await;
 
     Ok(json!({
         "ts": ts.iso(),
@@ -531,7 +541,7 @@ async fn default_elf(
 
 fn session_path_now(paths: &Paths, mcu: &McuKind, ts: &Timestamp, auto: bool) -> PathBuf {
     let dir = paths.session_dir(mcu.clone());
-    let suffix = if auto { "auto" } else { "sess" };
+    let suffix = if auto { "mon" } else { "sess" };
     let filename = format!("{}-{}.log", ts.wall.format("%Y%m%d_%H%M%S"), suffix);
     dir.join(filename)
 }

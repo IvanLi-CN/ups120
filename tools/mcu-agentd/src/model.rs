@@ -27,10 +27,10 @@ pub enum ClientRequest {
     GetPort {
         mcu: McuKind,
     },
-    StartAutoMonitor {
+    StartMonitor {
         mcu: McuKind,
     },
-    StopAutoMonitor {
+    StopMonitor {
         mcu: McuKind,
     },
     Flash {

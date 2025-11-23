@@ -77,10 +77,10 @@ impl Paths {
         self.lock.as_path()
     }
 
-    pub fn auto_pid(&self, mcu: crate::model::McuKind) -> PathBuf {
+    pub fn monitor_pid(&self, mcu: crate::model::McuKind) -> PathBuf {
         let name = match mcu {
-            crate::model::McuKind::Esp32 => "auto-esp32.pid",
-            crate::model::McuKind::Stm32 => "auto-stm32.pid",
+            crate::model::McuKind::Esp32 => "mon-esp32.pid",
+            crate::model::McuKind::Stm32 => "mon-stm32.pid",
         };
         self.logs_dir.join(name)
     }
