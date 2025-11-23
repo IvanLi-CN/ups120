@@ -31,14 +31,16 @@
 
 ```bash
 # 守护（release）
-just agentd-start
-just agentd-status
-just agentd-stop
+just agentd start
+just agentd status
+just agentd stop
 
-# 端口缓存（ESP32 可省略路径触发交互选择，↑↓选择串口）
-just agentd-set-port esp32
-just agentd-set-port esp32 /dev/cu.usbmodem412201
-just agentd-get-port stm32
+# 端口缓存（交互选择：ESP32 只列常见 Espressif 303A 串口；STM32 只列 STLink/CMSIS DAP）
+just agentd set-port esp32                # 无参 → 交互列表，↑↓选择
+just agentd set-port esp32 <esp32 port>   # 显式指定串口路径
+just agentd set-port stm32                # 无参 → probe rs 列表交互选择
+just agentd set-port stm32 <probe id>     # 显式指定 probe rs 标识，例如 0483:3748:SERIAL
+just agentd get-port stm32
 
 # 固件操作（自动停/恢复监控）
 just agentd flash --mcu esp32 --elf <path> --after no-reset
