@@ -239,7 +239,6 @@ async fn start_monitor_bg(
                 .arg("--port")
                 .arg(port)
                 .arg("--non-interactive")
-                .arg("--no-reset")
                 .arg("--elf")
                 .arg(&elf)
                 .arg("--log-format")
@@ -249,7 +248,7 @@ async fn start_monitor_bg(
         McuKind::Stm32 => {
             let probe = require_port(paths, McuKind::Stm32)?;
             let mut c = Command::new("probe-rs");
-            c.arg("attach")
+            c.arg("run")
                 .arg("--chip")
                 .arg("STM32L051C8Tx")
                 .arg("--probe")
@@ -715,37 +714,36 @@ async fn tail_session(
     let session = latest_session(paths, mcu)?
         .ok_or_else(|| anyhow::anyhow!("no session log for {:?}", mcu))?;
 
+    // Default to short wait to avoid挂起：若未指定则 5s
+    let duration_ms = duration_ms.unwrap_or(5_000);
+    // Tail-only: 从文件末尾开始，不回放历史
     let mut f = tokio::fs::OpenOptions::new()
         .read(true)
         .open(&session)
         .await?;
-    // start tailing from end to only stream new lines
     f.seek(std::io::SeekFrom::End(0)).await?;
     let mut reader = TokioBuf::new(f);
 
     let start = tokio::time::Instant::now();
-    let deadline = duration_ms.map(|d| start + tokio::time::Duration::from_millis(d));
-    let mut lines = 0usize;
+    let deadline = start + tokio::time::Duration::from_millis(duration_ms);
     let mut out = Vec::new();
+
     loop {
         let mut buf = String::new();
         let n = tokio::select! {
             res = reader.read_line(&mut buf) => res?,
-            _ = async { if let Some(dl)=deadline { tokio::time::sleep_until(dl).await; } }, if deadline.is_some() => 0,
+            _ = tokio::time::sleep_until(deadline) => 0,
         };
         if n == 0 {
-            if let Some(dl) = deadline {
-                if tokio::time::Instant::now() >= dl {
-                    break;
-                }
+            if tokio::time::Instant::now() >= deadline {
+                break;
             }
             tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
             continue;
         }
         out.push(buf.trim_end().to_string());
-        lines += 1;
         if let Some(max) = max_lines {
-            if lines >= max {
+            if out.len() >= max {
                 break;
             }
         }
@@ -755,7 +753,7 @@ async fn tail_session(
         "mcu": mcu,
         "session": session,
         "lines": out,
-        "line_count": lines,
+        "line_count": out.len(),
         "duration_ms": start.elapsed().as_millis(),
     }))
 }

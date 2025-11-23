@@ -60,7 +60,7 @@ enum Cmd {
         /// Optional ELF path; if省略则尝试默认构建产物。
         elf: Option<PathBuf>,
         /// Auto-stop after duration, e.g. 30s/2m/1h (0 = unlimited).
-        #[arg(long, value_parser = humantime::parse_duration, default_value = "0")]
+        #[arg(long, value_parser = humantime::parse_duration, default_value = "5s")]
         duration: std::time::Duration,
         /// Auto-stop after N lines (0 = unlimited).
         #[arg(long, default_value = "0")]
