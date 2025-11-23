@@ -39,6 +39,17 @@ impl Server {
         let listener = UnixListener::bind(&paths.sock)?;
         println!("mcu-agentd listening at {:?}", paths.sock);
         let running = Arc::new(AtomicBool::new(true));
+
+        // auto-start monitors if ports + ELF 存在（不触发构建）
+        let auto_paths = paths.clone();
+        let auto_clock = clock;
+        let auto_running = running.clone();
+        tokio::spawn(async move {
+            if let Err(e) = autostart_monitors(auto_paths, auto_clock, auto_running).await {
+                eprintln!("autostart monitor error: {e:?}");
+            }
+        });
+
         while running.load(Ordering::SeqCst) {
             let (stream, _) = listener.accept().await?;
             let paths_cl = paths.clone();
@@ -166,6 +177,26 @@ async fn handle_request(
     }
 }
 
+async fn autostart_monitors(paths: Paths, clock: Clock, running: Arc<AtomicBool>) -> Result<()> {
+    // ESP32
+    if port_cache::read_port(&paths, McuKind::Esp32)?.is_some() {
+        let ts = clock.now();
+        if let Err(e) = monitor_mcu(&paths, &McuKind::Esp32, None, &ts).await {
+            eprintln!("auto monitor esp32 failed: {e:#}");
+        }
+    }
+    // STM32
+    if port_cache::read_port(&paths, McuKind::Stm32)?.is_some() {
+        let ts = clock.now();
+        if let Err(e) = monitor_mcu(&paths, &McuKind::Stm32, None, &ts).await {
+            eprintln!("auto monitor stm32 failed: {e:#}");
+        }
+    }
+    // keep running flag so main loop continues; autostart returns immediately
+    let _ = running;
+    Ok(())
+}
+
 async fn flash_mcu(
     paths: &Paths,
     mcu: &McuKind,
@@ -256,41 +287,51 @@ async fn ensure_elf(paths: &Paths, mcu: &McuKind, elf: Option<PathBuf>) -> Resul
     }
     match mcu {
         McuKind::Esp32 => {
-            // build ups-main
-            let status = Command::new("make")
-                .arg("ups-build")
-                .current_dir(paths.root())
-                .status()
-                .await?;
-            if !status.success() {
-                anyhow::bail!("make ups-build failed: {status}");
-            }
-            let p = paths
-                .root()
-                .join("firmware/ups-main/target/xtensa-esp32s3-none-elf/release/ups-main");
-            if !p.exists() {
-                anyhow::bail!("built ELF missing: {:?}", p);
-            }
-            Ok(p)
+            default_elf(
+                paths,
+                "ups-build",
+                "firmware/ups-main/target/xtensa-esp32s3-none-elf/release/ups-main",
+                true,
+            )
+            .await
         }
         McuKind::Stm32 => {
-            let status = Command::new("make")
-                .arg("sb-build")
-                .current_dir(paths.root())
-                .status()
-                .await?;
-            if !status.success() {
-                anyhow::bail!("make sb-build failed: {status}");
-            }
-            let p = paths
-                .root()
-                .join("target/thumbv6m-none-eabi/release/smart-battery");
-            if !p.exists() {
-                anyhow::bail!("built ELF missing: {:?}", p);
-            }
-            Ok(p)
+            default_elf(
+                paths,
+                "sb-build",
+                "target/thumbv6m-none-eabi/release/smart-battery",
+                true,
+            )
+            .await
         }
     }
+}
+
+async fn default_elf(
+    paths: &Paths,
+    make_target: &str,
+    rel_path: &str,
+    build: bool,
+) -> Result<PathBuf> {
+    let p = paths.root().join(rel_path);
+    if p.exists() {
+        return Ok(p);
+    }
+    if build {
+        let status = Command::new("make")
+            .arg(make_target)
+            .current_dir(paths.root())
+            .status()
+            .await?;
+        if !status.success() {
+            anyhow::bail!("make {make_target} failed: {status}");
+        }
+        if p.exists() {
+            return Ok(p);
+        }
+        anyhow::bail!("built ELF missing after {make_target}: {:?}", p)
+    }
+    anyhow::bail!("default ELF missing and build disabled: {:?}", p)
 }
 
 async fn monitor_mcu(
