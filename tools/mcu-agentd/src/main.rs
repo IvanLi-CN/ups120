@@ -5,17 +5,16 @@ mod process;
 mod server;
 mod timefmt;
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
-use dialoguer::theme::ColorfulTheme;
 use dialoguer::Select;
+use dialoguer::theme::ColorfulTheme;
 use model::{ClientRequest, McuKind};
+use serialport::{SerialPortType, available_ports};
 use server::Server;
-use serialport::{available_ports, SerialPortType};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
 use std::time::Instant;
-use tokio::fs::OpenOptions as TokioOpen;
-use tokio::io::{AsyncBufReadExt, AsyncSeekExt, BufReader};
 
 /// UPS120 agentd – single-instance service to flash/reset/monitor ESP32-S3 & STM32L0.
 #[derive(Parser, Debug)]
@@ -230,10 +229,13 @@ async fn monitor_tail(mcu: McuKind, duration: std::time::Duration, lines: usize)
     let session =
         latest_session(dir)?.ok_or_else(|| anyhow::anyhow!("no session log for {:?}", mcu))?;
 
-    let mut file = TokioOpen::new().read(true).open(&session).await?;
-    // tail-only: start at end
-    file.seek(std::io::SeekFrom::End(0)).await?;
-    let mut reader = BufReader::new(file);
+    // track current offset; start at end (tail-only)
+    let mut pos = std::fs::metadata(&session)?.len();
+    let mut chunk = String::new();
+
+    if std::env::var_os("MON_DEBUG").is_some() {
+        eprintln!("session {:?} start pos={} bytes", session, pos);
+    }
 
     let deadline = if duration.as_millis() == 0 {
         None
@@ -243,12 +245,11 @@ async fn monitor_tail(mcu: McuKind, duration: std::time::Duration, lines: usize)
     let mut printed = 0usize;
 
     loop {
-        let mut buf = String::new();
-        let n = tokio::select! {
-            res = reader.read_line(&mut buf) => res?,
-            _ = async { if let Some(dl)=deadline { tokio::time::sleep_until(dl.into()).await; } }, if deadline.is_some() => 0,
-        };
-        if n == 0 {
+        if std::env::var_os("MON_DEBUG").is_some() {
+            eprintln!("loop start pos={}", pos);
+        }
+        let len = std::fs::metadata(&session)?.len();
+        if len <= pos {
             if let Some(dl) = deadline {
                 if Instant::now() >= dl {
                     break;
@@ -257,23 +258,41 @@ async fn monitor_tail(mcu: McuKind, duration: std::time::Duration, lines: usize)
             tokio::time::sleep(std::time::Duration::from_millis(150)).await;
             continue;
         }
-        let line = buf.trim_end();
-        // try extract text field if JSON line
-        if let Ok(val) = serde_json::from_str::<serde_json::Value>(line) {
-            if let Some(txt) = val.get("text").and_then(|t| t.as_str()) {
-                println!("{}", txt);
-            } else {
-                println!("{}", line);
-            }
-        } else {
-            println!("{}", line);
+
+        if std::env::var_os("MON_DEBUG").is_some() {
+            eprintln!("monitor tick len={} pos={}", len, pos);
         }
-        printed += 1;
-        if lines > 0 && printed >= lines {
-            break;
+
+        let mut file = std::fs::OpenOptions::new().read(true).open(&session)?;
+        file.seek(SeekFrom::Start(pos))?;
+        chunk.clear();
+        file.read_to_string(&mut chunk)?;
+        pos = len;
+
+        for line in chunk.lines() {
+            let line = line.trim_end_matches(['\n', '\r'].as_ref());
+            // try extract text field if JSON line
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(line) {
+                if let Some(txt) = val.get("text").and_then(|t| t.as_str()) {
+                    println!("{}", colorize_line(txt));
+                } else {
+                    println!("{}", colorize_line(line));
+                }
+            } else {
+                println!("{}", colorize_line(line));
+            }
+            printed += 1;
+            if lines > 0 && printed >= lines {
+                return Ok(());
+            }
         }
     }
     Ok(())
+}
+
+fn colorize_line(line: &str) -> String {
+    // passthrough: keep original text (and any ANSI sequences) untouched
+    line.to_string()
 }
 
 fn latest_session(dir: &std::path::Path) -> Result<Option<std::path::PathBuf>> {
@@ -316,7 +335,10 @@ async fn interactive_select_port(mcu: McuKind) -> Result<PathBuf> {
                 .iter()
                 .map(|p| {
                     let extra = match &p.port_type {
-                        SerialPortType::UsbPort(info) => format!("vid={:04x} pid={:04x} {:?}", info.vid, info.pid, info.product),
+                        SerialPortType::UsbPort(info) => format!(
+                            "vid={:04x} pid={:04x} {:?}",
+                            info.vid, info.pid, info.product
+                        ),
                         _ => String::new(),
                     };
                     format!("{} ({extra})", p.port_name)
@@ -333,7 +355,10 @@ async fn interactive_select_port(mcu: McuKind) -> Result<PathBuf> {
             use tokio::process::Command;
             let out = Command::new("probe-rs").arg("list").output().await?;
             if !out.status.success() {
-                bail!("probe-rs list 失败: {}", String::from_utf8_lossy(&out.stderr));
+                bail!(
+                    "probe-rs list 失败: {}",
+                    String::from_utf8_lossy(&out.stderr)
+                );
             }
             let stdout = String::from_utf8_lossy(&out.stdout);
             let mut entries: Vec<String> = stdout
@@ -344,7 +369,13 @@ async fn interactive_select_port(mcu: McuKind) -> Result<PathBuf> {
             // Prefer STM32-friendly probes (STLink / CMSIS-DAP), drop ESP JTAG/WCH when possible
             let preferred: Vec<String> = entries
                 .iter()
-                .filter(|l| l.contains("STLink") || l.contains("ST-LINK") || l.contains("CMSIS-DAP") || l.contains("0483:3748") || l.contains("0d28:0204"))
+                .filter(|l| {
+                    l.contains("STLink")
+                        || l.contains("ST-LINK")
+                        || l.contains("CMSIS-DAP")
+                        || l.contains("0483:3748")
+                        || l.contains("0d28:0204")
+                })
                 .cloned()
                 .collect();
             if !preferred.is_empty() {

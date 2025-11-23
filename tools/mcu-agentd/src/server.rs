@@ -259,7 +259,11 @@ async fn start_monitor_bg(
         McuKind::Esp32 => {
             let port = require_port(paths, McuKind::Esp32)?;
             let mut c = Command::new("espflash");
-            c.arg("monitor")
+            // color env vars force colored output even when stdout is piped
+            c.env("FORCE_COLOR", "1")
+                .env("CLICOLOR_FORCE", "1")
+                .env("TERM", "xterm-256color")
+                .arg("monitor")
                 .arg("--chip")
                 .arg("esp32s3")
                 .arg("--port")
@@ -274,7 +278,11 @@ async fn start_monitor_bg(
         McuKind::Stm32 => {
             let probe = require_port(paths, McuKind::Stm32)?;
             let mut c = Command::new("probe-rs");
-            c.arg("run")
+            c.env("RUST_LOG_STYLE", "always")
+                .env("FORCE_COLOR", "1")
+                .env("CLICOLOR_FORCE", "1")
+                .env("TERM", "xterm-256color")
+                .arg("run")
                 .arg("--chip")
                 .arg("STM32L051C8Tx")
                 .arg("--probe")
