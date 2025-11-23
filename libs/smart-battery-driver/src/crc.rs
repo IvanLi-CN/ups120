@@ -17,10 +17,11 @@ pub fn calculate_crc(data: &[u8]) -> u8 {
         for _ in 0..8 {
             let msb = b & 0x80;
             b <<= 1;
-            if msb != 0 { b ^= 0x07; }
+            if msb != 0 {
+                b ^= 0x07;
+            }
         }
         crc = b;
     }
     crc
 }
-

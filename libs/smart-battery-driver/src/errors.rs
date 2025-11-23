@@ -11,4 +11,3 @@ pub enum Error<E: PartialEq> {
     /// CRC mismatch on read
     CrcRead { index: usize, expected: u8, got: u8 },
 }
-

@@ -82,7 +82,7 @@ async fn main(_spawner: Spawner) {
             _ => warn!("read telemetry failed"),
         }
 
-        let _ = bat.set_charging_enable(true).await;
+        let _ = bat.set_charge_control(true, true, 1).await;
 
         Timer::after(Duration::from_secs(2)).await;
     }

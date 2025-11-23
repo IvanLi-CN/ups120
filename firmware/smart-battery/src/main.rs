@@ -8,6 +8,8 @@ mod data_types;
 // mod global_state; // removed to save flash; LEDs derive state locally
 #[cfg(not(feature = "ship-mode"))]
 mod activity;
+#[cfg(not(feature = "ship-mode"))]
+mod charger_control;
 mod failsafe;
 #[cfg(not(feature = "ship-mode"))]
 mod i2c_slave;
@@ -174,7 +176,7 @@ async fn main(_spawner: Spawner) {
 
     // 使用默认线程模式执行器：WFE 进入轻度 SLEEP（非 STOP）。
     // 启动日志（必须打印，复用与 sleep_task 相同的格式字符串以节省 FLASH）。
-    defmt::info!("sleep: start (mode=SLEEP)");
+    defmt::debug!("sleep: start (mode=SLEEP)");
 
     // (Removed: APB1SMENR diagnostics to save flash)
 
@@ -195,6 +197,7 @@ async fn main(_spawner: Spawner) {
     let i2c1_dev = {
         let mut i2c1_cfg = I2cConfig::default();
         i2c1_cfg.frequency = Hertz(100_000);
+        i2c1_cfg.timeout = Duration::from_millis(150);
         let i2c1_blocking = I2c::new_blocking(p.I2C1, p.PB6, p.PB7, i2c1_cfg);
         // (Optional: I2C1.CR1.WUPEN for wake-from-STOP is omitted to save flash; RTC remains primary wake source.)
         i2c1_blocking.into_slave_multimaster(SlaveAddrConfig::basic(i2c_slave::SLAVE_ADDRESS))
@@ -207,7 +210,7 @@ async fn main(_spawner: Spawner) {
     let mut pstop = Output::new(p.PA9, Level::High, Speed::Low);
     let mut exit_shipmode = Output::new(p.PA1, Level::Low, Speed::Low);
     // BQ76920 may power-up in SHIP; assert wake pin early to bring it to NORMAL.
-    defmt::info!("bq:wake");
+    defmt::debug!("bq:wake");
     exit_shipmode.set_high();
     Timer::after(Duration::from_millis(1200)).await;
     exit_shipmode.set_low();
@@ -247,8 +250,8 @@ async fn main(_spawner: Spawner) {
     ) = shared::init_pubsubs();
 
     // 先尝试初始化 BQ76920（总重试 ≤ 500 ms）
-    defmt::info!("fw:boot smart-battery");
-    defmt::info!("bq:init");
+    defmt::debug!("fw:boot smart-battery");
+    defmt::debug!("bq:init");
     let probe_start = Instant::now();
     let probe_deadline = probe_start + Duration::from_millis(500);
     let tried_addresses = [BQ76920_I2C_ADDR, 0x18u8];
@@ -270,7 +273,7 @@ async fn main(_spawner: Spawner) {
         let i2c_dev_for_bq = I2cDevice::new(i2c_bus);
         let mut probe: Bq769x0<_, BqCrcEnabled, 5> = Bq769x0::new(i2c_dev_for_bq, addr, 3, None);
         if probe.try_apply_config(&cfg_template).await.is_ok() {
-            defmt::info!("bq:0x{:02x}", addr);
+            defmt::debug!("bq:0x{:02x}", addr);
             crate::failsafe::set_bq_online(true);
             bq_init_addr = Some(addr);
             break;
@@ -288,7 +291,7 @@ async fn main(_spawner: Spawner) {
         let i2c_dev_for_bq = I2cDevice::new(i2c_bus);
         let mut probe: Bq769x0<_, BqCrcEnabled, 5> = Bq769x0::new(i2c_dev_for_bq, addr, 3, None);
         if probe.try_apply_config(&cfg_template).await.is_ok() {
-            defmt::info!("bq:0x{:02x}", addr);
+            defmt::debug!("bq:0x{:02x}", addr);
             crate::failsafe::set_bq_online(true);
             bq_init_addr = Some(addr);
             break 'addr_loop;

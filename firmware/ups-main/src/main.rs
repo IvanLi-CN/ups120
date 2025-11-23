@@ -43,11 +43,37 @@ const SB_TEMP_DATA_BYTES: usize = 4;
 const SB_TEMP_FRAME_BYTES: usize = SB_TEMP_DATA_BYTES * 2;
 const TEST_A: u8 = 0x5A;
 const TEST_B: u8 = 0xA5;
+const SB_REG_CHG_CONFIG: u8 = 0x31;
+const SB_REG_CHG_PAUSE_CAUSE: u8 = 0x32;
+const SB_REG_STATE_FLAGS: u8 = 0x20;
+const SB_STATE_FLAG_AC_PRESENT: u16 = 0x0001;
+const SB_CFG_BIT_AUTO: u8 = 1 << 0;
+const SB_CFG_BIT_MANUAL: u8 = 1 << 1;
+const SB_CFG_SPEED_SHIFT: u8 = 2;
 
 // Battery pack configuration (per project spec; do not probe at runtime)
 const PACK_CELLS_S: u8 = 5; // 5S Li-ion (BQ76920 max 5S)
 const SOC_EMPTY_VBAT_MV: u32 = 12_500; // Cutoff threshold (pack)
 const SOC_FULL_VBAT_MV: u32 = 18_500; // Full threshold (pack)
+const CHARGE_START_VBAT_MV: u32 = 17_000;
+const CHARGE_STOP_VBAT_MV: u32 = SOC_FULL_VBAT_MV;
+const TEMP_PAUSE_C: f32 = 40.0;
+const TEMP_RESUME_C: f32 = 35.0;
+const SB_WRITE_RETRY_ATTEMPTS: u8 = 3;
+const SB_WRITE_RETRY_DELAY_MS: u32 = 5;
+const SB_CFG_VERIFY_INTERVAL_MS: u64 = 1_000;
+const SB_STATE_POLL_INTERVAL_MS: u64 = 10_000;
+
+fn compose_sb_charge_config(auto: bool, manual: bool, speed_tier: u8) -> u8 {
+    let mut value = (speed_tier & 0x03) << SB_CFG_SPEED_SHIFT;
+    if auto {
+        value |= SB_CFG_BIT_AUTO;
+    }
+    if manual {
+        value |= SB_CFG_BIT_MANUAL;
+    }
+    value
+}
 
 // Populate the ESP-IDF App Descriptor so espflash can read metadata
 esp_bootloader_esp_idf::esp_app_desc!();
@@ -113,6 +139,19 @@ fn main() -> ! {
     let mut i2c_dev_once = RefCellDevice::new(&i2c_bus);
     if let Err(_) = stm_one_shot_validate(&mut i2c_dev_once) {
         warn!("stm32: one-shot i2c validation failed");
+    }
+
+    const SB_AUTO_ENABLED: bool = false;
+    let sb_speed_tier: u8 = 0x01; // ≈0.8A
+    let mut sb_manual_enable = false;
+    let mut sb_config_value =
+        compose_sb_charge_config(SB_AUTO_ENABLED, sb_manual_enable, sb_speed_tier);
+    let mut sb_cfg_last_verify_ms = 0u64;
+    let mut sb_temp_pause_active = false;
+    let mut sb_last_state_poll_ms = 0u64;
+    match write_smart_battery_reg_retry(&i2c_bus, &mut delay, SB_REG_CHG_CONFIG, sb_config_value) {
+        Ok(()) => info!("smart-battery: config set (manual ctl, tier=0.8A)"),
+        Err(()) => warn!("smart-battery: failed to apply charge config"),
     }
 
     let mut spi = Spi::new(
@@ -216,14 +255,25 @@ fn main() -> ! {
 
     // Global single-instance drivers
     let mut tca = Some(Tca6408a::new(RefCellDevice::new(&i2c_bus)));
+    let mut vin_present = true;
+    let mut last_in_pg_logged: Option<bool> = None;
+    let mut in_pg_read_failed = false;
+    let mut charge_skip_adapter_logged = false;
     if let Some(t) = tca.as_mut() {
         match t.init() {
             Ok(()) => info!("tca6408a: init ok (CE=high, PSTOP=high)"),
             Err(_) => warn!("tca6408a: init failed (safe state not verified)"),
         }
         match t.read_in_pg() {
-            Ok(pg) => info!("tca6408a: IN_PG={}", if pg { "high" } else { "low" }),
-            Err(_) => warn!("tca6408a: read IN_PG failed"),
+            Ok(pg) => {
+                vin_present = pg;
+                last_in_pg_logged = Some(pg);
+                info!("tca6408a: IN_PG={}", if pg { "high" } else { "low" });
+            }
+            Err(_) => {
+                warn!("tca6408a: read IN_PG failed");
+                in_pg_read_failed = true;
+            }
         }
     }
     let _ = ui::boot_update(&mut spi, &mut _cs, &mut _dc, 40, "TCA6408A");
@@ -258,7 +308,6 @@ fn main() -> ! {
     delay.delay_ms(200u32);
     let _ = ui::boot_update(&mut spi, &mut _cs, &mut _dc, 80, "TSENS Calibrated");
 
-    let vin_present = true; // VIN presence sensor pending, default to true per spec
     let mut controller = fan_control::FanController::new(fan_pwm, fan_en, delta_opt, vin_present);
     let _ = ui::boot_update(&mut spi, &mut _cs, &mut _dc, 100, "Ready");
     let mut adin_elapsed_ms: u32 = 0;
@@ -292,8 +341,10 @@ fn main() -> ! {
             let smart_batt = read_smart_battery_temperatures(&i2c_bus);
             sb_temps = smart_batt;
 
-            let pack_temp = convert_temp_to_i16(sb_temps.and_then(|t| t.pack_c));
-            let charger_temp = convert_temp_to_i16(sb_temps.and_then(|t| t.charger_c));
+            let pack_temp_c = sb_temps.and_then(|t| t.pack_c);
+            let charger_temp_c = sb_temps.and_then(|t| t.charger_c);
+            let pack_temp = convert_temp_to_i16(pack_temp_c);
+            let charger_temp = convert_temp_to_i16(charger_temp_c);
             let adin_temp = convert_temp_to_i16(last_adin_temp_c);
 
             let temp_sources = [
@@ -329,10 +380,258 @@ fn main() -> ! {
 
             // Estimate SoC from VBAT (do not probe CELLS_PRESENT at runtime)
             let vbat_mv = read_smart_battery_vbat_mv(&i2c_bus);
-            let soc_pct = vbat_mv.map(|v| estimate_soc_from_vbat(v)).unwrap_or(0);
+
+            let refresh_in_pg = true;
+            if refresh_in_pg {
+                if let Some(t) = tca.as_mut() {
+                    match t.read_in_pg() {
+                        Ok(state) => {
+                            if in_pg_read_failed {
+                                info!("power: IN_PG read recovered");
+                                in_pg_read_failed = false;
+                            }
+                            if vin_present != state {
+                                vin_present = state;
+                                controller.set_vin_present(state);
+                                if state {
+                                    charge_skip_adapter_logged = false;
+                                }
+                            }
+                            if last_in_pg_logged != Some(state) {
+                                match read_smart_battery_state_flags(&i2c_bus) {
+                                    Some(flags) => {
+                                        let stm_ac = (flags & SB_STATE_FLAG_AC_PRESENT) != 0;
+                                        info!(
+                                            "power: adapter {} (stm_ac={} flags=0x{:04x})",
+                                            if state { "present" } else { "missing" },
+                                            stm_ac,
+                                            flags
+                                        );
+                                    }
+                                    None => info!(
+                                        "power: adapter {} (stm_ac=? read_fail)",
+                                        if state { "present" } else { "missing" }
+                                    ),
+                                }
+                                last_in_pg_logged = Some(state);
+                            }
+                        }
+                        Err(_) => {
+                            if !in_pg_read_failed {
+                                warn!("tca6408a: read IN_PG failed");
+                                in_pg_read_failed = true;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if let Some(temp) = pack_temp_c {
+                if sb_temp_pause_active {
+                    if temp <= TEMP_RESUME_C {
+                        sb_temp_pause_active = false;
+                        info!("charge: temperature resume at {=f32}°C", temp);
+                    }
+                } else if temp >= TEMP_PAUSE_C {
+                    sb_temp_pause_active = true;
+                    info!("charge: temperature pause at {=f32}°C", temp);
+                }
+            }
+
             let now_millis = esp_hal::time::Instant::now()
                 .duration_since_epoch()
                 .as_millis() as u64;
+
+            if now_millis.saturating_sub(sb_cfg_last_verify_ms) >= SB_CFG_VERIFY_INTERVAL_MS {
+                sb_cfg_last_verify_ms = now_millis;
+                match read_smart_battery_reg(&i2c_bus, SB_REG_CHG_CONFIG) {
+                    Ok(actual) => {
+                        if actual != sb_config_value {
+                            warn!(
+                                "smart-battery: cfg drift detected hw=0x{:02x} expected=0x{:02x}",
+                                actual, sb_config_value
+                            );
+                            let desired = compose_sb_charge_config(
+                                SB_AUTO_ENABLED,
+                                sb_manual_enable,
+                                sb_speed_tier,
+                            );
+                            match write_smart_battery_reg_retry(
+                                &i2c_bus,
+                                &mut delay,
+                                SB_REG_CHG_CONFIG,
+                                desired,
+                            ) {
+                                Ok(()) => {
+                                    sb_config_value = desired;
+                                    info!("smart-battery: cfg re-applied after drift");
+                                }
+                                Err(()) => {
+                                    warn!("smart-battery: failed to reapply charge config");
+                                }
+                            }
+                        }
+                    }
+                    Err(()) => warn!("smart-battery: cfg read failed"),
+                }
+            }
+
+            // Periodic state snapshot for logging / UI (every 10s)
+            if now_millis.saturating_sub(sb_last_state_poll_ms) >= SB_STATE_POLL_INTERVAL_MS {
+                sb_last_state_poll_ms = now_millis;
+                let mut status: Option<u8> = None;
+                let mut pause: Option<u8> = None;
+                let mut flags: Option<u16> = None;
+                let mut cell_mv: [Option<u16>; 5] = [None; 5];
+                let mut cells_present: Option<u8> = None;
+                if let Ok(s) = read_smart_battery_reg_retry(&i2c_bus, 0x30, 2, 2) {
+                    status = Some(s);
+                } else {
+                    warn!("sb:state read CHG_STATUS failed");
+                }
+                if let Ok(p) = read_smart_battery_reg_retry(&i2c_bus, SB_REG_CHG_PAUSE_CAUSE, 2, 2)
+                {
+                    pause = Some(p);
+                } else {
+                    warn!("sb:state read CHG_PAUSE_CAUSE failed");
+                }
+                if let Ok(f_lo) = read_smart_battery_reg_retry(&i2c_bus, SB_REG_STATE_FLAGS, 2, 2) {
+                    if let Ok(f_hi) =
+                        read_smart_battery_reg_retry(&i2c_bus, SB_REG_STATE_FLAGS + 1, 2, 2)
+                    {
+                        flags = Some(((f_hi as u16) << 8) | f_lo as u16);
+                    }
+                } else {
+                    warn!("sb:state read STATE_FLAGS failed");
+                }
+                // Cell voltages (best-effort, non-atomic)
+                if let Ok(c) = read_smart_battery_reg_retry(&i2c_bus, 0x1F, 2, 2) {
+                    cells_present = Some(c);
+                    let count = (c as usize).min(5);
+                    for i in 0..count {
+                        let base = 0x50u8.wrapping_add((i as u8) * 2);
+                        match (
+                            read_smart_battery_reg_retry(&i2c_bus, base, 2, 2),
+                            read_smart_battery_reg_retry(&i2c_bus, base.wrapping_add(1), 2, 2),
+                        ) {
+                            (Ok(lo), Ok(hi)) => {
+                                cell_mv[i] = Some(((hi as u16) << 8) | lo as u16);
+                            }
+                            _ => {
+                                warn!("sb:state read cell{} failed", i + 1);
+                            }
+                        }
+                    }
+                } else {
+                    warn!("sb:state read CELLS_PRESENT failed");
+                }
+                info!(
+                    "sb:state status=0x{:02x} pause=0x{:02x} flags=0x{:04x}",
+                    status.unwrap_or(0xFF),
+                    pause.unwrap_or(0xFF),
+                    flags.unwrap_or(0xFFFF)
+                );
+                if let Some(c) = cells_present {
+                    info!(
+                        "sb:cells n={} mv={:?}",
+                        c,
+                        [
+                            cell_mv[0].unwrap_or(0),
+                            cell_mv[1].unwrap_or(0),
+                            cell_mv[2].unwrap_or(0),
+                            cell_mv[3].unwrap_or(0),
+                            cell_mv[4].unwrap_or(0)
+                        ]
+                    );
+                }
+            }
+
+            if sb_temp_pause_active {
+                if sb_manual_enable {
+                    let desired_config =
+                        compose_sb_charge_config(SB_AUTO_ENABLED, false, sb_speed_tier);
+                    if sb_config_value != desired_config {
+                        if write_smart_battery_reg_retry(
+                            &i2c_bus,
+                            &mut delay,
+                            SB_REG_CHG_CONFIG,
+                            desired_config,
+                        )
+                        .is_ok()
+                        {
+                            sb_config_value = desired_config;
+                            sb_manual_enable = false;
+                            info!("charge: disabled due to high temperature");
+                        } else {
+                            warn!("charge: failed to disable during temperature pause");
+                        }
+                    }
+                }
+            } else if let Some(vbat) = vbat_mv {
+                if !vin_present {
+                    if sb_manual_enable {
+                        let desired_config =
+                            compose_sb_charge_config(SB_AUTO_ENABLED, false, sb_speed_tier);
+                        if sb_config_value != desired_config
+                            && write_smart_battery_reg_retry(
+                                &i2c_bus,
+                                &mut delay,
+                                SB_REG_CHG_CONFIG,
+                                desired_config,
+                            )
+                            .is_ok()
+                        {
+                            sb_config_value = desired_config;
+                            sb_manual_enable = false;
+                            info!("charge: disabled because adapter is missing");
+                        }
+                    } else if vbat <= CHARGE_START_VBAT_MV && !charge_skip_adapter_logged {
+                        info!("charge: skip enable (adapter missing, vbat={=u32}mV)", vbat);
+                        charge_skip_adapter_logged = true;
+                    }
+                } else {
+                    charge_skip_adapter_logged = false;
+                    let mut target_manual = sb_manual_enable;
+                    if !sb_manual_enable && vbat <= CHARGE_START_VBAT_MV {
+                        target_manual = true;
+                    }
+                    if sb_manual_enable && vbat >= CHARGE_STOP_VBAT_MV {
+                        target_manual = false;
+                    }
+
+                    if target_manual != sb_manual_enable {
+                        let desired_config =
+                            compose_sb_charge_config(SB_AUTO_ENABLED, target_manual, sb_speed_tier);
+                        match write_smart_battery_reg_retry(
+                            &i2c_bus,
+                            &mut delay,
+                            SB_REG_CHG_CONFIG,
+                            desired_config,
+                        ) {
+                            Ok(()) => {
+                                sb_config_value = desired_config;
+                                sb_manual_enable = target_manual;
+                                if target_manual {
+                                    info!(
+                                        "charge: enabled (vbat={=u32}mV, threshold={=u32}mV)",
+                                        vbat, CHARGE_START_VBAT_MV
+                                    );
+                                } else {
+                                    info!(
+                                        "charge: disabled at {=u32}mV (stop threshold {=u32}mV)",
+                                        vbat, CHARGE_STOP_VBAT_MV
+                                    );
+                                }
+                            }
+                            Err(()) => {
+                                warn!("charge: failed to update charge config register");
+                            }
+                        }
+                    }
+                }
+            }
+
+            let soc_pct = vbat_mv.map(|v| estimate_soc_from_vbat(v)).unwrap_or(0);
             let uptime_secs = now_millis
                 .saturating_sub(boot_millis)
                 .saturating_div(1000)
@@ -478,6 +777,87 @@ where
         Some(v)
     } else {
         None
+    }
+}
+
+fn read_smart_battery_state_flags<'a, I2C, E>(i2c_bus: &'a RefCell<I2C>) -> Option<u16>
+where
+    I2C: embedded_hal::i2c::I2c<Error = E>,
+    E: embedded_hal::i2c::Error,
+{
+    let mut dev = RefCellDevice::new(i2c_bus);
+    let mut buf = [0u8; 2];
+    dev.write_read(STM32_ADDR, &[SB_REG_STATE_FLAGS], &mut buf)
+        .ok()
+        .map(|_| u16::from_le_bytes(buf))
+}
+
+fn read_smart_battery_reg<'a, I2C, E>(i2c_bus: &'a RefCell<I2C>, reg: u8) -> Result<u8, ()>
+where
+    I2C: embedded_hal::i2c::I2c<Error = E>,
+    E: embedded_hal::i2c::Error,
+{
+    let mut dev = RefCellDevice::new(i2c_bus);
+    let mut buf = [0u8; 1];
+    dev.write_read(STM32_ADDR, &[reg], &mut buf)
+        .map_err(|_| ())?;
+    Ok(buf[0])
+}
+
+fn write_smart_battery_reg<'a, I2C, E>(
+    i2c_bus: &'a RefCell<I2C>,
+    reg: u8,
+    value: u8,
+) -> Result<(), ()>
+where
+    I2C: embedded_hal::i2c::I2c<Error = E>,
+    E: embedded_hal::i2c::Error,
+{
+    let mut dev = RefCellDevice::new(i2c_bus);
+    dev.write(STM32_ADDR, &[reg, value]).map_err(|_| ())
+}
+
+fn write_smart_battery_reg_retry<'a, I2C, E>(
+    i2c_bus: &'a RefCell<I2C>,
+    delay: &mut Delay,
+    reg: u8,
+    value: u8,
+) -> Result<(), ()>
+where
+    I2C: embedded_hal::i2c::I2c<Error = E>,
+    E: embedded_hal::i2c::Error,
+{
+    let mut attempt: u8 = 0;
+    loop {
+        attempt = attempt.saturating_add(1);
+        match write_smart_battery_reg(i2c_bus, reg, value) {
+            Ok(()) => return Ok(()),
+            Err(_) if attempt < SB_WRITE_RETRY_ATTEMPTS => {
+                delay.delay_ms(SB_WRITE_RETRY_DELAY_MS);
+            }
+            Err(_) => return Err(()),
+        }
+    }
+}
+
+fn read_smart_battery_reg_retry<'a, I2C, E>(
+    i2c_bus: &'a RefCell<I2C>,
+    reg: u8,
+    attempts: u8,
+    delay_ms: u32,
+) -> Result<u8, ()>
+where
+    I2C: embedded_hal::i2c::I2c<Error = E>,
+    E: embedded_hal::i2c::Error,
+{
+    let mut attempt: u8 = 0;
+    loop {
+        attempt = attempt.saturating_add(1);
+        match read_smart_battery_reg(i2c_bus, reg) {
+            Ok(v) => return Ok(v),
+            Err(_) if attempt < attempts => Delay::default().delay_ms(delay_ms),
+            Err(_) => return Err(()),
+        }
     }
 }
 

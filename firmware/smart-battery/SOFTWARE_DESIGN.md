@@ -525,9 +525,8 @@ communicate with an external host. Summary (Chinese): 智能电池通过 I2C 从
 
 Examples:
 
-- Write `CHG_ENABLE_REQ` (0x31) = 0x01: `START → 0x6A(W) → 0x31 → 0x01 → CRC(0x6A,0x31,0x01) → STOP`.
-- Write `CHG_CURRENT_LIMIT_MA` (0x32..0x33) = 900 (0x0384 LE):
-  `START → 0x6A → 0x32 → 0x84 → CRC(0x6A,0x32,0x84) → 0x03 → CRC(0x6A,0x33,0x03) → STOP`.
+- Write `CHG_CONFIG` (0x31) = `AUTO=1, MANUAL=1, SPEED=0x1`:
+  `START → 0x6A(W) → 0x31 → 0x07 → CRC(0x6A,0x31,0x07) → STOP`.
 - Read `VBAT_MV` (0x10..0x11, 2 bytes):
   - Master: `START → 0x6A(W) → 0x10 → REPEATED START → 0x6B(R)`
   - Device returns: `D0_L, CRC0(0x6B,D0_L), D0_H, CRC1(D0_H)`; master NACKs the
@@ -576,8 +575,8 @@ Charging control and status:
 - 0x30 `CHG_STATUS` (RO) bitfield: bit0=charging_active, bit1=precharge,
   bit2=CC, bit3=CV, bit4=full, bit5=balancing, bit6=adapter_present,
   bit7=blocked_by_fault
-- 0x31 `CHG_ENABLE_REQ` (RW): 0=disable charging; 1=enable allowed.
-- 0x32 `CHG_CURRENT_LIMIT_MA_LO`; 0x33 `_HI` (RW u16; 100…1500 mA typical).
+- 0x31 `CHG_CONFIG` (RW): bit0=`AUTO`, bit1=`MANUAL_ENABLE`（仅当 `AUTO=0` 时可写），bit[3:2] 选择速率档（0=slow，1≈0.8 A，2≈1.2 A，3≈1.6 A）。
+- 0x32 `CHG_PAUSE_CAUSE` (RO): 暂停原因位，bit0=IMBALANCE(Δ>=100 mV)，bit1=PACK_TEMP，bit2=CHG_TEMP（SC8815 ADIN），bit3=OV/UV/OCD/SCD 冷却，bit4=HOLD_OFF 重试冷却，bit5=ADAPTER_MISS（仅自动策略硬拦），bit6=EOC_FULL。
 
 Per‑cell voltages (length depends on `CELLS_PRESENT`, RO):
 
@@ -595,11 +594,9 @@ Diagnostics & reserved:
 
 ### Semantics & Rules
 
-- Writes to `CHG_ENABLE_REQ` immediately gate charger control logic; the
-  firmware may force this back to 0 upon any safety fault. Hosts should treat a
-  latched 0 as “charging inhibited until fault is cleared”.
-- `CHG_CURRENT_LIMIT_MA` is a soft limit; out‑of‑range values are clamped to the
-  nearest supported setting. A value of 0 means “use firmware default”.
+- `CHG_CONFIG.AUTO` 切换自主策略。置 1 时固件依照封装阈值自行启停；置 0 时主机可通过
+  `MANUAL_ENABLE` 控制功率级（仍受安全互锁约束，**不以“适配器检测为假”作为停机条件**；仅在 OV/UV/OCD/SCD/温度/严重失衡等安全场景下强制暂停）。
+- `CHG_CONFIG` 的速率位提供四档限流。固件可能在故障/过温情境下降档或拒绝超限值。
 - Multi‑byte writes must send the low byte first. Multi‑byte reads are
   contiguous and auto‑increment the pointer; coherency is guaranteed by the
   snapshot mechanism。读侧提供 CRC 供主机可选校验。
@@ -610,9 +607,9 @@ Diagnostics & reserved:
   - Master: `START → 0x6A(W) → 0x10 → REPEATED START → 0x6B(R)`
   - Device returns: `VBAT_L, CRC(VBAT_L with 0x6B), VBAT_H, CRC(VBAT_H), IBAT_L, CRC(IBAT_L), IBAT_H, CRC(IBAT_H), TPACK_L, CRC(TPACK_L), TPACK_H, CRC(TPACK_H), TMOS_L, CRC(TMOS_L), TMOS_H, CRC(TMOS_H)`; master NACKs the last CRC then `STOP`.
 - Enable charging (with CRC per‑byte):
-  - Master: `START → 0x6A(W) → 0x31 → 0x01 → CRC(0x6A,0x31,0x01) → STOP`.
-- Set current limit to 900 mA (0x0384 LE; with CRC per‑byte):
-  - Master: `START → 0x6A(W) → 0x32 → 0x84 → CRC(0x6A,0x32,0x84) → 0x03 → CRC(0x6A,0x33,0x03) → STOP`.
+  - Master: `START → 0x6A(W) → 0x31 → 0x03 → CRC(0x6A,0x31,0x03) → STOP` (`AUTO=1, MANUAL=1, SPEED=0`).
+- Set current limit tier to ≈1.2 A (tier 2):
+  - Master: `START → 0x6A(W) → 0x31 → 0x0B → CRC(0x6A,0x31,0x0B) → STOP` (`AUTO=1, MANUAL=1, SPEED=2`).
 
 ### Implementation Notes
 

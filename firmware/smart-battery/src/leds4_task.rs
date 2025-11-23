@@ -9,6 +9,16 @@
 use embassy_stm32::gpio::Output;
 use embassy_time::{Duration, Instant, Timer};
 
+const ENABLE_LED_DIAG: bool = false;
+
+macro_rules! led_diag {
+    ($($arg:tt)*) => {
+        if ENABLE_LED_DIAG {
+            defmt::info!($($arg)*);
+        }
+    };
+}
+
 use crate::shared::{
     BalancingCvRequestSubscriber, Bq76920AlertsSubscriber, Bq76920MeasurementsSubscriber,
     Sc8815AlertsSubscriber,
@@ -151,7 +161,7 @@ pub async fn leds_task(
         if bq_dropout && !prev_bq_dropout {
             defmt::warn!("led:red dropout on");
         } else if !bq_dropout && prev_bq_dropout {
-            defmt::info!("led:red dropout off");
+            led_diag!("led:red dropout off");
         }
         prev_bq_dropout = bq_dropout;
         let sc_dropout = !crate::failsafe::is_sc_online();
@@ -287,7 +297,7 @@ pub async fn leds_task(
             } else {
                 0
             };
-            defmt::info!(
+            led_diag!(
                 "led:red duty={}%% d/o/p={}{}{} base={} pulses={} p={}",
                 duty_pct,
                 if red.dropout_blink { 'D' } else { '-' },

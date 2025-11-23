@@ -133,6 +133,10 @@ impl<'a> FanController<'a> {
         }
     }
 
+    pub fn set_vin_present(&mut self, present: bool) {
+        self.vin_present = present;
+    }
+
     pub fn tick(&mut self, delay: &mut Delay, smart_batt_temp: Option<SmartBatteryTemps>) {
         let reading = tsens::read_celsius(delay);
         let corrected = reading.base_celsius - self.delta_c;

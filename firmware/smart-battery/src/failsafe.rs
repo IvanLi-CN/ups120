@@ -7,7 +7,9 @@ use defmt::*;
 static BQ_FAILSAFE_PSTOP: AtomicBool = AtomicBool::new(false);
 // Use a separate AtomicU32 for SC heartbeat (ms since boot, lower 32 bits)
 static SC_LAST_MS32: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-static QUIESCE: AtomicBool = AtomicBool::new(false); // true=外设静默（无 AC）
+static QUIESCE: AtomicBool = AtomicBool::new(false); // true=外设静默（无 AC 且无手动充电）
+static AC_PRESENT: AtomicBool = AtomicBool::new(false);
+static MANUAL_OVERRIDE: AtomicBool = AtomicBool::new(false);
 
 // BQ heartbeat: last successful measurements timestamp (ms since boot, lower 32 bits)
 static BQ_LAST_MS32: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
@@ -45,13 +47,19 @@ pub fn bq_heartbeat_update(now_ms: u32) {
 
 #[inline]
 pub fn set_ac_present(ac: bool) {
-    // 反向记录静默标志：无 AC => QUIESCE=true
-    QUIESCE.store(!ac, Ordering::Relaxed);
+    AC_PRESENT.store(ac, Ordering::Relaxed);
+    update_quiesce();
 }
 
 #[inline]
 pub fn is_quiesced() -> bool {
     QUIESCE.load(Ordering::Relaxed)
+}
+
+#[inline]
+pub fn set_manual_override(active: bool) {
+    MANUAL_OVERRIDE.store(active, Ordering::Relaxed);
+    update_quiesce();
 }
 
 #[inline]
@@ -77,4 +85,12 @@ pub fn set_bq_online(v: bool) {
 #[inline]
 pub fn is_bq_online() -> bool {
     BQ_ONLINE.load(Ordering::Relaxed)
+}
+
+#[inline]
+fn update_quiesce() {
+    let ac_ok = AC_PRESENT.load(Ordering::Relaxed);
+    let manual = MANUAL_OVERRIDE.load(Ordering::Relaxed);
+    // 只有在无 AC 且未处于手动充电模式时，才进入静默
+    QUIESCE.store(!ac_ok && !manual, Ordering::Relaxed);
 }

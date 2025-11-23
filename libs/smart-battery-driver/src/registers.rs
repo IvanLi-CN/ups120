@@ -29,8 +29,7 @@ pub const SYSTEM_FAULTS: u8 = 0x22;
 
 // Charging control
 pub const CHG_STATUS: u8 = 0x30;
-pub const CHG_ENABLE_REQ: u8 = 0x31; // u8 0/1
-pub const CHG_CURRENT_LIMIT_L: u8 = 0x32; // u16 LE mA
+pub const CHG_CONTROL: u8 = 0x31; // bit0: auto, bit1: manual enable, bits[3:2]: speed tier
 
 // Cells (0x50..)
 pub const CELL1_L: u8 = 0x50;
@@ -38,4 +37,3 @@ pub const CELL1_L: u8 = 0x50;
 // Diagnostics
 pub const UPTIME_S_L: u8 = 0x7C; // u16 LE seconds
 pub const FRAME_FLAGS: u8 = 0x7E; // bit0 = snapshot fresh
-

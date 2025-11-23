@@ -30,4 +30,3 @@ pub fn estimate_soc_linear(v_mv: u32, cells: u8, empty_mv_pc: u16, full_mv_pc: u
 pub fn estimate_soc_12s_li_ion(v_mv: u32) -> u8 {
     estimate_soc_linear(v_mv, 12, 3200, 4200)
 }
-

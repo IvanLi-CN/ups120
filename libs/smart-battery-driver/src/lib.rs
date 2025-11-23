@@ -11,9 +11,9 @@ use embedded_hal_async::i2c::I2c;
 use core::ops::Deref;
 use heapless::Vec;
 
-pub mod registers;
 pub mod crc;
 pub mod errors;
+pub mod registers;
 
 pub use crc::{CrcMode, Disabled, Enabled, calculate_crc};
 pub use errors::Error;
@@ -30,12 +30,23 @@ pub struct SmartBattery<I2C, M: CrcMode> {
 }
 
 impl<I2C, M: CrcMode> SmartBattery<I2C, M> {
-    pub fn with_addr(mut self, addr7: u8) -> Self { self.address = addr7; self }
-    pub fn release(self) -> I2C { self.i2c }
+    pub fn with_addr(mut self, addr7: u8) -> Self {
+        self.address = addr7;
+        self
+    }
+    pub fn release(self) -> I2C {
+        self.i2c
+    }
 }
 
 impl<I2C> SmartBattery<I2C, Enabled> {
-    pub fn new(i2c: I2C) -> Self { Self { i2c, address: I2C_ADDR_7BIT, _crc: core::marker::PhantomData } }
+    pub fn new(i2c: I2C) -> Self {
+        Self {
+            i2c,
+            address: I2C_ADDR_7BIT,
+            _crc: core::marker::PhantomData,
+        }
+    }
 }
 
 #[maybe_async_cfg::maybe(
@@ -87,15 +98,26 @@ where
         for i in 0..len {
             let data = rx[2 * i];
             let crc = rx[2 * i + 1];
-            let expected = if i == 0 { calculate_crc(&[addr_r, data]) } else { calculate_crc(&[data]) };
-            if crc != expected { return Err(Error::CrcRead { index: i, expected, got: crc }); }
+            let expected = if i == 0 {
+                calculate_crc(&[addr_r, data])
+            } else {
+                calculate_crc(&[data])
+            };
+            if crc != expected {
+                return Err(Error::CrcRead {
+                    index: i,
+                    expected,
+                    got: crc,
+                });
+            }
             out[i] = data;
         }
         Ok(out)
     }
 
     async fn write_register(&mut self, reg: u8, value: u8) -> Result<(), Error<E>> {
-        self.write_registers(reg, core::slice::from_ref(&value)).await
+        self.write_registers(reg, core::slice::from_ref(&value))
+            .await
     }
 
     async fn write_registers(&mut self, reg: u8, values: &[u8]) -> Result<(), Error<E>> {
@@ -105,7 +127,8 @@ where
         for (i, &d) in values.iter().enumerate() {
             let r = reg.wrapping_add(i as u8);
             out.push(d).map_err(|_| Error::LengthMismatch)?;
-            out.push(calculate_crc(&[addr_w, r, d])).map_err(|_| Error::LengthMismatch)?;
+            out.push(calculate_crc(&[addr_w, r, d]))
+                .map_err(|_| Error::LengthMismatch)?;
         }
         self.i2c.write(self.address, &out).await.map_err(Error::I2c)
     }
@@ -152,12 +175,19 @@ where
         Ok((sys, bq, c, st))
     }
 
-    pub async fn set_charging_enable(&mut self, en: bool) -> Result<(), Error<E>> {
-        <Self as RegisterAccess<E>>::write_register(self, regs::CHG_ENABLE_REQ, if en { 1 } else { 0 }).await
-    }
-
-    pub async fn set_current_limit_ma(&mut self, ma: u16) -> Result<(), Error<E>> {
-        <Self as RegisterAccess<E>>::write_registers(self, regs::CHG_CURRENT_LIMIT_L, &ma.to_le_bytes()).await
+    pub async fn set_charge_control(
+        &mut self,
+        auto: bool,
+        manual_enable: bool,
+        speed_tier: u8,
+    ) -> Result<(), Error<E>> {
+        let mut value = (speed_tier & 0x03) << 2;
+        if auto {
+            value |= 1 << 0;
+        }
+        if manual_enable {
+            value |= 1 << 1;
+        }
+        <Self as RegisterAccess<E>>::write_register(self, regs::CHG_CONTROL, value).await
     }
 }
-

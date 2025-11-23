@@ -18,7 +18,19 @@ pub mod bits {
     pub const ACTIVE_BQ: u16 = 1 << 9;
 }
 
+/// Pause cause bits for CHG_PAUSE_CAUSE (0x32, RO)
+pub mod pause_bits {
+    pub const IMBALANCE: u8 = 1 << 0;
+    pub const PACK_TEMP: u8 = 1 << 1;
+    pub const CHG_TEMP: u8 = 1 << 2;
+    pub const OVUV_OC: u8 = 1 << 3;
+    pub const HOLD_OFF: u8 = 1 << 4;
+    pub const ADAPTER_MISS: u8 = 1 << 5;
+    pub const EOC_FULL: u8 = 1 << 6;
+}
+
 static STATE_FLAGS: AtomicU16 = AtomicU16::new(0);
+static PAUSE_CAUSE: AtomicU8 = AtomicU8::new(0);
 static BLUE_CODE: AtomicU8 = AtomicU8::new(0);
 
 #[inline]
@@ -35,6 +47,16 @@ pub fn update_flags(mask: u16, value_bits: u16) {
 #[inline]
 pub fn flags() -> u16 {
     STATE_FLAGS.load(Ordering::Relaxed)
+}
+
+#[inline]
+pub fn update_pause_cause(bits: u8) {
+    PAUSE_CAUSE.store(bits, Ordering::Relaxed);
+}
+
+#[inline]
+pub fn pause_cause() -> u8 {
+    PAUSE_CAUSE.load(Ordering::Relaxed)
 }
 
 #[inline]

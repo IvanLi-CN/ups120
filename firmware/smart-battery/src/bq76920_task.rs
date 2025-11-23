@@ -15,6 +15,7 @@ use bq769x0_async_rs::{
 };
 
 // Import necessary data types
+use crate::charger_control;
 use crate::data_types::BalancingCvRequest;
 use crate::shared::{
     BalancingCvRequestPublisher, Bq76920AlertsPublisher, Bq76920MeasurementsPublisher,
@@ -133,7 +134,7 @@ async fn execute_smart_battery_balancing<'a>(
             }
         }
         if max_v == i32::MIN || min_v == i32::MAX {
-            defmt::info!("No valid cell voltages available for balancing");
+            defmt::debug!("No valid cell voltages available for balancing");
             let _ = bq.set_cell_balancing(0).await;
             *active_cell = None;
             return;
@@ -205,7 +206,7 @@ async fn execute_smart_battery_balancing<'a>(
                 match bq.read_register(Register::CELLBAL1).await {
                     Ok(bits) => {
                         if (bits as u16 & mask) == 0 {
-                            defmt::info!("bal:vr w={} r={}", mask, bits);
+                            defmt::debug!("bal:vr w={} r={}", mask, bits);
                         }
                     }
                     Err(_e) => defmt::debug!("bal:vr err"),
@@ -222,10 +223,10 @@ async fn execute_smart_battery_balancing<'a>(
             match bq.read_register(Register::CELLBAL1).await {
                 Ok(bits) => {
                     if bits != 0 {
-                        defmt::info!("bal:vr0 r={}", bits);
+                        defmt::debug!("bal:vr0 r={}", bits);
                     }
                 }
-                Err(_e) => defmt::info!("bal:vr rd!"),
+                Err(_e) => defmt::debug!("bal:vr rd!"),
             }
         }
     } else if active_cell.is_some() {
@@ -601,6 +602,13 @@ pub async fn bq76920_task(args: Bq76920TaskArgs) {
                         should_enable_charging = false;
                     }
 
+                    if should_enable_charging {
+                        let ctrl = charger_control::snapshot();
+                        if !ctrl.auto_enabled && !ctrl.manual_enable {
+                            should_enable_charging = false;
+                        }
+                    }
+
                     if TEST_FORCE_BQ_FETS_OFF {
                         let _ = bq.disable_charging().await;
                         debug!("TEST: Forcing BQ76920 CHG/DSG OFF (runtime)");
@@ -666,7 +674,7 @@ pub async fn bq76920_task(args: Bq76920TaskArgs) {
                             (temp_ema_001c * (100 - a) + i32::from(raw_t_001c) * a + 50) / 100;
                     }
                     used_t_001c = temp_ema_001c as i16;
-                    defmt::info!("bq:t= {} (ema) raw={} (0.01C)", used_t_001c, raw_t_001c);
+                    defmt::debug!("bq:t= {} (ema) raw={} (0.01C)", used_t_001c, raw_t_001c);
                 } else {
                     // Median of three consecutive reads (temperature only) when inactive
                     let mut buf = [raw_t_001c, raw_t_001c, raw_t_001c];
@@ -692,7 +700,7 @@ pub async fn bq76920_task(args: Bq76920TaskArgs) {
                     // keep EMA aligned to latest value when inactive
                     temp_ema_001c = i32::from(used_t_001c);
                     temp_ema_inited = true;
-                    defmt::info!(
+                    defmt::debug!(
                         "bq:t= {} (med3) r0={} r1={} r2={} (0.01C)",
                         used_t_001c,
                         buf[0],
@@ -725,7 +733,7 @@ pub async fn bq76920_task(args: Bq76920TaskArgs) {
                 } else if cutoff_exit && temp_cutoff_active {
                     // Recover discharge path when temperature returns to safe band
                     let _ = bq.enable_discharging().await;
-                    defmt::info!("bq:temp_cut clr t001c={}", used_i32);
+                    defmt::debug!("bq:temp_cut clr t001c={}", used_i32);
                     temp_cutoff_active = false;
                     fault_bq_flag = false;
                 }
@@ -736,13 +744,13 @@ pub async fn bq76920_task(args: Bq76920TaskArgs) {
                         defmt::warn!("sc:req temp_pause t001c={}", used_i32);
                         temp_pause_active = true;
                     } else if !pause_needed && temp_pause_active {
-                        defmt::info!("sc:req temp_pause clr t001c={}", used_i32);
+                        defmt::debug!("sc:req temp_pause clr t001c={}", used_i32);
                         temp_pause_active = false;
                     }
                 } else {
                     // keep temp_pause_active=false during SC-only testing
                     if temp_pause_active {
-                        defmt::info!("sc:req temp_pause DISABLED");
+                        defmt::debug!("sc:req temp_pause DISABLED");
                     }
                     temp_pause_active = false;
                 }
@@ -754,7 +762,7 @@ pub async fn bq76920_task(args: Bq76920TaskArgs) {
                     temp_chg_gate_active = true;
                 } else if chg_gate_exit && temp_chg_gate_active {
                     let _ = bq.enable_charging().await;
-                    defmt::info!("bq:temp_chg_gate clr t001c={}", used_i32);
+                    defmt::debug!("bq:temp_chg_gate clr t001c={}", used_i32);
                     temp_chg_gate_active = false;
                 }
             }
@@ -803,7 +811,7 @@ pub async fn bq76920_task(args: Bq76920TaskArgs) {
 
         // Strict policy: if adapter is absent, balancing must not be active under any circumstance.
         if !adapter_present && last_cellbal_bits != 0 {
-            defmt::info!("bal:stop no-ac hw=0x{:02X}", last_cellbal_bits);
+            defmt::debug!("bal:stop no-ac hw=0x{:02X}", last_cellbal_bits);
             let _ = bq.set_cell_balancing(0).await;
             active_balancing_cell = None;
             last_cellbal_bits = 0;
@@ -855,7 +863,7 @@ pub async fn bq76920_task(args: Bq76920TaskArgs) {
 
         // If temperature pause becomes active while balancing, stop immediately.
         if temp_pause_active && (active_balancing_cell.is_some() || last_cellbal_bits != 0) {
-            defmt::info!("bal:stop temp_pause hw=0x{:02X}", last_cellbal_bits);
+            defmt::debug!("bal:stop temp_pause hw=0x{:02X}", last_cellbal_bits);
             let _ = bq.set_cell_balancing(0).await;
             active_balancing_cell = None;
             last_cellbal_bits = 0;
