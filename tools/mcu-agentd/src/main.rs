@@ -172,7 +172,24 @@ async fn main() -> Result<()> {
                 lines: if lines == 0 { None } else { Some(lines) },
             })
             .await?;
-            println!("{}", serde_json::to_string_pretty(&resp)?);
+            if resp.ok {
+                if let Some(arr) = resp.payload.get("lines").and_then(|v| v.as_array()) {
+                    for line in arr {
+                        if let Some(s) = line.as_str() {
+                            // try parse JSON line and extract 'text'
+                            if let Ok(val) = serde_json::from_str::<serde_json::Value>(s) {
+                                if let Some(txt) = val.get("text").and_then(|t| t.as_str()) {
+                                    println!("{}", txt);
+                                    continue;
+                                }
+                            }
+                            println!("{}", s);
+                        }
+                    }
+                }
+            } else {
+                eprintln!("{}", serde_json::to_string_pretty(&resp)?);
+            }
         }
         Cmd::Logs {
             mcu,
