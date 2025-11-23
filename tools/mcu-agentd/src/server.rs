@@ -170,9 +170,17 @@ async fn handle_request(
             since,
             until,
             tail,
+            sessions,
         } => {
-            let entries = query_logs(paths, mcu, since, until, tail)?;
-            Ok(ClientResponse::ok(entries))
+            let entries = query_logs(paths, mcu, since.clone(), until.clone(), tail)?;
+            let sessions_payload = if sessions {
+                query_session_logs(paths, &entries, since, until, tail)?
+            } else {
+                json!([])
+            };
+            Ok(ClientResponse::ok(
+                json!({"meta": entries, "sessions": sessions_payload}),
+            ))
         }
     }
 }
@@ -444,6 +452,71 @@ fn query_logs(
         }
     }
     Ok(json!(rows))
+}
+
+fn query_session_logs(
+    _paths: &Paths,
+    meta_entries: &serde_json::Value,
+    since: Option<String>,
+    until: Option<String>,
+    tail: Option<usize>,
+) -> Result<serde_json::Value> {
+    let mut results = Vec::new();
+    if let Some(arr) = meta_entries.as_array() {
+        for v in arr {
+            if let Some(sess) = v.get("session").and_then(|s| s.as_str()) {
+                let path = PathBuf::from(sess);
+                if !path.exists() {
+                    continue;
+                }
+                let lines = read_session(&path, since.as_deref(), until.as_deref(), tail)?;
+                results.push(json!({"session": sess, "lines": lines}));
+            }
+        }
+    }
+    Ok(json!(results))
+}
+
+fn read_session(
+    path: &PathBuf,
+    since: Option<&str>,
+    until: Option<&str>,
+    tail: Option<usize>,
+) -> Result<Vec<String>> {
+    let reader = BufReader::new(File::open(path)?);
+    let mut lines: Vec<String> = reader
+        .lines()
+        .filter_map(|l| l.ok())
+        .filter(|l| session_ts_ok(l, since, until))
+        .collect();
+    if let Some(n) = tail {
+        if lines.len() > n {
+            lines = lines.split_off(lines.len() - n);
+        }
+    }
+    Ok(lines)
+}
+
+fn session_ts_ok(line: &str, since: Option<&str>, until: Option<&str>) -> bool {
+    // prefix looks like {"ts":"...","mcu":"..","event":".."} rest
+    if let Some(end) = line.find('}') {
+        let prefix = &line[..=end];
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(prefix) {
+            if let Some(ts) = v.get("ts").and_then(|t| t.as_str()) {
+                if let Some(s) = since {
+                    if ts < s {
+                        return false;
+                    }
+                }
+                if let Some(u) = until {
+                    if ts > u {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+    true
 }
 
 fn passes_time(v: &serde_json::Value, since: Option<&str>, until: Option<&str>) -> bool {

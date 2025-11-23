@@ -44,6 +44,8 @@ pub enum ClientRequest {
         since: Option<String>,
         until: Option<String>,
         tail: Option<usize>,
+        /// include session lines (tail per session)
+        sessions: bool,
     },
 }
 

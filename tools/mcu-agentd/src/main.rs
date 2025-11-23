@@ -70,6 +70,12 @@ enum Cmd {
         until: Option<String>,
         #[arg(long)]
         tail: Option<usize>,
+        #[arg(
+            long,
+            default_value_t = false,
+            help = "include session log lines (tail per session)"
+        )]
+        sessions: bool,
     },
     /// Internal: run daemon foreground (do not call directly).
     #[command(hide = true)]
@@ -156,12 +162,14 @@ async fn main() -> Result<()> {
             since,
             until,
             tail,
+            sessions,
         } => {
             let resp = Server::client_send(ClientRequest::Logs {
                 mcu: mcu.into(),
                 since,
                 until,
                 tail,
+                sessions,
             })
             .await?;
             println!("{}", serde_json::to_string_pretty(&resp)?);
