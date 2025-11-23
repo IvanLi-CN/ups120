@@ -49,6 +49,9 @@ impl Paths {
         std::fs::create_dir_all(&self.session_stm32)?;
         Ok(())
     }
+    pub fn root(&self) -> &PathBuf {
+        &self.root
+    }
     pub fn meta(&self, mcu: crate::model::McuKind) -> &Path {
         match mcu {
             crate::model::McuKind::Esp32 => self.meta_esp32.as_path(),

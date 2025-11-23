@@ -53,6 +53,13 @@ enum Cmd {
         #[arg(value_enum)]
         mcu: McuOpt,
     },
+    /// Monitor MCU logs (attach/monitor without auto-flash unless required).
+    Monitor {
+        #[arg(value_enum)]
+        mcu: McuOpt,
+        /// Optional ELF path; if省略则尝试默认构建产物。
+        elf: Option<PathBuf>,
+    },
     /// Fetch logs (server-side filtered).
     Logs {
         #[arg(value_enum)]
@@ -134,6 +141,14 @@ async fn main() -> Result<()> {
         }
         Cmd::Reset { mcu } => {
             let resp = Server::client_send(ClientRequest::Reset { mcu: mcu.into() }).await?;
+            println!("{}", serde_json::to_string_pretty(&resp)?);
+        }
+        Cmd::Monitor { mcu, elf } => {
+            let resp = Server::client_send(ClientRequest::Monitor {
+                mcu: mcu.into(),
+                elf,
+            })
+            .await?;
             println!("{}", serde_json::to_string_pretty(&resp)?);
         }
         Cmd::Logs {

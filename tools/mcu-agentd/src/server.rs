@@ -9,6 +9,10 @@ use serde_json::json;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader as TokioBuf};
 use tokio::net::UnixListener;
 use tokio::net::UnixStream;
@@ -34,16 +38,19 @@ impl Server {
         let clock = Clock::new();
         let listener = UnixListener::bind(&paths.sock)?;
         println!("mcu-agentd listening at {:?}", paths.sock);
-        loop {
+        let running = Arc::new(AtomicBool::new(true));
+        while running.load(Ordering::SeqCst) {
             let (stream, _) = listener.accept().await?;
             let paths_cl = paths.clone();
             let clock_cl = clock;
+            let running_cl = running.clone();
             tokio::spawn(async move {
-                if let Err(e) = handle_conn(stream, paths_cl, clock_cl).await {
+                if let Err(e) = handle_conn(stream, paths_cl, clock_cl, running_cl).await {
                     eprintln!("conn error: {e:?}");
                 }
             });
         }
+        Ok(())
     }
 
     pub async fn spawn_background() -> Result<()> {
@@ -72,13 +79,18 @@ impl Server {
     }
 }
 
-async fn handle_conn(stream: UnixStream, paths: Paths, clock: Clock) -> Result<()> {
+async fn handle_conn(
+    stream: UnixStream,
+    paths: Paths,
+    clock: Clock,
+    running: Arc<AtomicBool>,
+) -> Result<()> {
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = TokioBuf::new(read_half);
     let mut buf = String::new();
     reader.read_line(&mut buf).await?;
     let req: ClientRequest = serde_json::from_str(&buf)?;
-    let resp = handle_request(req, &paths, &clock)
+    let resp = handle_request(req, &paths, &clock, &running)
         .await
         .unwrap_or_else(|e| ClientResponse::err(format!("{e:#}")));
     let line = serde_json::to_string(&resp)? + "\n";
@@ -90,10 +102,12 @@ async fn handle_request(
     req: ClientRequest,
     paths: &Paths,
     clock: &Clock,
+    running: &Arc<AtomicBool>,
 ) -> Result<ClientResponse> {
     match req {
         ClientRequest::Shutdown => {
             std::fs::remove_file(&paths.sock).ok();
+            running.store(false, Ordering::SeqCst);
             Ok(ClientResponse::ok(json!({"status":"stopping"})))
         }
         ClientRequest::Status => {
@@ -133,6 +147,11 @@ async fn handle_request(
         ClientRequest::Reset { mcu } => {
             let ts = clock.now();
             let res = reset_mcu(paths, &mcu, &ts).await?;
+            Ok(ClientResponse::ok(res))
+        }
+        ClientRequest::Monitor { mcu, elf } => {
+            let ts = clock.now();
+            let res = monitor_mcu(paths, &mcu, elf, &ts).await?;
             Ok(ClientResponse::ok(res))
         }
         ClientRequest::Logs {
@@ -219,6 +238,101 @@ async fn reset_mcu(paths: &Paths, mcu: &McuKind, ts: &Timestamp) -> Result<serde
     };
     let res = run_mcu_cmd(paths, mcu, ts, cmd).await?;
     write_meta(paths, mcu, ts, "reset", &res)?;
+    Ok(json!({
+        "ts": ts.iso(),
+        "mcu": mcu,
+        "status": res.status,
+        "duration_ms": res.duration_ms,
+        "session": res.session_file,
+    }))
+}
+
+async fn ensure_elf(paths: &Paths, mcu: &McuKind, elf: Option<PathBuf>) -> Result<PathBuf> {
+    if let Some(p) = elf {
+        if p.exists() {
+            return Ok(p);
+        }
+        anyhow::bail!("ELF not found: {:?}", p);
+    }
+    match mcu {
+        McuKind::Esp32 => {
+            // build ups-main
+            let status = Command::new("make")
+                .arg("ups-build")
+                .current_dir(paths.root())
+                .status()
+                .await?;
+            if !status.success() {
+                anyhow::bail!("make ups-build failed: {status}");
+            }
+            let p = paths
+                .root()
+                .join("firmware/ups-main/target/xtensa-esp32s3-none-elf/release/ups-main");
+            if !p.exists() {
+                anyhow::bail!("built ELF missing: {:?}", p);
+            }
+            Ok(p)
+        }
+        McuKind::Stm32 => {
+            let status = Command::new("make")
+                .arg("sb-build")
+                .current_dir(paths.root())
+                .status()
+                .await?;
+            if !status.success() {
+                anyhow::bail!("make sb-build failed: {status}");
+            }
+            let p = paths
+                .root()
+                .join("target/thumbv6m-none-eabi/release/smart-battery");
+            if !p.exists() {
+                anyhow::bail!("built ELF missing: {:?}", p);
+            }
+            Ok(p)
+        }
+    }
+}
+
+async fn monitor_mcu(
+    paths: &Paths,
+    mcu: &McuKind,
+    elf_opt: Option<PathBuf>,
+    ts: &Timestamp,
+) -> Result<serde_json::Value> {
+    let elf = ensure_elf(paths, mcu, elf_opt).await?;
+    let cmd = match mcu {
+        McuKind::Esp32 => {
+            let port = require_port(paths, McuKind::Esp32)?;
+            let mut c = Command::new("espflash");
+            c.arg("monitor")
+                .arg("--chip")
+                .arg("esp32s3")
+                .arg("--port")
+                .arg(port)
+                .arg("--non-interactive")
+                .arg("--no-reset")
+                .arg("--elf")
+                .arg(&elf)
+                .arg("--log-format")
+                .arg("defmt");
+            c
+        }
+        McuKind::Stm32 => {
+            let probe = require_port(paths, McuKind::Stm32)?;
+            let mut c = Command::new("probe-rs");
+            c.arg("run")
+                .arg("--chip")
+                .arg("STM32L051C8Tx")
+                .arg("--probe")
+                .arg(probe)
+                .arg("--log-format")
+                .arg("oneline")
+                .arg(&elf);
+            c
+        }
+    };
+    let res = run_mcu_cmd(paths, mcu, ts, cmd).await?;
+    write_meta(paths, mcu, ts, "monitor", &res)?;
     Ok(json!({
         "ts": ts.iso(),
         "mcu": mcu,

@@ -35,6 +35,10 @@ pub enum ClientRequest {
     Reset {
         mcu: McuKind,
     },
+    Monitor {
+        mcu: McuKind,
+        elf: Option<PathBuf>,
+    },
     Logs {
         mcu: Option<McuKind>,
         since: Option<String>,

@@ -13,8 +13,6 @@ use tokio::time::Instant;
 pub struct RunResult {
     pub status: i32,
     pub duration_ms: u128,
-    pub stdout: String,
-    pub stderr: String,
     pub session_file: PathBuf,
 }
 
@@ -42,9 +40,6 @@ pub async fn run_mcu_cmd(
     let mut err_reader = BufReader::new(stderr).lines();
 
     let start = Instant::now();
-    let mut out_buf = String::new();
-    let mut err_buf = String::new();
-
     loop {
         tokio::select! {
             line = out_reader.next_line() => {
@@ -52,8 +47,6 @@ pub async fn run_mcu_cmd(
                     Some(l) => {
                         let pref = prefix(&ts.iso(), mcu, "log");
                         writeln!(file, "{} {}", pref, l)?;
-                        out_buf.push_str(&l);
-                        out_buf.push('\n');
                     }
                     None => break,
                 }
@@ -63,8 +56,6 @@ pub async fn run_mcu_cmd(
                     Some(l) => {
                         let pref = prefix(&ts.iso(), mcu, "err");
                         writeln!(file, "{} {}", pref, l)?;
-                        err_buf.push_str(&l);
-                        err_buf.push('\n');
                     }
                     None => break,
                 }
@@ -78,8 +69,6 @@ pub async fn run_mcu_cmd(
     Ok(RunResult {
         status: status.code().unwrap_or(-1),
         duration_ms: dur.as_millis(),
-        stdout: out_buf,
-        stderr: err_buf,
         session_file,
     })
 }
