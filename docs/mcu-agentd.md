@@ -14,25 +14,29 @@
 - 运行策略：烧录/复位默认不自动运行；仅在日志采集（monitor/attach）时启动目标。若底层命令必须复位，日志里显式标注事件。
 - 日志目录：`logs/agentd/` 下的元数据与会话日志；支持滚动与时间范围查询。
 
-## 指令面（初版）
+## 指令面（当前实现）
 
-- `start | stop | status`：管理守护，返回 PID、锁状态、当前时间。
-- `set-port --mcu {esp32,stm32} --path PATH` / `get-port --mcu ...` / `list-ports --mcu esp32`（沿用 `scripts/ensure_esp32_port.sh` 逻辑）。
+- `start | stop | status`：管理守护，返回 PID、sock 路径、当前时间。
+- `set-port --mcu {esp32,stm32} --path PATH` / `get-port --mcu ...`（兼容读取 `.stm32-probe`）。
 - `flash --mcu esp32 --elf PATH [--after no-reset|hard-reset]`
 - `flash --mcu stm32 --elf PATH`
-- `reset --mcu esp32|stm32`（复位后自动开启短日志采集并写入事件）。
-- `logs --mcu {esp32,stm32,all} [--since RFC3339] [--until RFC3339] [--tail N]`
-- 构建兜底：当 `--elf` 缺省时自动调用 `make ups-build` 或 `make sb-build` 生成默认 ELF。
+- `reset --mcu esp32|stm32`（操作期间内部自动暂停/恢复后台监控，避免串口占用冲突）。
+- `monitor --mcu {esp32,stm32} [--duration 30s] [--lines N]`：仅从最新会话日志尾部分流显示，不执行底层命令。
+- `logs --mcu {esp32,stm32,all} [--since RFC3339] [--until RFC3339] [--tail N] [--sessions]`：可选择附带每个 session 的尾部行。
+
+说明：
+- 后台监控在守护启动且端口存在时自动起；用户层不再暴露 start/stop 监控命令，所有占用串口的操作会自动停/恢复监控。
+- 目前不再提供“构建兜底”，`--elf` 缺省时若默认 ELF 不存在会直接报错，需先自行构建。
 
 ## 底层命令选择
 
 - ESP32-S3：
   - 烧录：`espflash flash <elf> --chip esp32s3 --port <cache> --after no-reset`
-  - 监视：`espflash monitor --chip esp32s3 --port <cache> --no-reset --non-interactive --elf <elf> --log-format defmt`
-  - 复位：`espflash reset --chip esp32s3 --port <cache> --after hard-reset`
+  - 后台监控：`espflash monitor --chip esp32s3 --port <cache> --no-reset --non-interactive --elf <elf> --log-format defmt`
+  - 复位：`espflash reset --chip esp32s3 --port <cache>`
 - STM32L0：
   - 烧录：`probe-rs download --chip STM32L051C8Tx --probe <cache> <elf>`（不复位）
-  - 监视：`probe-rs run --chip STM32L051C8Tx --probe <cache> --log-format oneline <elf>`
+  - 后台监控：`probe-rs attach --chip STM32L051C8Tx --probe <cache> --log-format oneline <elf>`
   - 复位：`probe-rs reset --chip STM32L051C8Tx --probe <cache>`
 
 ## 日志格式与查询
@@ -41,9 +45,10 @@
 - 元数据日志（NDJSON）：一行一事件，示例：  
   `{"ts":"2025-11-23T14:05:31.842-08:00","mono_ms":124422,"mcu":"esp32","event":"flash","elf":".../ups-main","port":"/dev/cu.SLAB_USBtoUART","status":"ok","code":0,"duration_ms":8123,"op_id":"op-20251123-1405-esp32-1"}`
   - 文件：`logs/agentd/{esp32,stm32}.meta.log`（按大小/天数滚动，可配置）。
-- 会话日志（前缀化 NDJSON + 原文）：  
-  `{"ts":"2025-11-23T14:05:35.100-08:00","mono_ms":128680,"mcu":"stm32","event":"log","op_id":"op-...","seq":42} [defmt] battery=3.97V`  
-  - 文件：`logs/agentd/{mcu}/YYYYMMDD_HHMMSS.session.log`。
+- 会话日志（NDJSON，每行为封装后的原始输出）：
+  - 后台监控行示例：`{"ts":"2025-11-23T17:51:00.645+08:00","mcu":"esp32","src":"stderr","text":"[... Using flash stub]"}`
+  - 命令执行行示例：`{"ts":"2025-11-23T12:41:06.702+08:00","mcu":"esp32","event":"log"} <raw line>`
+  - 文件：`logs/agentd/{mcu}/YYYYMMDD_HHMMSS-mon.log`（后台监控），`YYYYMMDD_HHMMSS.session.log`（一次性命令会话）。
 - 查询流程：先按文件名日期粗过滤，再按 `ts` 精过滤；命令 `logs --mcu ... [--since/--until RFC3339] [--tail N]` 实现。
 - 心跳：守护每 60s 写入心跳元数据（持锁状态、活跃会话）用于异常检测。
 - 可选索引：默认仅文件；如需高效检索，可启用内置 SQLite 索引（单文件 `logs/agentd/meta.db`，索引 `ts,mcu,event`，记录会话文件与偏移），不改变现有文件格式。
@@ -52,14 +57,14 @@
 
 | 功能 | 描述 | 验收标准 | 状态 | 备注 |
 | --- | --- | --- | --- | --- |
-| 单实例守护 | 锁文件+Unix socket；start/stop/status 可用 | 第二实例报 already running；status 显示 PID | 待开发 |  |
-| 端口缓存管理 | 读写 `.esp32-port`、`.stm32-port`，兼容 `.stm32-probe` | set/get/list 正确读写 | 待开发 |  |
-| 烧录 ESP32 | flash 默认 `--after no-reset` | 返回 ts/耗时，设备不自动运行 | 待开发 |  |
-| 烧录 STM32 | probe-rs download 不复位 | 返回 ts/耗时，设备不自动运行 | 待开发 |  |
-| 复位控制 | 分 MCU 调用 espflash/probe-rs reset | 复位事件入元数据，附时间戳 | 待开发 |  |
-| 日志采集 | monitor/attach 捕获输出 + session/元数据 | logs 可按 MCU/时间过滤；tail N 生效 | 待开发 |  |
-| 构建兜底 | 缺 ELF 自动 make 对应目标 | 自动生成后继续原指令 | 待开发 |  |
-| 配置文件 | `configs/mcu-agentd.toml` 覆盖默认 | 配置生效，env 可覆盖 | 待开发 |  |
+| 单实例守护 | 锁文件+Unix socket；start/stop/status 可用 | 第二实例报 already running；status 显示 PID | 已实现 |  |
+| 端口缓存管理 | 读写 `.esp32-port`、`.stm32-port`，兼容 `.stm32-probe` | set/get 正确读写 | 已实现 |  |
+| 烧录 ESP32 | flash 默认 `--after no-reset` | 返回 ts/耗时，设备不自动运行 | 已实现 |  |
+| 烧录 STM32 | probe-rs download 不复位 | 返回 ts/耗时，设备不自动运行 | 已实现 |  |
+| 复位控制 | 分 MCU 调用 espflash/probe-rs reset | 复位事件入元数据，附时间戳 | 已实现 |  |
+| 日志采集 | 后台监控捕获输出 + session/元数据；monitor 仅尾随显示 | logs 可按 MCU/时间过滤；tail N 生效 | 已实现（未引入 SQLite 索引） |  |
+| 构建兜底 | 缺 ELF 自动 make 对应目标 | 默认 ELF 不存在即报错；不自动构建 | 已移除 | 需手动先构建 |
+| 配置文件 | `configs/mcu-agentd.toml` 覆盖默认 | 配置生效，env 可覆盖 | 未实现 |  |
 
 ## 非目标
 
