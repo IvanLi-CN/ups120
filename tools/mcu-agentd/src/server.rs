@@ -21,6 +21,7 @@ use tokio::io::{AsyncBufReadExt, AsyncSeekExt, AsyncWriteExt, BufReader as Tokio
 use tokio::net::UnixListener;
 use tokio::net::UnixStream;
 use tokio::process::Command;
+use tokio::sync::mpsc;
 
 pub struct Server;
 
@@ -236,12 +237,6 @@ async fn start_auto_monitor(
     });
     let elf = ensure_elf(paths, mcu, None).await?;
     let session = session_path_now(paths, mcu, &ts, true);
-    let file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&session)?;
-    let file_err = file.try_clone()?;
-
     let mut cmd = match mcu {
         McuKind::Esp32 => {
             let port = require_port(paths, McuKind::Esp32)?;
@@ -273,14 +268,86 @@ async fn start_auto_monitor(
             c
         }
     };
-    cmd.stdout(std::process::Stdio::from(file));
-    cmd.stderr(std::process::Stdio::from(file_err));
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
 
     let mut child = cmd.spawn().context("spawn auto monitor")?;
     let pid = child.id().unwrap_or(0);
     std::fs::write(paths.auto_pid(mcu.clone()), pid.to_string())?;
+
+    // writer task
+    let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+    let session_clone = session.clone();
+    tokio::spawn(async move {
+        if let Ok(mut f) = tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&session_clone)
+            .await
+        {
+            while let Some(line) = rx.recv().await {
+                let _ = f.write_all(line.as_bytes()).await;
+                let _ = f.write_all(b"\n").await;
+            }
+        }
+    });
+
+    // stdout reader
+    if let Some(stdout) = child.stdout.take() {
+        let tx_out = tx.clone();
+        let mcu_s = match mcu {
+            McuKind::Esp32 => "esp32",
+            McuKind::Stm32 => "stm32",
+        }
+        .to_string();
+        tokio::spawn(async move {
+            let mut reader = TokioBuf::new(stdout).lines();
+            while let Ok(Some(line)) = reader.next_line().await {
+                let ts_now = Timestamp {
+                    wall: Local::now(),
+                    mono_ms: Duration::from_millis(0),
+                };
+                let v = json!({
+                    "ts": ts_now.iso(),
+                    "mcu": mcu_s,
+                    "src": "stdout",
+                    "text": line,
+                });
+                let _ = tx_out.send(v.to_string());
+            }
+        });
+    }
+
+    // stderr reader
+    if let Some(stderr) = child.stderr.take() {
+        let tx_err = tx.clone();
+        let mcu_s = match mcu {
+            McuKind::Esp32 => "esp32",
+            McuKind::Stm32 => "stm32",
+        }
+        .to_string();
+        tokio::spawn(async move {
+            let mut reader = TokioBuf::new(stderr).lines();
+            while let Ok(Some(line)) = reader.next_line().await {
+                let ts_now = Timestamp {
+                    wall: Local::now(),
+                    mono_ms: Duration::from_millis(0),
+                };
+                let v = json!({
+                    "ts": ts_now.iso(),
+                    "mcu": mcu_s,
+                    "src": "stderr",
+                    "text": line,
+                });
+                let _ = tx_err.send(v.to_string());
+            }
+        });
+    }
+
     tokio::spawn(async move {
         let _ = child.wait().await;
+        // closing channel stops writer
+        drop(tx);
     });
 
     write_meta(
