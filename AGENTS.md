@@ -21,12 +21,20 @@
 
 ## Hardware Flashing & Logging (mcu-agentd)
 
-- All on-target flash/reset/run monitoring/log queries must go through `tools/mcu-agentd` (see `tools/mcu-agentd/README.md`). Do not call `espflash`, `probe-rs`, or Make `run/attach/reset` targets directly.
-- Daemon control: `just agentd start|status|stop`; ensure `status` is healthy before use.
-- Port selection: `just agentd set-port esp32|stm32` (interactive or explicit port/Probe ID); verify with `get-port`.
-- Flash/reset: `just agentd flash --mcu esp32|stm32 --elf <path>` or `just agentd reset --mcu ...`; commands pause/resume background monitoring automatically.
-- Live logs: `just agentd monitor esp32|stm32` (supports `--duration`/`--lines`); history via `just agentd logs ...`.
-- Default ELF paths: ESP32 `firmware/ups-main/target/xtensa-esp32s3-none-elf/release/ups-main`; STM32 `target/thumbv6m-none-eabi/release/smart-battery`. Build them first if missing.
+- **Single daemon, `just` wrappers**: All flash/reset/monitor/log actions must use `tools/mcu-agentd`; prefer `just agentd-*`. Do not call `espflash`, raw `probe-rs`, or Make `run/attach/reset` targets.
+- **Daemon control**: `just agentd-start | agentd-status | agentd-stop` (equivalent to `cd tools/mcu-agentd && cargo run --release -- {start|status|stop}`). Socket/lock live under `logs/agentd/`.
+- **Port/probe cache (user approval required)**:
+  - Set: `just agentd set-port esp32 <port>` / `just agentd set-port stm32 <probe-id>` (no dash between set and port). Do not change ports/probes without explicit user consent.
+  - Get: `just agentd-get-port esp32|stm32`.
+- **Flash / reset / monitor**:
+  - Flash: `just agentd flash esp32` / `just agentd flash stm32`; defaults to release ELF. If the default ELF is missing, build it or pass `--elf`. ESP32 supports `--after hard-reset`.
+  - Reset: `just agentd reset esp32|stm32` (reset only).
+  - Monitor: `just agentd monitor esp32|stm32 --duration 30s --lines 200` (optional); returns the session log path and tails it.
+  - Logs: `just agentd logs all --tail 200 --sessions` aggregates meta + recent sessions. Session logs live at `logs/agentd/{esp32,stm32}/YYYYMMDD_HHMMSS.session.log`; meta events at `logs/agentd/{esp32,stm32}.meta.log`.
+- **Default ELF paths**: ESP32 `firmware/ups-main/target/xtensa-esp32s3-none-elf/release/ups-main`; STM32 `target/thumbv6m-none-eabi/release/smart-battery`. Build first if absent.
+- **Version check**: ensure boot logs print firmware version/hash and confirm it matches the locally built image before validating hardware results.
+- **Bring-up order**: power/flash/run ESP32 (`ups-main`) first, then flash/reset STM32 (smart-battery). STM32 I2C1 is an external slave; if the host is absent or the bus is floating, the STM32 will see repeated NACKs from that bus.
+- **User interaction rule**: agentd uses cached or auto-detected ports first; only ask the user if unresolved. Never switch probes/ports without consent.
 
 ## Prohibited Operations (Mandatory)
 
