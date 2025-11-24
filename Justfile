@@ -33,7 +33,7 @@ sb-build:
 	CARGO_TARGET_DIR="$TARGET_DIR" PROBE_ADDR="$PROBE_ADDR" DEFMT_LOG="$DEFMT_LOG" cargo build --release --target thumbv6m-none-eabi
 
 sb-flash: sb-build
-	just agentd flash stm32 --elf firmware/smart-battery/target/thumbv6m-none-eabi/release/smart-battery
+	just agentd flash stm32 ../../target/thumbv6m-none-eabi/release/smart-battery
 
 sb-reset:
 	just agentd reset stm32
@@ -46,7 +46,7 @@ ups-build:
 	cd firmware/ups-main && cargo build --release
 
 ups-flash: ups-build
-	just agentd flash esp32 --elf firmware/ups-main/target/xtensa-esp32s3-none-elf/release/ups-main
+	just agentd flash esp32 ../../target/xtensa-esp32s3-none-elf/release/ups-main
 
 ups-reset:
 	just agentd reset esp32
