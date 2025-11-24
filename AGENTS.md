@@ -11,11 +11,14 @@
 ## Build, Test, and Development Commands
 
 - Setup (once): `rustup target add thumbv6m-none-eabi` and install `probe-rs` and `llvm-tools-preview`.
-- Root-level operations use Makefile targets only. Do NOT run Cargo from the repository root.
-  - Build smart-battery (release): `make sb-build`
-  - Build ups-main (release): `make -C firmware/ups-main build`
-  - Driver example (STM32G0C8U6): `make driver-demo-build`
-- Per-project Make targets are for builds only; on-target run/flash/reset/monitor must go through `mcu-agentd` (no `run/attach/reset` Make targets).
+- Use `just` exclusively (no Makefiles remain; do not invoke `make`).
+  - Build smart-battery (release): `just sb-build`
+  - Flash/reset/monitor smart-battery: `just sb-flash` / `just sb-reset` / `just sb-monitor`
+  - Build ups-main (release): `just ups-build`
+  - Flash/reset/monitor ups-main: `just ups-flash` / `just ups-reset` / `just ups-monitor`
+  - Driver example (STM32G0C8U6) build: `just driver-demo-build`
+  - Docs (embassy/docs) build/clean: `just docs-build` / `just docs-clean`
+- On-target run/flash/reset/monitor must go through `mcu-agentd` via the `just` wrappers; do not call espflash/probe-rs directly.
 - Format: run `cargo fmt` inside the specific crate directory. Optional lint: run `cargo clippy --target thumbv6m-none-eabi` inside that crate.
 - Host-side tests for dependency crates: from that crate directory run `cargo test` (e.g., `bq76920`, `sc8815`).
 
@@ -34,15 +37,16 @@
 - **Default ELF paths**: ESP32 `firmware/ups-main/target/xtensa-esp32s3-none-elf/release/ups-main`; STM32 `target/thumbv6m-none-eabi/release/smart-battery`. Build first if absent.
 - **Version check**: ensure boot logs print firmware version/hash and confirm it matches the locally built image before validating hardware results.
 - **Bring-up order**: power/flash/run ESP32 (`ups-main`) first, then flash/reset STM32 (smart-battery). STM32 I2C1 is an external slave; if the host is absent or the bus is floating, the STM32 will see repeated NACKs from that bus.
+- **STM32 gating**: keep STM32 held in reset or unpowered until ESP32 has completed its post-boot init (I2C host up, rails configured). STM32 depends on ESP32's initialization to enter controlled mode; if STM32 boots first, it will remain in an uninitialized/NACK loop.
 - **User interaction rule**: agentd uses cached or auto-detected ports first; only ask the user if unresolved. Never switch probes/ports without consent.
 
 ## Prohibited Operations (Mandatory)
 
 - Do NOT create or reintroduce a Cargo workspace at the repository root.
 - Do NOT add or rely on a root-level `.cargo/config.toml` for targets or runners.
-- Do NOT run `cargo build`, `cargo run`, or any firmware-related Cargo command from the repository root.
-- All on-target flash/reset/monitor/log capture must use `just agentd ...`; do not use `make sb-run/sb-attach/sb-reset`, `make -C ... run/attach/reset`, or raw `espflash`/`probe-rs`.
-- All firmware builds must be invoked via Makefiles (root Makefile delegates to the project Makefiles) or by running Cargo within the specific project directory.
+- Do NOT run `cargo build`, `cargo run`, or any firmware-related Cargo command from the repository root; use `just` recipes that cd into the crate.
+- Do NOT use `make`; Makefiles have been removed in favor of `just`.
+- All on-target flash/reset/monitor/log capture must use `just agentd ...`; do not use raw `espflash`/`probe-rs`.
 - Keep projects fully independent. Cross-crate paths must be explicit within each crate’s `Cargo.toml`; never depend on root workspace injection.
 
 ## Coding Style & Naming Conventions
@@ -67,7 +71,7 @@
 
 ## Security & Configuration Tips
 
-- Probe address and chip type are configured in each project (e.g., `firmware/smart-battery/.cargo/config.toml` or its Makefile). You may override locally via env vars (e.g., `PROBE_ADDR=XXXX`) for builds, but on-target flashing/monitoring still must use `just agentd ...`.
+- Probe address and chip type are configured in each project (e.g., `firmware/smart-battery/.cargo/config.toml`); Makefiles are gone. You may override locally via env vars (e.g., `PROBE_ADDR=XXXX`) for builds, but on-target flashing/monitoring still must use `just agentd ...`.
 
 ## I2C Device Instance Management (Supplement)
 
