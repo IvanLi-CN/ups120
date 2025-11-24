@@ -20,12 +20,19 @@ impl Paths {
     pub fn new() -> Result<Self> {
         let cwd = std::env::current_dir()?;
         let mut root = cwd.clone();
+        // Detect repo root by presence of Justfile + firmware dir (workspace root),
+        // fallback to parent of tools/mcu-agentd when not found.
         for dir in cwd.ancestors() {
-            let mf = dir.join("Makefile");
+            let jf = dir.join("Justfile");
             let fw = dir.join("firmware");
-            if mf.exists() && fw.exists() {
+            if jf.exists() && fw.exists() {
                 root = dir.to_path_buf();
                 break;
+            }
+        }
+        if root == cwd {
+            if let Some(parent) = cwd.parent() {
+                root = parent.to_path_buf();
             }
         }
         let logs_dir = root.join("logs/agentd");

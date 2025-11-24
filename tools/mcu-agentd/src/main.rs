@@ -15,6 +15,8 @@ use server::Server;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
 use std::time::Instant;
+use tokio::time::sleep;
+use tokio::time::Duration as TokioDuration;
 
 /// UPS120 agentd – single-instance service to flash/reset/monitor ESP32-S3 & STM32L0.
 #[derive(Parser, Debug)]
@@ -142,7 +144,7 @@ async fn main() -> Result<()> {
                 Some(p) => p,
                 None => interactive_select_port(mcu_kind.clone()).await?,
             };
-            let resp = Server::client_send(ClientRequest::SetPort {
+            let resp = client_send_with_autostart(ClientRequest::SetPort {
                 mcu: mcu_kind,
                 path: p,
             })
@@ -150,11 +152,11 @@ async fn main() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&resp)?);
         }
         Cmd::GetPort { mcu } => {
-            let resp = Server::client_send(ClientRequest::GetPort { mcu: mcu.into() }).await?;
+            let resp = client_send_with_autostart(ClientRequest::GetPort { mcu: mcu.into() }).await?;
             println!("{}", serde_json::to_string_pretty(&resp)?);
         }
         Cmd::Flash { mcu, elf, after } => {
-            let resp = Server::client_send(ClientRequest::Flash {
+            let resp = client_send_with_autostart(ClientRequest::Flash {
                 mcu: mcu.into(),
                 elf,
                 after: Some(after.into()),
@@ -163,7 +165,7 @@ async fn main() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&resp)?);
         }
         Cmd::Reset { mcu } => {
-            let resp = Server::client_send(ClientRequest::Reset { mcu: mcu.into() }).await?;
+            let resp = client_send_with_autostart(ClientRequest::Reset { mcu: mcu.into() }).await?;
             println!("{}", serde_json::to_string_pretty(&resp)?);
         }
         Cmd::Monitor {
@@ -181,7 +183,7 @@ async fn main() -> Result<()> {
             tail,
             sessions,
         } => {
-            let resp = Server::client_send(ClientRequest::Logs {
+            let resp = client_send_with_autostart(ClientRequest::Logs {
                 mcu: mcu.into(),
                 since,
                 until,
@@ -193,6 +195,48 @@ async fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+// Try sending to daemon; if socket不存在则自动启动并重试一次。
+async fn client_send_with_autostart(req: ClientRequest) -> Result<model::ClientResponse> {
+    let paths = paths::Paths::new()?;
+    let sock = paths.sock.clone();
+    match Server::client_send(req.clone()).await {
+        Ok(r) => Ok(r),
+        Err(e) => {
+            let (is_enoent, is_refused) = match e.downcast_ref::<std::io::Error>() {
+                Some(ioe) => (
+                    ioe.kind() == std::io::ErrorKind::NotFound,
+                    matches!(ioe.kind(), std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset),
+                ),
+                None => (false, false),
+            };
+            if !(is_enoent || is_refused) {
+                return Err(e);
+            }
+            // auto-start daemon then retry once
+            Server::spawn_background().await?;
+            // wait a bit for socket ready
+            sleep(TokioDuration::from_millis(150)).await;
+            let mut attempts = 0;
+            loop {
+                attempts += 1;
+                match Server::client_send(req.clone()).await {
+                    Ok(r) => return Ok(r),
+                    Err(_e) if attempts < 5 => {
+                        sleep(TokioDuration::from_millis(150)).await;
+                        continue;
+                    }
+                    Err(e) => {
+                        return Err(anyhow::anyhow!(
+                            "agentd not reachable at {:?}: {}. Try `just agentd-start` or check permissions (logs/agentd).",
+                            sock, e
+                        ))
+                    }
+                }
+            }
+        }
+    }
 }
 
 impl From<McuOpt> for McuKind {

@@ -26,8 +26,5 @@ pub fn write_port(paths: &Paths, mcu: McuKind, val: &str) -> Result<()> {
         McuKind::Stm32 => &paths.stm32_port,
     };
     fs::write(p, val.trim()).with_context(|| format!("write {:?}", p))?;
-    if mcu == McuKind::Stm32 {
-        let _ = fs::write(&paths.stm32_legacy, val.trim());
-    }
     Ok(())
 }

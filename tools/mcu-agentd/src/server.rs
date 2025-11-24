@@ -162,7 +162,12 @@ async fn handle_request(
         }
         ClientRequest::SetPort { mcu, path } => {
             port_cache::write_port(paths, mcu.clone(), path.to_string_lossy().as_ref())?;
+            // Hot-restart background monitor so new port takes effect immediately
             let ts = clock.now();
+            stop_monitor_bg(paths, &mcu)?;
+            if let Err(e) = start_monitor_bg(paths, &mcu, Some(ts.clone())).await {
+                eprintln!("monitor restart after set-port failed: {e:#}");
+            }
             Ok(ClientResponse::ok(
                 json!({"ts": ts.iso(), "mcu": mcu, "path": path}),
             ))
