@@ -85,6 +85,7 @@ const ADIN_DEBOUNCE_SAMPLES: u8 = 2; // consecutive samples
 // before evaluating stop-mode (3V) thresholds to avoid immediate RESUME chatter.
 const VCCSC_DROP_MS: u32 = 10_000; // settle window; tuned per bench (10 s)
 const ENABLE_ADIN_SNAP: bool = false; // disable per-sample log to save flash
+const DISABLE_ADIN_TEMP: bool = true; // board rev without ADIN NTC; bypass ADIN-based temp gating
 
 // (Note) Removed LUT helpers to minimize footprint; thresholds use precomputed codes.
 
@@ -317,7 +318,7 @@ struct StateFlagsCtx {
     charger_active: bool,
     charge_confirmed: bool,
     pause_active: bool,
-    imbalance_pause_active: bool,
+    imbalance_recovery_active: bool,
     full_latched: bool,
     sc_fault: bool,
 }
@@ -358,7 +359,7 @@ pub struct Sc8815TaskArgs {
 
 #[inline(always)]
 fn refresh_state_flags(ctx: StateFlagsCtx) {
-    let paused = ctx.ac_present && (ctx.pause_active || ctx.imbalance_pause_active);
+    let paused = ctx.ac_present && (ctx.pause_active || ctx.imbalance_recovery_active);
     let charging = ctx.charger_active || ctx.charge_confirmed || paused;
     const MASK: u16 = sbits::AC_PRESENT
         | sbits::CHARGING
@@ -427,8 +428,17 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
     let mut ov_pause_secs: u16 = 0;
     let mut uv_pause_secs: u16 = 0;
     let mut oc_pause_secs: u16 = 0;
-    // Severe imbalance pause (Δ>=100 mV) clear when Δ<50 mV
-    let mut imbalance_pause_active: bool = false;
+    // Imbalance recovery state (short-charge + long-balance loop)
+    let mut imbalance_recovery_active: bool = false;
+    let mut imbalance_phase_charge: bool = false; // true=30s charge, false=120s stop+balance
+    let mut imbalance_phase_deadline_ms: u32 = 0;
+    let mut imbalance_cycle_count: u8 = 0;
+    let mut imbalance_accum_drop_mv: i32 = 0;
+    let mut imbalance_accum_vmin_gain_mv: i32 = 0;
+    let mut last_spread_mv: i32 = 0;
+    let mut last_vmin_mv: i32 = 0;
+    let mut imbalance_cycle_start_spread_mv: i32 = 0;
+    let mut imbalance_cycle_start_vmin_mv: i32 = 0;
     // 来自 BQ 的温度暂停请求（通过 BalancingCvRequest 下发）
     let mut temp_pause_cmd: bool = false;
     // 来自 SC8815 ADIN 的温度暂停（本任务计算）
@@ -468,7 +478,7 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
     let mut ac_confirm_deadline_ms: u16 = 0;
 
     // Log de-noising latch for pause state changes only
-    let mut last_pause_report: Option<(bool, bool)> = None; // (ov_pause_active, imbalance_pause_active)
+    let mut last_pause_report: Option<(bool, bool)> = None; // (ov_pause_active, imbalance_recovery_active)
     // quiesce INT mode: no probe state needed
     // dropout counters omitted in this step to keep flash within limits
     // Boot probe: unconditionally attempt to initialize SC8815 once at power-up
@@ -546,7 +556,7 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                 pause_active: (ov_pause_secs > 0 || uv_pause_secs > 0 || oc_pause_secs > 0)
                     || temp_pause_cmd
                     || sc_temp_pause_active,
-                imbalance_pause_active,
+                imbalance_recovery_active,
                 full_latched,
                 sc_fault: sc_fault_flag,
             });
@@ -691,37 +701,175 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                     // ov cooldown start
                 }
             } else {
-                // Maintain severe-imbalance pause state using spread; start by BalancingCvRequest.severe_imbalance
+                // Imbalance recovery loop: prefer BQ-provided spread (ΔV/ΔV%) and fall back to raw cell scan
+                let mut spread_opt: Option<i32> = latest_bal_req.delta_mv;
+                let mut spread_pct_opt: Option<i32> =
+                    latest_bal_req.delta_pct.map(|p| i32::from(p));
+                let mut min_v_opt: Option<i32> = None;
+                let mut max_v_opt: Option<i32> = None;
+
                 if let Some(meas) = latest_bq_measurements.as_ref() {
                     let mut min_v = i32::MAX;
                     let mut max_v = i32::MIN;
                     for &v in meas.core_measurements.cell_voltages.voltages.iter() {
                         if v > 0 {
-                            if v < min_v {
-                                min_v = v;
-                            }
-                            if v > max_v {
-                                max_v = v;
-                            }
+                            min_v = min_v.min(v);
+                            max_v = max_v.max(v);
                         }
                     }
                     if max_v != i32::MIN && min_v != i32::MAX {
-                        let spread = max_v - min_v;
-                        if spread >= 100 {
-                            if !imbalance_pause_active {
-                                imbalance_pause_active = true;
-                                defmt::info!("sc:imbalance pause start spread={}mV", spread);
-                            }
-                        } else if imbalance_pause_active && spread < 50 {
-                            imbalance_pause_active = false;
-                            defmt::info!("sc:imbalance cleared spread={}mV", spread);
+                        min_v_opt = Some(min_v);
+                        max_v_opt = Some(max_v);
+                        if spread_opt.is_none() {
+                            spread_opt = Some(max_v - min_v);
+                        }
+                        if spread_pct_opt.is_none() && max_v > 0 {
+                            let s = spread_opt.unwrap_or(0);
+                            spread_pct_opt = Some((s.saturating_mul(100) / max_v).max(0));
                         }
                     }
                 }
 
-                // If in pause (OV or imbalance) and charger is active, gate power stage
-                let imbalance_block = imbalance_pause_active;
-                if ((ov_pause_secs > 0 || imbalance_block) || temp_pause_cmd) && charger_active {
+                let spread = spread_opt.unwrap_or(last_spread_mv);
+                let spread_pct = spread_pct_opt.unwrap_or_else(|| {
+                    if let Some(max_v) = max_v_opt {
+                        if max_v > 0 {
+                            (spread.saturating_mul(100) / max_v).max(0)
+                        } else {
+                            0
+                        }
+                    } else {
+                        0
+                    }
+                });
+                if let Some(s) = spread_opt {
+                    last_spread_mv = s;
+                }
+                if let Some(vmin) = min_v_opt {
+                    last_vmin_mv = vmin;
+                }
+                let min_v = min_v_opt.unwrap_or(last_vmin_mv);
+                let now_ms = embassy_time::Instant::now().as_millis() as u32;
+                let enter_recovery = !imbalance_recovery_active
+                    && (spread >= 150 || spread_pct > 5)
+                    && pack_voltage_mv < 16_200
+                    && min_v >= 2_700;
+                let clear_recovery =
+                    imbalance_recovery_active && ((spread < 60 || spread_pct < 2) && min_v > 3_000);
+
+                if enter_recovery {
+                    imbalance_recovery_active = true;
+                    imbalance_phase_charge = true;
+                    imbalance_phase_deadline_ms = now_ms.saturating_add(30_000);
+                    imbalance_cycle_count = 0;
+                    imbalance_accum_drop_mv = 0;
+                    imbalance_accum_vmin_gain_mv = 0;
+                    imbalance_cycle_start_spread_mv = spread;
+                    imbalance_cycle_start_vmin_mv = min_v;
+                    if let Some(sess) = sc8815_session.as_mut() {
+                        // Clamp IBAT to hardware minimum and lower CV for recovery
+                        let _ = sess
+                            .sc
+                            .set_ibat_limit(300, sess.ibat_ratio.into(), sess.rs2_mohm)
+                            .await;
+                        sess.enable_power_stage();
+                        charger_active = true;
+                    }
+                    defmt::info!(
+                        "sc:imb rec enter spread={}mV pct={} vmin={}",
+                        spread,
+                        spread_pct,
+                        min_v
+                    );
+                }
+
+                if imbalance_recovery_active {
+                    // Phase switching
+                    if now_ms >= imbalance_phase_deadline_ms {
+                        if imbalance_phase_charge {
+                            // switch to stop/balance phase
+                            if let Some(sess) = sc8815_session.as_mut() {
+                                sess.disable_power_stage();
+                            }
+                            charger_active = false;
+                            charge_confirmed = false;
+                            confirm_streak = 0;
+                            drop_streak = 0;
+                            imbalance_phase_charge = false;
+                            imbalance_phase_deadline_ms = now_ms.saturating_add(120_000);
+                            defmt::info!("sc:imb rec rest spread={}mV vmin={}", spread, min_v);
+                        } else {
+                            // rest→charge: evaluate progress of last cycle
+                            let drop = (imbalance_cycle_start_spread_mv - spread).max(0);
+                            let gain = (min_v - imbalance_cycle_start_vmin_mv).max(0);
+                            imbalance_accum_drop_mv = imbalance_accum_drop_mv.saturating_add(drop);
+                            imbalance_accum_vmin_gain_mv =
+                                imbalance_accum_vmin_gain_mv.saturating_add(gain);
+                            imbalance_cycle_count = imbalance_cycle_count.saturating_add(1);
+                            imbalance_cycle_start_spread_mv = spread;
+                            imbalance_cycle_start_vmin_mv = min_v;
+                            // start next charge window
+                            if let Some(sess) = sc8815_session.as_mut() {
+                                let _ = sess
+                                    .sc
+                                    .set_ibat_limit(300, sess.ibat_ratio.into(), sess.rs2_mohm)
+                                    .await;
+                                sess.enable_power_stage();
+                            }
+                            charger_active = true;
+                            imbalance_phase_charge = true;
+                            imbalance_phase_deadline_ms = now_ms.saturating_add(30_000);
+                            defmt::info!(
+                                "sc:imb rec charge cyc={} drop={} gain={} spread={} vmin={}",
+                                imbalance_cycle_count,
+                                drop,
+                                gain,
+                                spread,
+                                min_v
+                            );
+                        }
+                    }
+
+                    // Exit / abort checks
+                    if clear_recovery
+                        || (imbalance_cycle_count >= 3
+                            && (imbalance_accum_drop_mv < 15 || imbalance_accum_vmin_gain_mv < 60))
+                    {
+                        if clear_recovery {
+                            defmt::info!(
+                                "sc:imb rec exit spread={} pct={} vmin={} gain={}",
+                                spread,
+                                spread_pct,
+                                min_v,
+                                imbalance_accum_vmin_gain_mv
+                            );
+                        } else {
+                            defmt::warn!(
+                                "sc:imb rec no_converge cyc={} drop={} gain={} spread={} vmin={}",
+                                imbalance_cycle_count,
+                                imbalance_accum_drop_mv,
+                                imbalance_accum_vmin_gain_mv,
+                                spread,
+                                min_v
+                            );
+                        }
+                        if let Some(sess) = sc8815_session.as_mut() {
+                            sess.disable_power_stage();
+                        }
+                        charger_active = false;
+                        charge_confirmed = false;
+                        confirm_streak = 0;
+                        drop_streak = 0;
+                        imbalance_recovery_active = false;
+                        imbalance_phase_charge = false;
+                        imbalance_cycle_count = 0;
+                        imbalance_accum_drop_mv = 0;
+                        imbalance_accum_vmin_gain_mv = 0;
+                    }
+                }
+
+                // If in fault/temperature pause, gate power stage
+                if (ov_pause_secs > 0 || temp_pause_cmd) && charger_active {
                     if let Some(sess) = sc8815_session.as_mut() {
                         sess.disable_power_stage();
                     }
@@ -752,9 +900,10 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                     sc_temp_pause_active,
                     adapter_holdoff_secs
                 );
-                if imbalance_pause_active {
+                if imbalance_recovery_active {
                     pause_cause_bits |= pause_bits::IMBALANCE;
                 }
+                let imbalance_block = imbalance_recovery_active && !imbalance_phase_charge;
                 let pol_start_cond = request_active
                     && !charger_active
                     && adapter_holdoff_secs == 0
@@ -870,7 +1019,7 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                     if ov_pause_secs == 0
                         && uv_pause_secs == 0
                         && oc_pause_secs == 0
-                        && !imbalance_pause_active
+                        && (!imbalance_recovery_active || imbalance_phase_charge)
                         && !temp_pause_cmd
                         && !sc_temp_pause_active
                     {
@@ -895,7 +1044,7 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                         // log pause gating only when state (OV/IMB pair) changes
                         let pause_sig = (
                             (ov_pause_secs > 0 || uv_pause_secs > 0 || oc_pause_secs > 0),
-                            imbalance_pause_active || temp_pause_cmd || sc_temp_pause_active,
+                            imbalance_recovery_active || temp_pause_cmd || sc_temp_pause_active,
                         );
                         if last_pause_report != Some(pause_sig) {
                             let mut b: u8 = 0; // bit0=LH, bit1=OV/UV/OC, bit2=IMB, bit3=BQtemp, bit4=ADINtemp
@@ -904,7 +1053,7 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                                 b |= 1 << 1;
                                 pause_cause_bits |= pause_bits::OVUV_OC;
                             }
-                            if imbalance_pause_active {
+                            if imbalance_recovery_active {
                                 b |= 1 << 2;
                                 pause_cause_bits |= pause_bits::IMBALANCE;
                             }
@@ -922,7 +1071,7 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                                 ov_pause_secs,
                                 uv_pause_secs,
                                 oc_pause_secs,
-                                imbalance_pause_active,
+                                imbalance_recovery_active,
                                 temp_pause_cmd,
                                 sc_temp_pause_active,
                                 adapter_holdoff_secs
@@ -1005,7 +1154,7 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                                         || uv_pause_secs > 0
                                         || oc_pause_secs > 0)
                                         || temp_pause_cmd,
-                                    imbalance_pause_active,
+                                    imbalance_recovery_active,
                                     full_latched,
                                     sc_fault: sc_fault_flag,
                                 });
@@ -1083,7 +1232,7 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                                 pause_active: ov_pause_secs > 0
                                     || uv_pause_secs > 0
                                     || oc_pause_secs > 0,
-                                imbalance_pause_active,
+                                imbalance_recovery_active,
                                 full_latched,
                                 sc_fault: sc_fault_flag,
                             });
@@ -1116,7 +1265,7 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                                 pause_active: ov_pause_secs > 0
                                     || uv_pause_secs > 0
                                     || oc_pause_secs > 0,
-                                imbalance_pause_active,
+                                imbalance_recovery_active,
                                 full_latched,
                                 sc_fault: sc_fault_flag,
                             });
@@ -1180,7 +1329,15 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                         // 档位选择：功率级运行→5V，停机→3V（窗口后评估）。
                         latest_adc_snapshot = Some(measurements);
 
-                        if charger_active {
+                        if DISABLE_ADIN_TEMP {
+                            // Board revision without ADIN NTC: bypass ADIN temperature gating
+                            sc_temp_pause_active = false;
+                            sc_overtemp_adin = false;
+                            hot_hits = 0;
+                            cold_hits = 0;
+                            cool_hits = 0;
+                            cold_latch_active = false;
+                        } else if charger_active {
                             // Running：按板上实际→ VCC_SC≈5V，采用 5V 映射阈值
                             let hot_code = ADIN_CODE_HOT_STOP_5V;
                             if adin_code <= hot_code.saturating_add(ADIN_CODE_MARGIN) {
@@ -1315,7 +1472,7 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                                 let exit_by_voltage = last_vbat_mv < PACK_CHARGE_START_THRESHOLD_MV;
                                 let pause_active =
                                     (ov_pause_secs > 0 || uv_pause_secs > 0 || oc_pause_secs > 0)
-                                        || imbalance_pause_active;
+                                        || imbalance_recovery_active;
                                 let charging_flags = charger_active
                                     || charge_confirmed
                                     || (pause_active && _adapter_present);
@@ -1397,7 +1554,7 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                     ov_pause_active: (ov_pause_secs > 0)
                         || (uv_pause_secs > 0)
                         || (oc_pause_secs > 0),
-                    imbalance_pause_active,
+                    imbalance_pause_active: imbalance_recovery_active,
                     temp_pause_adin: sc_temp_pause_active,
                     overtemp_adin: sc_overtemp_adin,
                 };
@@ -1410,7 +1567,7 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                 expected_charging: charger_active,
                 charging_confirmed: charge_confirmed,
                 ov_pause_active: (ov_pause_secs > 0) || (uv_pause_secs > 0) || (oc_pause_secs > 0),
-                imbalance_pause_active,
+                imbalance_pause_active: imbalance_recovery_active,
                 temp_pause_adin: sc_temp_pause_active,
                 overtemp_adin: sc_overtemp_adin,
             };
@@ -1509,6 +1666,7 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
         let pause_active = (ov_pause_secs > 0)
             || (uv_pause_secs > 0)
             || (oc_pause_secs > 0)
+            || imbalance_recovery_active
             || temp_pause_cmd
             || sc_temp_pause_active;
         let sc_active_flag = _adapter_present && (charger_active || charge_confirmed);
@@ -1519,7 +1677,7 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
             charger_active,
             charge_confirmed,
             pause_active,
-            imbalance_pause_active,
+            imbalance_recovery_active,
             full_latched,
             sc_fault: sc_fault_flag,
         });

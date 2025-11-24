@@ -119,6 +119,18 @@ Notes: LED tasks do not synchronize phases across colors; each keeps its own 3 s
 - During balancing: allow ~1 s cadence to control balancing switches and termination.
 - Pause‑charge semantics: keep the charging session/regs, but set `PSTOP_CTL = High` to stop the power stage. Resume based on state‑machine policy (temp, delta‑V, EOC, timers, etc.).
 
+### 5.1 Imbalance recovery (low‑V, high ΔV)
+
+- 触发条件：`ΔV>=150 mV` 或 `ΔV_pct>5%`，且 `Vpack<16.2 V`，`Vmin>=2.70 V`；硬停条件保持不变（`Vmin<2.50 V`、过温、通信掉线）。
+- 固定循环（总长 150 s）：
+  - 充电段 30 s：`IBAT=300 mA`（ratio=6x, RS=10 mΩ）、`Vfloat=17.9 V`，允许平衡；目的是抬升最低单体。
+  - 停充均衡段 120 s：`PSTOP_CTL=Low` 停功率级，CE 保持高，被动均衡持续；时间占比 80% 让均衡电流主导，压差得以收敛。
+- 退出与降级：
+  - 连续 3 个循环（≈7.5 min）`ΔV` 总降 <15 mV 或 `Vmin` 总升 <60 mV → 停充并告警“不收敛”。
+  - 达成 `ΔV<60 mV` 或 `ΔV_pct<1.5%` 且 `Vmin>3.0 V` → 退出恢复循环，恢复正常充电/速度表设置。
+- 高压夹层：若 `Vmax>3.55 V` 且 `ΔV>80 mV`，先执行一次 120 s 停充均衡窗口再继续按当前状态；BQ OV 仍兜底。
+- 简化实现：仅调用 `set_ibat_limit(300 mA)` 与 `set_vfloat(17.9 V)`，不触碰 IBUS 或 `ChargeSpeedSetting`；PSTOP 定时切换实现占空；记录循环号、`ΔV/ΔV_pct/Vmin/Vmax` 以便调参。
+
 ## 6) Dropouts & Safety
 
 - Accept dropouts: SC8815/BQ76920 I²C failures and absent I2C1 host.

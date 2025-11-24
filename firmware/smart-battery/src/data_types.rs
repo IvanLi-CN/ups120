@@ -67,6 +67,10 @@ pub struct BalancingCvRequest {
     pub severe_imbalance: bool,
     /// Request SC8815 to pause charging due to temperature (host-level request)
     pub temp_pause: bool,
+    /// Pack spread (max-min) in millivolts computed by BQ task
+    pub delta_mv: Option<i32>,
+    /// Pack spread as percent of max cell voltage computed by BQ task (0–100)
+    pub delta_pct: Option<u8>,
 }
 /// 聚合所有设备的测量数据
 #[derive(Copy, Clone, PartialEq)]

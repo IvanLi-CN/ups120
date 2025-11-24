@@ -404,6 +404,7 @@ fn soft_reset_i2c1(reason: &str) {
 }
 
 fn handle_i2c_fault(reason: &str) {
+    // If the bus is physically stuck, do a full recovery; otherwise prefer a light reset.
     if bus_lines_stuck_low() {
         recover_i2c1(reason);
     } else {
@@ -412,6 +413,7 @@ fn handle_i2c_fault(reason: &str) {
 }
 
 fn handle_i2c_error(reason: &str, error: i2c::Error) {
+    // Rate-limit noisy errors to avoid log storms and potential overflow paths
     log_isr_state(reason);
     match error {
         i2c::Error::Timeout

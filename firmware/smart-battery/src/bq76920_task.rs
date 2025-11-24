@@ -29,6 +29,7 @@ const PACK_OUTPUT_CUTOFF_THRESHOLD_MV: i32 = 12_500;
 // New balancing policy thresholds
 // Start balancing during charging when pack spread (max-min) exceeds 10 mV.
 const BALANCE_START_SPREAD_MV: i32 = 10;
+const LOG_CELL_DELTA: bool = true; // log cell voltages/min/max/spread each sample for diagnostics
 // A local peak must exceed at least one adjacent cell by >1 mV to be eligible.
 const LOCAL_PEAK_MARGIN_MV: i32 = 1;
 
@@ -381,8 +382,15 @@ pub async fn bq76920_task(args: Bq76920TaskArgs) {
     let mut temp_pause_active: bool = false; // request to SC (pubsub)
     let mut temp_chg_gate_active: bool = false; // local CHG gating (>60°C with hysteresis)
     let mut temp_cutoff_active: bool = false;
+    // Last-known pack spread computed from BQ measurements
+    let mut last_delta_mv: Option<i32> = None;
+    let mut last_delta_pct: Option<u8> = None;
 
     loop {
+        // Reuse last-known spread unless a fresh sample updates it
+        let mut delta_mv: Option<i32> = last_delta_mv;
+        let mut delta_pct: Option<u8> = last_delta_pct;
+
         if crate::failsafe::is_quiesced() {
             // 静默时也不停止安全职责：不提前返回，只把 AC 视图标记为 false，允许后续以 60s 周期运行
             if let Some(_cell) = active_balancing_cell.take() {
@@ -398,6 +406,21 @@ pub async fn bq76920_task(args: Bq76920TaskArgs) {
                         crate::failsafe::set_bq_online(true);
                         fail_streak = 0;
                         crate::failsafe::clear_pstop();
+                        // Update spread cache for downstream charger logic
+                        let mut min_v = i32::MAX;
+                        let mut max_v = i32::MIN;
+                        for &v in core_meas.cell_voltages.voltages.iter() {
+                            if v > 0 {
+                                min_v = min_v.min(v);
+                                max_v = max_v.max(v);
+                            }
+                        }
+                        if max_v != i32::MIN && min_v != i32::MAX {
+                            let spread = max_v - min_v;
+                            let pct = ((spread.saturating_mul(100)) / max_v.max(1)).clamp(0, 100);
+                            last_delta_mv = Some(spread);
+                            last_delta_pct = Some(pct as u8);
+                        }
                         bq76920_alerts_publisher.publish_immediate(
                             crate::data_types::Bq76920Alerts {
                                 system_status: core_meas.system_status,
@@ -575,12 +598,29 @@ pub async fn bq76920_task(args: Bq76920TaskArgs) {
                         }
                         if max_v != i32::MIN && min_v != i32::MAX {
                             let spread = max_v - min_v;
+                            let pct = ((spread.saturating_mul(100)) / max_v.max(1)).clamp(0, 100);
+                            delta_mv = Some(spread);
+                            delta_pct = Some(pct as u8);
                             if spread >= BALANCE_START_SPREAD_MV {
                                 balancing_needed_by_delta = true;
                             }
                             if balancing_needed_by_delta != prev_balancing_needed_by_delta {
                                 debug!("bal:e s={} n={}", spread, balancing_needed_by_delta);
                                 prev_balancing_needed_by_delta = balancing_needed_by_delta;
+                            }
+                            if LOG_CELL_DELTA {
+                                info!(
+                                    "cell: v=[{} {} {} {} {}] min={} max={} spread={} pct={}",
+                                    meas.cell_voltages.voltages[0],
+                                    meas.cell_voltages.voltages[1],
+                                    meas.cell_voltages.voltages[2],
+                                    meas.cell_voltages.voltages[3],
+                                    meas.cell_voltages.voltages[4],
+                                    min_v,
+                                    max_v,
+                                    spread,
+                                    pct
+                                );
                             }
                         }
                     }
@@ -774,6 +814,9 @@ pub async fn bq76920_task(args: Bq76920TaskArgs) {
                 };
             bq76920_measurements_publisher
                 .publish_immediate(bq76920_measurements_payload_for_main_pub);
+            // Keep last-known spread for charger-side policies even if the next tick lacks a fresh sample
+            last_delta_mv = delta_mv;
+            last_delta_pct = delta_pct;
             if latest_core_measurements.is_some() {
                 crate::failsafe::set_bq_online(true);
                 fail_streak = 0;
@@ -893,22 +936,24 @@ pub async fn bq76920_task(args: Bq76920TaskArgs) {
 
         // Publish the coupling signal each tick
         // Severe imbalance flag (Δ>=100 mV)
-        let mut severe_imbalance_flag = false;
-        if let Some(meas) = latest_core_measurements.as_ref() {
-            let mut min_v = i32::MAX;
-            let mut max_v = i32::MIN;
-            for &v in meas.cell_voltages.voltages.iter() {
-                if v > 0 {
-                    if v < min_v {
-                        min_v = v;
-                    }
-                    if v > max_v {
-                        max_v = v;
+        let mut severe_imbalance_flag = delta_mv.map(|d| d >= 100).unwrap_or(false);
+        if !severe_imbalance_flag {
+            if let Some(meas) = latest_core_measurements.as_ref() {
+                let mut min_v = i32::MAX;
+                let mut max_v = i32::MIN;
+                for &v in meas.cell_voltages.voltages.iter() {
+                    if v > 0 {
+                        if v < min_v {
+                            min_v = v;
+                        }
+                        if v > max_v {
+                            max_v = v;
+                        }
                     }
                 }
-            }
-            if max_v != i32::MIN && min_v != i32::MAX {
-                severe_imbalance_flag = (max_v - min_v) >= 100;
+                if max_v != i32::MIN && min_v != i32::MAX {
+                    severe_imbalance_flag = (max_v - min_v) >= 100;
+                }
             }
         }
 
@@ -917,6 +962,8 @@ pub async fn bq76920_task(args: Bq76920TaskArgs) {
             overlay: overlay_led,
             severe_imbalance: severe_imbalance_flag,
             temp_pause: temp_pause_active,
+            delta_mv,
+            delta_pct,
         });
 
         // dbg: read end
