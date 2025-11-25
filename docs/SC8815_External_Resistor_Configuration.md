@@ -134,6 +134,14 @@ VBAT+ ----[R_UP]---- VBATS ----[R_DOWN]---- GND
 
 ### 无法充电
 1. 验证PSTOP引脚控制
-   - [2025-09-29 更新] 由于 MCU 侧通过 N 沟道 MOSFET 隔离驱动，MCU 引脚语义与 SC8815 引脚有效电平发生反相：`PSTOP_OUT 高=停机`，`PSTOP_OUT 低=允许`。调试时请确认 MCU 侧语义是否与期望一致。
+   - [2025-11-25 订正] 以净表与 `SOFTWARE_DESIGN.md` 为准，区分三个信号：
+     - `PSTOP_MCU`：MCU 侧 GPIO（本项目为 `PA9`），由固件直接驱动；
+     - `PSTOP_CTL`：硬件保护逻辑输出，`PSTOP_CTL = TEMP_FAULT_N · PSTOP_MCU`；
+     - `PSTOP`：SC8815 芯片引脚，经板载反相器由 `PSTOP_CTL` 翻转而来。
+   - 有效语义为：
+     - `PSTOP_CTL = 1` → 反相后 `PSTOP = Low` → **功率级允许工作**；
+     - `PSTOP_CTL = 0` → 反相后 `PSTOP = High` → **功率级停机**；
+     - 固件只控制 `PSTOP_MCU`，拉低它一定会使 `PSTOP_CTL=0`（无论温度是否正常）从而停机；拉高时，仅在 `TEMP_FAULT_N=1`（温度正常）时功率级才放行。
+   - 旧文档中“`PSTOP_OUT 高=停机`、`低=允许`”的说法已过时且与当前网表不符，应忽略，以本节订正说明为准。
 2. 检查电流限制设置
 3. 确认充电模式已启用
