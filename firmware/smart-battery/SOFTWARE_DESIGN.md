@@ -23,22 +23,26 @@ This document is the single source of truth for the smart‑battery firmware des
 ## 2) SC8815 CE/PSTOP Control Inversion
 
 - Hardware: MCU drives SC8815 `CE` and `PSTOP` through N‑MOSFET isolation; the MCU pin level is inverted relative to the IC’s active level.
-- Unified net names and semantics (used consistently in code and docs):
-  - `CE_CTL`: High → chip `/CE` Low (enable charger); Low → chip `/CE` High (disable charger).
-  - `PSTOP_CTL`: High → chip `PSTOP` Low (power stage allowed); Low → chip `PSTOP` High (power stage stopped).
+- Unified control semantics on the MCU side:
+  - `CE_CTL` (MCU pin): High → chip `/CE` Low (enable charger); Low → chip `/CE` High (disable charger).
+  - `PSTOP_MCU` (MCU pin on `PA9`, labelled `PSTOP_CTL` in CubeMX): High = MCU 允许功率级；Low = MCU 主动停机请求。
 - SC8815 pin-level semantics (non-inverted, for absolute clarity):
   - `PSTOP = High` → power stage stopped.
   - `PSTOP = Low`  → power stage allowed.
-- Truth table (MCU → chip):
+- Hardware protection docs以及当前网表会区分 `PSTOP_MCU`（MCU GPIO）和 `PSTOP_CTL`（经 U22 逻辑后的网）：
+  - `PSTOP_CTL = TEMP_FAULT_N · PSTOP_MCU`（U22 = SN74AUP1G08DCKR）。
+  - 板载 Q10（BSS138PS）+ RN1 组成反相/电平转换：`PSTOP = !PSTOP_CTL`。
+  - 固件只能驱动 `PSTOP_MCU`（PA9）；只要 `TEMP_FAULT_N = 0` 或 `PSTOP_MCU = 0`，最终芯片脚 `PSTOP = High` 强制停机。
+- Truth table (MCU / TEMP_FAULT_N → chip pins):
 
-  | MCU pin       | Semantic            | Chip pin meaning |
-  |---------------|---------------------|------------------|
-  | CE_CTL = High | Charger enabled     | /CE = Low        |
-  | CE_CTL = Low  | Charger disabled    | /CE = High       |
-  | PSTOP_CTL = High | Power allowed    | PSTOP = Low      |
-  | PSTOP_CTL = Low  | Power stopped    | PSTOP = High     |
+  | TEMP_FAULT_N | PSTOP_MCU | CE_CTL | Derived nets (`PSTOP_CTL`, `PSTOP`) | Chip pins (`/CE`, `PSTOP`) |
+  |--------------|-----------|--------|-------------------------------------|----------------------------|
+  | 1 (正常)     | 1         | 1      | `PSTOP_CTL` = 1, `PSTOP` = Low      | `/CE` = Low, PSTOP = Low   |
+  | 1 (正常)     | 0         | 1      | `PSTOP_CTL` = 0, `PSTOP` = High     | `/CE` = Low, PSTOP = High  |
+  | 0 (过温)     | 1         | 1      | `PSTOP_CTL` = 0, `PSTOP` = High     | `/CE` = Low, PSTOP = High  |
+  | 0 (过温)     | 0         | 1      | `PSTOP_CTL` = 0, `PSTOP` = High     | `/CE` = Low, PSTOP = High  |
 
-- Safety rule: any stop/pause/fault/dropout path must end with `PSTOP_CTL = Low` (chip `PSTOP = High`).
+- Safety rule: any stop/pause/fault/dropout path在固件层都必须落到 `PSTOP_MCU = 0`（从而 `PSTOP_CTL = 0`, 芯片 `PSTOP = High`）。
 
 ## 3) 4‑LED Signaling Rules (3 s base cycle)
 
@@ -117,7 +121,7 @@ Notes: LED tasks do not synchronize phases across colors; each keeps its own 3 s
 - Outside balancing: do not sample cell metrics every second anymore.
 - During charging: sample cell voltages every 30 s to decide entering balancing and whether to pause charging.
 - During balancing: allow ~1 s cadence to control balancing switches and termination.
-- Pause‑charge semantics: keep the charging session/regs, but set `PSTOP_CTL = High` to stop the power stage. Resume based on state‑machine policy (temp, delta‑V, EOC, timers, etc.).
+- Pause‑charge semantics: keep the charging session/regs, but set `PSTOP_CTL = Low` (chip `PSTOP = High`) to stop the power stage. Resume based on state‑machine policy (temp, delta‑V, EOC, timers, etc.).
 
 ### 5.1 Imbalance recovery (low‑V, high ΔV)
 
@@ -135,7 +139,7 @@ Notes: LED tasks do not synchronize phases across colors; each keeps its own 3 s
 
 - Accept dropouts: SC8815/BQ76920 I²C failures and absent I2C1 host.
 - Threshold: 3 consecutive I²C transaction failures for a device → dropout.
-- Mandatory action: if BQ76920 hits the threshold, ensure `PSTOP_CTL = High` (power stage stopped).
+- Mandatory action: if BQ76920 hits the threshold, ensure `PSTOP_CTL = Low` (chip `PSTOP = High`, power stage stopped).
 - Indication: corresponding LED enters 1 Hz blink; state machine falls back to a conservative branch.
 
 ## 7) Event‑Driven Global State Machine
@@ -209,7 +213,7 @@ controls, and telemetry loops that underpin bring-up.
   and whenever no SC8815 activity is required. The firmware asserts it low only
   when the charger must be configured, telemetry must be sampled from the
   SC8815, or charging is actively commanded.
-- **PSTOP (PA9)**: Active-high gate for the SC8815 power stage. Remains high
+- **PSTOP_MCU (PA9, firmware label `PSTOP_CTL`)**: MCU-side “stop request” for the SC8815 power stage. When `PSTOP_MCU = 1` and `TEMP_FAULT_N = 1`, hardware derives `PSTOP_CTL = 1` and, after board inversion, chip `PSTOP = Low` (power allowed). If either `PSTOP_MCU = 0` or `TEMP_FAULT_N = 0`, then `PSTOP_CTL = 0` and chip `PSTOP = High` (forced stop).
   until charger programming succeeds and stays an emergency kill path for any
   detected charger fault.
 - **EXIT_SHIPMODE (PA1)**: Push-pull GPIO used to wake the BQ76920 from ship

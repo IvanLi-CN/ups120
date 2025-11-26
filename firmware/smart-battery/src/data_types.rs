@@ -38,7 +38,7 @@ pub struct Sc8815Measurements {
 #[derive(Copy, Clone, PartialEq, Default)]
 pub struct Sc8815Alerts {
     pub device_status: SC8815Status,
-    /// Firmware currently requests the charger to be active (CE low, PSTOP low).
+    /// Firmware currently requests the charger to be active (CE_CTL high -> chip `/CE` low, PSTOP_CTL high -> chip `PSTOP` low).
     pub expected_charging: bool,
     /// Filtered SC8815 telemetry confirms measurable charge current.
     pub charging_confirmed: bool,
