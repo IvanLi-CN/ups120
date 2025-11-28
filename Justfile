@@ -35,6 +35,21 @@ sb-build:
 sb-flash: sb-build
 	just agentd flash stm32 ../../target/thumbv6m-none-eabi/release/smart-battery
 
+sb-build-ship:
+	set -eu; \
+	cd firmware/smart-battery; \
+	TARGET_DIR=${CARGO_TARGET_DIR:-$(pwd)/../../target}; \
+	PROBE_ADDR=${PROBE_ADDR:-$([ -x ../../scripts/ensure_stm32_probe.sh ] && ../../scripts/ensure_stm32_probe.sh || echo "")}; \
+	DEFMT_LOG=${DEFMT_LOG:-info}; \
+	CARGO_TARGET_DIR="$TARGET_DIR" PROBE_ADDR="$PROBE_ADDR" DEFMT_LOG="$DEFMT_LOG" cargo build --release --target thumbv6m-none-eabi --features ship-mode
+
+sb-flash-ship: sb-build-ship
+	just agentd flash stm32 ../../target/thumbv6m-none-eabi/release/smart-battery
+
+sb-run-ship:
+	just sb-flash-ship
+	just sb-monitor
+
 sb-reset:
 	just agentd reset stm32
 
