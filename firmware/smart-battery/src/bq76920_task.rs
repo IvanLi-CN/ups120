@@ -550,6 +550,17 @@ pub async fn bq76920_task(args: Bq76920TaskArgs) {
 
                     // Evaluate pack-level conditions
                     let pack_voltage_mv = core_meas.total_voltage_mv;
+                    let pack_current_ma = core_meas.current_ma;
+
+                    if LOG_CELL_DELTA {
+                        // Log pack-level voltage and current at INFO level when detailed
+                        // cell delta logging is enabled so that we can correlate SC8815
+                        // readings, PSU input power and BQ76920 pack-side measurements.
+                        info!(
+                            "bq:meas vb={}mV ibat={}mA",
+                            pack_voltage_mv, pack_current_ma
+                        );
+                    }
                     let uv_fault = core_meas.system_status.0.contains(SysStatFlags::UV);
                     let ov_fault = core_meas.system_status.0.contains(SysStatFlags::OV);
                     let scd_fault = core_meas.system_status.0.contains(SysStatFlags::SCD);
