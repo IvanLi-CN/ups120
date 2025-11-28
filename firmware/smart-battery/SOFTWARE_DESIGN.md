@@ -12,7 +12,7 @@ This document is the single source of truth for the smart‑battery firmware des
   - `PB1`  = `ALERT` (EXTI1)
   - `PB2`  = `INNER_INT` (EXTI2)
 - I²C
-  - I2C2 (INNER): `PB10=SCL`, `PB11=SDA` (BQ76920 @0x08, SC8815 @0x11)
+  - I2C2 (INNER): `PB10=SCL`, `PB11=SDA` (BQ76920 @0x08, SC8815 @0x11, TMP75A @0x48)
   - I2C1 (OUTER, slave): `PB6=SCL`, `PB7=SDA`, `PB5=SMBA`
 - LED (4 pcs, 1→4 = Red, Yellow, Green, Blue) — all as plain GPIO outputs (no timers)
   - LED1 (Red)   → `PA5`  (`LEDK1`, GPIO Out)  ← change `.ioc` from `S_TIM2_CH1` to `GPIO Output`
@@ -196,8 +196,8 @@ controls, and telemetry loops that underpin bring-up.
 - **I2C2 – INNER bus (PB10/PB11)**: Operated at 100 kHz with DMA1_CH4/CH5 and
   serviced through the shared I2C2 interrupts. A global `StaticCell` stores the
   bus so multiple async drivers can borrow it via `embassy-embedded-hal`
-  shared-bus mutexes. Both the BQ76920 (fixed `0x08`) and SC8815 (`0x11`) ride
-  this bus.
+  shared-bus mutexes. The BQ76920 (fixed `0x08`), SC8815 (`0x11`) and TMP75A
+  (`0x48`) all ride this bus.
 - **I2C1 – OUTER bus (external host interface)**: Configured as 7‑bit I²C slave
   to allow a system host (MCU/SoC) to query pack telemetry and command limited
   charging control. I²C1 is used because it supports wake‑from‑STOP on address
@@ -243,12 +243,19 @@ controls, and telemetry loops that underpin bring-up.
    - On success, spawn the asynchronous `bq76920_task`, which keeps verifying the
      pack, manages FET states, and publishes telemetry.
 
-## 11) Temperature Sensing (SC8815 ADIN) & Protection Policy
+## 11) Temperature Sensing (Legacy SC8815 ADIN) & Protection Policy
 
-Goal: provide a robust temperature‑based power‑stage protection using the SC8815
-ADC input `ADIN` and the on‑board NTC network shown in the schematic (R23=43 kΩ
-to `VCC_SC`, NTC=10 kΩ 3380 K to GND, C32=100 nF to GND at the divider mid‑node
-→ `ADIN`).
+Note: on current production boards the NTC/ADIN network is **not populated** and
+the firmware build sets `DISABLE_ADIN_TEMP = true` to bypass all ADIN‑based
+gating. This section documents the original NTC/ADIN‑based policy and remains
+as a reference for potential future board spins that re‑enable ADIN. For the
+active temperature sensor and over‑temperature window on current hardware, see
+section 12 (TMP75AIDGKR).
+
+Goal (legacy design): provide a temperature‑based power‑stage protection using
+the SC8815 ADC input `ADIN` and the on‑board NTC network shown in the schematic
+(R23=43 kΩ to `VCC_SC`, NTC=10 kΩ 3380 K to GND, C32=100 nF to GND at the
+divider mid‑node → `ADIN`).
 
 Design facts and constraints (updated)
 
@@ -759,3 +766,103 @@ flowchart TD
   L4 -- Yes --> Lfull[Solid on] --> Lend
   L4 -- No --> Lidle[Off] --> Lend
 ```
+
+## 12) TMP75AIDGKR Hardware Over‑Temperature Window (55 °C / 45 °C)
+
+Design intent
+
+- Provide a **purely hardware** over‑temperature cut‑off for the SC8815 power stage using the on‑board TMP75AIDGKR (`U12`), independent of firmware logic.
+- Hard‑stop the charger whenever the local board temperature exceeds **55 °C**, and only allow hardware to release this stop once the temperature falls below **45 °C**.
+- Replace the legacy SC8815‑ADIN (NTC) based temperature policy on current boards
+  and implement a two‑stage protection scheme using TMP75:
+  - Hardware window: 55 °C trip / 45 °C release (TEMP_FAULT_N → PSTOP hard stop).
+  - Software window: 50 °C / 40 °C / 0 °C thresholds for soft gating of `PSTOP_MCU`
+    (see “Software temperature policy (TMP75‑based)” below).
+
+Relevant hardware connections (netlist summary)
+
+- TMP75AIDGKR (`U12`) pins:
+  - `1` → `INNER_SDA`
+  - `2` → `INNER_SCL`
+  - `3` → `TEMP_FAULT_N` (open‑drain alert output, external pull‑up via `R58` to 3.3 V)
+  - `4..7` → `BGND` (A2/A1/A0 all tied low)
+  - `8` → `3V3`
+- I²C parameters:
+  - Bus: `I2C2` (INNER, shared with BQ76920 @ `0x08` and SC8815 @ `0x11`).
+  - TMP75A 7‑bit address: `0x48` (`1001_000`, with A2=A1=A0=0).
+- Alert → charger gating chain (from hardware docs):
+  - `TEMP_FAULT_N` high = temperature within window; low = over‑temperature.
+  - `PSTOP_CTL = TEMP_FAULT_N · PSTOP_MCU` (U22 = SN74AUP1G08DCKR).
+  - Board‑level inversion (`BOARD_INV`) drives SC8815: `PSTOP = ¬PSTOP_CTL`.
+  - Result: if `TEMP_FAULT_N = 0` **or** `PSTOP_MCU = 0`, then SC8815 `PSTOP = High` (power stage forced stop).
+
+TMP75 configuration (firmware obligations)
+
+- Configure once during smart‑battery initialization on the INNER I²C bus:
+  - Mode: **comparator / window mode** (`TM = 0`), not interrupt/latch mode.
+  - Alert polarity: **active‑low** (`POL = 0`), open‑drain (matches `TEMP_FAULT_N` semantics).
+  - Conversion: 12‑bit resolution, continuous conversion.
+  - Fault queue: use a small queue (e.g. 4 consecutive faults) to suppress single‑sample glitches.
+- Program the window registers:
+  - `THIGH = 55 °C` (over‑temperature trip point).
+  - `TLOW = 45 °C` (hardware release point, providing 10 °C hysteresis).
+  - Use the TMP75 temperature format (0.0625 °C/LSB, signed) when encoding values; exact bit‑level mapping lives in the driver.
+- Optional but recommended:
+  - Provide a `read_temperature()` helper to read the TMP75 temperature register for diagnostics and logging.
+  - Log the configured window (THIGH/TLOW in °C and raw register values) once at boot for bench verification.
+
+Resulting behavior (normative)
+
+- Over‑temperature (>55 °C region):
+  - TMP75 detects temperature above `THIGH` and drives `TEMP_FAULT_N` **low**.
+  - Hardware derives `PSTOP_CTL = 0` regardless of `PSTOP_MCU`.
+  - After board inversion, SC8815 sees `PSTOP = High` and the power stage is **forced off**.
+  - Firmware **cannot** override this; any attempt to re‑enable the power stage while `TEMP_FAULT_N = 0` is vetoed by hardware.
+- Cool‑down (<45 °C region):
+  - TMP75 keeps `TEMP_FAULT_N` low until temperature drops below `TLOW = 45 °C`.
+  - Once `TEMP_FAULT_N` returns high, hardware allows `PSTOP_CTL = PSTOP_MCU` again.
+  - The SC8815 power stage only resumes if firmware explicitly sets `PSTOP_MCU = 1` and all other safety conditions are satisfied.
+- In‑between region (45–55 °C):
+  - TMP75 behavior is determined by its internal comparator hysteresis; with the programmed window, this becomes the gray zone between trip and release.
+  - Firmware uses TMP75 temperature readings (not ADIN) to implement additional
+    **soft** over‑temperature and low‑temperature gating thresholds.
+
+Software temperature policy (TMP75‑based, replaces ADIN logic)
+
+- Temperature source: TMP75 local board temperature (°C), sampled in the
+  SC8815 charger task.
+- High‑temperature soft stop:
+  - While the charger power stage is running, if `T ≥ 50 °C` for at least two
+    consecutive samples, firmware immediately stops the power stage via
+    `PSTOP_MCU = 0`, marks `sc_temp_pause_active = true`, and records a “HOT”
+    cause with a time stamp.
+  - This is strictly below the hardware 55 °C trip, so soft logic should engage
+    first under normal conditions.
+- Cool‑down resume (HOT path):
+  - After a HOT stop, once `T ≤ 40 °C` for at least two consecutive samples and
+    a 10‑second dwell window (`TMP_RESUME_DELAY_MS`) has elapsed, firmware
+    clears `sc_temp_pause_active` and allows the charger to resume (subject to
+    other pause conditions).
+- Low‑temperature inhibit:
+  - If `T ≤ 0 °C` for at least two consecutive samples, firmware latches a
+    “cold pause” (`cold_latch_active = true`) that prevents charging until the
+    pack warms back above 0 °C.
+  - Resume from cold: once `T > 0 °C` for at least two consecutive samples,
+    firmware clears the cold latch and allows charging to resume.
+- Dwell window:
+  - A one‑shot 10‑second dwell window is applied after any run→stop edge so
+    that temperature‑driven resumes are not evaluated immediately after the
+    power stage stops (mirrors the legacy ADIN settle window, but now applied
+    purely in time, not via 3 V/5 V ADC mappings).
+
+Scope and non‑goals
+
+- On current production hardware, TMP75 is the **only** board‑level temperature
+  sensor used by the charger logic; the SC8815 ADIN+NTC network is not
+  populated and the corresponding code path is considered legacy (see §11).
+- The charger control logic and LED codes remain as defined elsewhere in this
+  document; TMP75 only influences the “temperature pause” dimension (soft) and
+  the hard 55 °C/45 °C window.
+- Future work (if needed) may:
+  - Allow the host (via I2C1) to adjust THIGH/TLOW within a constrained range.
+  - Incorporate TMP75 readings into higher‑level derating policies (e.g. pre‑emptive pause before 55 °C).

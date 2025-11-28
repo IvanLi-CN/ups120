@@ -38,6 +38,7 @@ static_cell = "2.1.0"
 portable-atomic = { version = "1.11.0", features = ["critical-section"] }
 heapless = { version = "0.9.1", default-features = false }
 critical-section = "1.1"
+embedded-hal-async = { version = "1.0.0", default-features = false }
 ## binrw not required in firmware (avoid pulling alloc)
 
 cortex-m = { version = "0.7.7", features = [

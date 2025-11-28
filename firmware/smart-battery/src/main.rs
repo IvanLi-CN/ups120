@@ -21,6 +21,8 @@ mod leds4_task;
 mod sc8815_task;
 #[cfg(not(feature = "ship-mode"))]
 mod state_bits;
+#[cfg(not(feature = "ship-mode"))]
+mod tmp75;
 // scheduler removed (合并到 failsafe + SC 路径)
 #[cfg(not(feature = "ship-mode"))]
 mod shared;
@@ -405,6 +407,7 @@ async fn main(_spawner: Spawner) {
             .subscriber()
             .expect("Allocate BQ76920 measurements subscriber");
         let i2c_dev_for_sc = I2cDevice::new(i2c_bus);
+        let tmp75_i2c = I2cDevice::new(i2c_bus);
         let balancing_cv_sub = balancing_cv_chan
             .subscriber()
             .expect("Allocate BalancingCv subscriber for charger task");
@@ -413,6 +416,7 @@ async fn main(_spawner: Spawner) {
                 ce_ctl: ce,
                 pstop_ctl: pstop,
                 i2c_device: i2c_dev_for_sc,
+                tmp75_i2c,
                 address: sc8815_task::SC8815_DEFAULT_ADDRESS,
                 sc8815_alerts_publisher: sc8815_alerts_pub,
                 sc8815_measurements_publisher: sc8815_meas_pub,

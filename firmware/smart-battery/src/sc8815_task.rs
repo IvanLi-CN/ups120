@@ -15,6 +15,7 @@ use crate::shared::{
     BalancingCvRequestSubscriber, Bq76920MeasurementsSubscriber, Sc8815AlertsPublisher,
     Sc8815MeasurementsPublisher,
 };
+use crate::tmp75::{TMP75_DEFAULT_ADDR, Tmp75};
 use crate::{
     charger_control::{self, ChargeSpeedSetting, limits_for},
     state_bits::{self, bits as sbits, pause_bits},
@@ -72,22 +73,19 @@ fn pack_status_bits(status: &SC8815Status) -> u8 {
         | ((status.vbus_short_fault as u8) << 4)
 }
 
-// SC8815 ADIN temperature policy constants (see SOFTWARE_DESIGN.md §11)
-// Run-mode (power stage enabled): VCC_SC≈5V on this board → 50°C code≈220
-const ADIN_CODE_HOT_STOP_5V: u16 = 220; // 50°C @5V
-// Stop-mode (power stage stopped): use 3V mapping for resume/cold after settle
-const ADIN_CODE_RESUME_3V: u16 = 178; // 40°C @3V
-const ADIN_CODE_COLD_3V: u16 = 593; // 0°C  @3V
+// TMP75-based temperature policy constants (software layer; hardware 55/45°C
+// window is configured separately, see SOFTWARE_DESIGN.md §12).
+// High-temperature soft stop threshold (charger running).
+const TMP_SOFT_HOT_STOP_C: i16 = 50; // °C
+// Cool‑down resume threshold after a HOT stop.
+const TMP_SOFT_RESUME_C: i16 = 40; // °C
+// Low‑temperature inhibit threshold.
+const TMP_SOFT_COLD_C: i16 = 0; // °C
 // Tuning knobs (kept conservative after verification)
-const ADIN_CODE_MARGIN: u16 = 2; // ±2 codes tolerance
-const ADIN_DEBOUNCE_SAMPLES: u8 = 2; // consecutive samples
-// After asserting PSTOP (stop power stage), allow VCC_SC to drop to its low rail
-// before evaluating stop-mode (3V) thresholds to avoid immediate RESUME chatter.
-const VCCSC_DROP_MS: u32 = 10_000; // settle window; tuned per bench (10 s)
-const ENABLE_ADIN_SNAP: bool = false; // disable per-sample log to save flash
-const DISABLE_ADIN_TEMP: bool = true; // board rev without ADIN NTC; bypass ADIN-based temp gating
-
-// (Note) Removed LUT helpers to minimize footprint; thresholds use precomputed codes.
+const TMP_TEMP_MARGIN_C: i16 = 0; // °C; can be adjusted if needed
+const TMP_DEBOUNCE_SAMPLES: u8 = 2; // consecutive samples
+// Optional dwell time after a temperature stop before evaluating resume/cold.
+const TMP_RESUME_DELAY_MS: u32 = 10_000; // 10 s, mirroring legacy ADIN settle window
 
 // Local alias for the concrete I2C device type used by this task.
 type I2cDev = I2cDevice<
@@ -345,11 +343,8 @@ struct GateReport {
 pub struct Sc8815TaskArgs {
     pub ce_ctl: Output<'static>,
     pub pstop_ctl: Output<'static>,
-    pub i2c_device: I2cDevice<
-        'static,
-        CriticalSectionRawMutex,
-        I2c<'static, embassy_stm32::mode::Async, embassy_stm32::i2c::mode::Master>,
-    >,
+    pub i2c_device: I2cDev,
+    pub tmp75_i2c: I2cDev,
     pub address: u8,
     pub sc8815_alerts_publisher: Sc8815AlertsPublisher<'static>,
     pub sc8815_measurements_publisher: Sc8815MeasurementsPublisher<'static>,
@@ -396,6 +391,7 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
         mut ce_ctl,
         mut pstop_ctl,
         i2c_device,
+        tmp75_i2c,
         address,
         sc8815_alerts_publisher,
         sc8815_measurements_publisher,
@@ -441,10 +437,10 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
     let mut imbalance_cycle_start_vmin_mv: i32 = 0;
     // 来自 BQ 的温度暂停请求（通过 BalancingCvRequest 下发）
     let mut temp_pause_cmd: bool = false;
-    // 来自 SC8815 ADIN 的温度暂停（本任务计算）
+    // 来自 TMP75 的温度暂停（本任务计算，软逻辑；55/45°C 窗口由硬件比较器直接控制）
     let mut sc_temp_pause_active: bool = false;
     let mut sc_temp_pause_prev: bool = false; // for edge logs
-    let mut sc_overtemp_adin: bool = false; // indication-only flag
+    let mut sc_overtemp_adin: bool = false; // TMP75_soft_overtemp indication-only flag
     let mut last_temp_stop_ms: u32 = 0; // when HOT asserted
     let mut last_temp_stop_cause_hot: bool = false; // distinguish HOT vs COLD pause cause
     let mut cold_latch_active: bool = false; // latch low-temp until >=0°C after settle
@@ -479,6 +475,31 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
 
     // Log de-noising latch for pause state changes only
     let mut last_pause_report: Option<(bool, bool)> = None; // (ov_pause_active, imbalance_recovery_active)
+    // TMP75 temperature sensor on INNER bus (hardware 55/45°C window is configured here).
+    let mut tmp75 = Tmp75::new(tmp75_i2c, TMP75_DEFAULT_ADDR);
+    let mut tmp75_online: bool = false;
+    let mut last_tmp75_temp_c: i16 = 25; // nominal start; overwritten on first successful read
+
+    // Configure TMP75 comparator/window mode and 55/45°C hardware window.
+    if let Err(_e) = tmp75.init_comparator_mode().await {
+        warn!("tmp75:init_fail");
+    } else if let Err(_e) = tmp75.set_window_celsius(55, 45).await {
+        warn!("tmp75:window_fail");
+    } else {
+        // Diagnostic read-back: confirm config and window as seen by the device.
+        match tmp75.read_config().await {
+            Ok(cfg) => defmt::info!("tmp75:cfg=0x{:02X}", cfg),
+            Err(_e) => warn!("tmp75:cfg_read_fail"),
+        }
+        match tmp75.read_window_celsius().await {
+            Ok((thigh, tlow)) => {
+                defmt::info!("tmp75:window thigh={}C tlow={}C", thigh, tlow);
+            }
+            Err(_e) => warn!("tmp75:window_read_fail"),
+        }
+        tmp75_online = true;
+    }
+
     // quiesce INT mode: no probe state needed
     // dropout counters omitted in this step to keep flash within limits
     // Boot probe: unconditionally attempt to initialize SC8815 once at power-up
@@ -1322,119 +1343,120 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                         sc_comm_fail_streak = 0;
                         // ok
 
-                        // --- Temperature policy via ADIN ---
-                        let adin_mv = measurements.adin_mv;
-                        // code ≈ V/2mV - 1, clamp at 0
-                        let adin_code: u16 = adin_mv.saturating_div(2).saturating_sub(1);
-                        // 档位选择：功率级运行→5V，停机→3V（窗口后评估）。
+                        // --- Temperature policy via TMP75 (software layer) ---
                         latest_adc_snapshot = Some(measurements);
 
-                        if DISABLE_ADIN_TEMP {
-                            // Board revision without ADIN NTC: bypass ADIN temperature gating
+                        if !tmp75_online {
+                            // Sensor unavailable: keep hardware TMP75 window as the only guard.
                             sc_temp_pause_active = false;
                             sc_overtemp_adin = false;
                             hot_hits = 0;
                             cold_hits = 0;
                             cool_hits = 0;
                             cold_latch_active = false;
-                        } else if charger_active {
-                            // Running：按板上实际→ VCC_SC≈5V，采用 5V 映射阈值
-                            let hot_code = ADIN_CODE_HOT_STOP_5V;
-                            if adin_code <= hot_code.saturating_add(ADIN_CODE_MARGIN) {
-                                hot_hits = hot_hits.saturating_add(1);
-                            } else {
-                                hot_hits = 0;
-                            }
-                            sc_overtemp_adin = hot_hits >= ADIN_DEBOUNCE_SAMPLES;
-                            if sc_overtemp_adin {
-                                // Enter temperature pause: stop power stage immediately
-                                if let Some(s) = sc8815_session.as_mut() {
-                                    s.disable_power_stage();
-                                }
-                                charger_active = false;
-                                charge_confirmed = false;
-                                confirm_streak = 0;
-                                drop_streak = 0;
-                                sc_temp_pause_active = true;
-                                last_temp_stop_ms = now_ms;
-                                last_temp_stop_cause_hot = true;
-                                hot_hits = 0;
-                                if !sc_temp_pause_prev {
-                                    defmt::warn!("HOT a={} c={}", adin_mv, adin_code);
-                                }
-                            }
                         } else {
-                            // Stopped: wait for VCC_SC to drop before 3V-mapped checks
-                            let elapsed_ms = now_ms.saturating_sub(last_temp_stop_ms);
-                            if last_temp_stop_ms != 0 && elapsed_ms < VCCSC_DROP_MS {
-                                // Hold: do not evaluate resume yet; keep paused
-                                cold_hits = 0;
-                                cool_hits = 0;
-                                sc_temp_pause_active = true;
-                                sc_overtemp_adin = false;
-                                // fall through to end of branch
-                            } else {
-                                // Per requirement use 3V mapping for resume/cold
-                                sc_overtemp_adin = false; // 指示仅在运行态考虑
-                                // Too-cold inhibit (≤0°C): 3V code≥593
-                                if adin_code >= ADIN_CODE_COLD_3V.saturating_sub(ADIN_CODE_MARGIN) {
-                                    cold_hits = cold_hits.saturating_add(1);
-                                } else {
-                                    cold_hits = 0;
+                            // Read latest temperature (°C); on error, mark sensor offline
+                            match tmp75.read_temperature_c().await {
+                                Ok(t_c) => {
+                                    last_tmp75_temp_c = t_c;
+                                    // Temporary diagnostics: log board temperature seen by TMP75.
+                                    defmt::info!("tmp75:T={}C", t_c);
                                 }
-                                if cold_hits >= ADIN_DEBOUNCE_SAMPLES {
-                                    sc_temp_pause_active = true; // latch pause while too cold
-                                    cold_latch_active = true;
-                                    last_temp_stop_cause_hot = false;
-                                    if !sc_temp_pause_prev {
-                                        defmt::warn!("COLD a={} c>={}", adin_mv, ADIN_CODE_COLD_3V);
-                                    }
+                                Err(_e) => {
+                                    tmp75_online = false;
+                                    warn!("tmp75:read_fail");
                                 }
+                            }
 
-                                // Resume path depends on cause:
-                                if cold_latch_active {
-                                    // cold latch: release when >=0°C (3V code <593)
-                                    if adin_code
-                                        < ADIN_CODE_COLD_3V.saturating_sub(ADIN_CODE_MARGIN)
-                                    {
-                                        cool_hits = cool_hits.saturating_add(1);
+                            if tmp75_online {
+                                let temp_c = last_tmp75_temp_c;
+
+                                if charger_active {
+                                    // Running: check for HOT soft-stop (≥50°C).
+                                    let hot_threshold = TMP_SOFT_HOT_STOP_C - TMP_TEMP_MARGIN_C;
+                                    if temp_c >= hot_threshold {
+                                        hot_hits = hot_hits.saturating_add(1);
                                     } else {
-                                        cool_hits = 0;
+                                        hot_hits = 0;
                                     }
-                                    if cool_hits >= ADIN_DEBOUNCE_SAMPLES {
-                                        cold_latch_active = false;
-                                        sc_temp_pause_active = false;
-                                        cool_hits = 0;
-                                        sc_diag!(
-                                            "RESUME_COLD a={} c<{}",
-                                            adin_mv,
-                                            ADIN_CODE_COLD_3V
-                                        );
-                                    }
-                                } else if last_temp_stop_cause_hot {
-                                    // hot stop: release when ≤40°C (3V code ≥178)
-                                    if adin_code
-                                        >= ADIN_CODE_RESUME_3V.saturating_sub(ADIN_CODE_MARGIN)
-                                    {
-                                        cool_hits = cool_hits.saturating_add(1);
-                                    } else {
-                                        cool_hits = 0;
-                                    }
-                                    if cool_hits >= ADIN_DEBOUNCE_SAMPLES {
-                                        sc_temp_pause_active = false;
-                                        last_temp_stop_cause_hot = false;
-                                        cool_hits = 0;
-                                        sc_diag!("RESUME a={} c>={}", adin_mv, ADIN_CODE_RESUME_3V);
+                                    sc_overtemp_adin = hot_hits >= TMP_DEBOUNCE_SAMPLES;
+                                    if sc_overtemp_adin {
+                                        // Enter temperature pause: stop power stage immediately
+                                        if let Some(s) = sc8815_session.as_mut() {
+                                            s.disable_power_stage();
+                                        }
+                                        charger_active = false;
+                                        charge_confirmed = false;
+                                        confirm_streak = 0;
+                                        drop_streak = 0;
+                                        sc_temp_pause_active = true;
+                                        last_temp_stop_ms = now_ms;
+                                        last_temp_stop_cause_hot = true;
+                                        hot_hits = 0;
+                                        if !sc_temp_pause_prev {
+                                            defmt::warn!("HOT tmp75={}C", temp_c);
+                                        }
                                     }
                                 } else {
-                                    // No ADIN cause remains and settle window is over → resume
-                                    if sc_temp_pause_active {
-                                        sc_temp_pause_active = false;
-                                        sc_diag!(
-                                            "RESUME_WIN a={} c={} (no-cause)",
-                                            adin_mv,
-                                            adin_code
-                                        );
+                                    // Stopped: optional dwell, then evaluate cold inhibit and resume.
+                                    let elapsed_ms = now_ms.saturating_sub(last_temp_stop_ms);
+                                    if last_temp_stop_ms != 0 && elapsed_ms < TMP_RESUME_DELAY_MS {
+                                        // Hold: do not evaluate resume yet; keep paused
+                                        cold_hits = 0;
+                                        cool_hits = 0;
+                                        sc_temp_pause_active = true;
+                                        sc_overtemp_adin = false;
+                                    } else {
+                                        sc_overtemp_adin = false; // indication only while running
+                                        // Too-cold inhibit (≤0°C)
+                                        if temp_c <= TMP_SOFT_COLD_C + TMP_TEMP_MARGIN_C {
+                                            cold_hits = cold_hits.saturating_add(1);
+                                        } else {
+                                            cold_hits = 0;
+                                        }
+                                        if cold_hits >= TMP_DEBOUNCE_SAMPLES {
+                                            sc_temp_pause_active = true; // latch pause while too cold
+                                            cold_latch_active = true;
+                                            last_temp_stop_cause_hot = false;
+                                            if !sc_temp_pause_prev {
+                                                defmt::warn!("COLD tmp75={}C", temp_c);
+                                            }
+                                        }
+
+                                        // Resume path depends on cause:
+                                        if cold_latch_active {
+                                            // cold latch: release when >=0°C
+                                            if temp_c > TMP_SOFT_COLD_C + TMP_TEMP_MARGIN_C {
+                                                cool_hits = cool_hits.saturating_add(1);
+                                            } else {
+                                                cool_hits = 0;
+                                            }
+                                            if cool_hits >= TMP_DEBOUNCE_SAMPLES {
+                                                cold_latch_active = false;
+                                                sc_temp_pause_active = false;
+                                                cool_hits = 0;
+                                                sc_diag!("RESUME_COLD tmp75={}C", temp_c);
+                                            }
+                                        } else if last_temp_stop_cause_hot {
+                                            // hot stop: release when ≤40°C
+                                            if temp_c <= TMP_SOFT_RESUME_C + TMP_TEMP_MARGIN_C {
+                                                cool_hits = cool_hits.saturating_add(1);
+                                            } else {
+                                                cool_hits = 0;
+                                            }
+                                            if cool_hits >= TMP_DEBOUNCE_SAMPLES {
+                                                sc_temp_pause_active = false;
+                                                last_temp_stop_cause_hot = false;
+                                                cool_hits = 0;
+                                                sc_diag!("RESUME tmp75={}C", temp_c);
+                                            }
+                                        } else {
+                                            // No temperature cause remains and dwell is over → resume
+                                            if sc_temp_pause_active {
+                                                sc_temp_pause_active = false;
+                                                sc_diag!("RESUME_WIN tmp75={}C (no-cause)", temp_c);
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -1650,12 +1672,12 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                 );
             }
         }
-        // One-shot 10 s settle window after any run→stop edge (no stacking)
+        // One-shot 10 s dwell window after any run→stop edge (no stacking)
         if charger_active_prev && !charger_active {
             let now_ms_edge = embassy_time::Instant::now().as_millis() as u32;
             // Only start window if a previous window is not active
             if last_temp_stop_ms == 0
-                || now_ms_edge.saturating_sub(last_temp_stop_ms) >= VCCSC_DROP_MS
+                || now_ms_edge.saturating_sub(last_temp_stop_ms) >= TMP_RESUME_DELAY_MS
             {
                 last_temp_stop_ms = now_ms_edge;
                 sc_diag!("temp: WIN_START edge");
