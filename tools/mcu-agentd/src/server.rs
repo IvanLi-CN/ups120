@@ -416,12 +416,45 @@ fn stop_monitor_bg(paths: &Paths, mcu: &McuKind) -> Result<()> {
     for pf in [&pid_file, &legacy] {
         if let Ok(pid_txt) = std::fs::read_to_string(pf) {
             if let Ok(pid_num) = pid_txt.trim().parse::<i32>() {
-                let _ = kill(Pid::from_raw(pid_num), Signal::SIGTERM);
+                let pid = Pid::from_raw(pid_num);
+                // First ask the background monitor to exit.
+                let _ = kill(pid, Signal::SIGTERM);
+
+                // Best-effort wait for the process to actually terminate so that
+                // the underlying USB probe is released before we start a new
+                // flash/reset operation. Otherwise probe-rs may fail with
+                // "could not be opened for exclusive access".
+                for _ in 0..10 {
+                    match kill(pid, None) {
+                        Ok(_) => {
+                            // Process still alive, give it a bit more time.
+                            std::thread::sleep(Duration::from_millis(50));
+                        }
+                        Err(_) => {
+                            // Any error (including ESRCH when the process has
+                            // already exited) means there is nothing useful to
+                            // wait for.
+                            break;
+                        }
+                    }
+                }
             }
         }
         let _ = std::fs::remove_file(pf);
     }
     Ok(())
+}
+
+fn session_has_usb_claim_error(path: &PathBuf) -> bool {
+    if let Ok(text) = std::fs::read_to_string(path) {
+        let needles = [
+            "could not be opened for exclusive access",
+            "interfaces are claimed",
+        ];
+        needles.iter().any(|n| text.contains(n))
+    } else {
+        false
+    }
 }
 
 async fn flash_mcu(
@@ -434,11 +467,11 @@ async fn flash_mcu(
     // free port from auto monitor first
     stop_monitor_bg(paths, mcu)?;
 
-    let cmd = match mcu {
+    let res = match mcu {
         McuKind::Esp32 => {
             let port = require_port(paths, McuKind::Esp32)?;
-            let mut c = Command::new("espflash");
-            c.arg("flash")
+            let mut cmd = Command::new("espflash");
+            cmd.arg("flash")
                 .arg(elf)
                 .arg("--chip")
                 .arg("esp32s3")
@@ -449,21 +482,33 @@ async fn flash_mcu(
                     AfterPolicy::NoReset => "no-reset",
                     AfterPolicy::HardReset => "hard-reset",
                 });
-            c
+            run_mcu_cmd(paths, mcu, ts, cmd).await?
         }
         McuKind::Stm32 => {
             let probe = require_port(paths, McuKind::Stm32)?;
-            let mut c = Command::new("probe-rs");
-            c.arg("download")
-                .arg("--chip")
-                .arg("STM32L051C8Tx")
-                .arg("--probe")
-                .arg(probe)
-                .arg(elf);
-            c
+            // Retry STM32 flash when probe-rs reports the USB interface is busy.
+            let mut attempt = 0usize;
+            loop {
+                let mut cmd = Command::new("probe-rs");
+                cmd.arg("download")
+                    .arg("--chip")
+                    .arg("STM32L051C8Tx")
+                    .arg("--probe")
+                    .arg(probe.clone())
+                    .arg(elf);
+                let res = run_mcu_cmd(paths, mcu, ts, cmd).await?;
+                if res.status == 0
+                    || attempt >= 2
+                    || !session_has_usb_claim_error(&res.session_file)
+                {
+                    break res;
+                }
+                attempt += 1;
+                // Give the OS/probe a bit of time to release the USB interfaces.
+                tokio::time::sleep(Duration::from_millis(300)).await;
+            }
         }
     };
-    let res = run_mcu_cmd(paths, mcu, ts, cmd).await?;
     write_meta(paths, mcu, ts, "flash", &res)?;
 
     // restart auto monitor
@@ -481,29 +526,40 @@ async fn flash_mcu(
 async fn reset_mcu(paths: &Paths, mcu: &McuKind, ts: &Timestamp) -> Result<serde_json::Value> {
     stop_monitor_bg(paths, mcu)?;
 
-    let cmd = match mcu {
+    let res = match mcu {
         McuKind::Esp32 => {
             let port = require_port(paths, McuKind::Esp32)?;
-            let mut c = Command::new("espflash");
-            c.arg("reset")
+            let mut cmd = Command::new("espflash");
+            cmd.arg("reset")
                 .arg("--chip")
                 .arg("esp32s3")
                 .arg("--port")
                 .arg(port);
-            c
+            run_mcu_cmd(paths, mcu, ts, cmd).await?
         }
         McuKind::Stm32 => {
             let probe = require_port(paths, McuKind::Stm32)?;
-            let mut c = Command::new("probe-rs");
-            c.arg("reset")
-                .arg("--chip")
-                .arg("STM32L051C8Tx")
-                .arg("--probe")
-                .arg(probe);
-            c
+            // Retry STM32 reset on transient USB/probe busy errors.
+            let mut attempt = 0usize;
+            loop {
+                let mut cmd = Command::new("probe-rs");
+                cmd.arg("reset")
+                    .arg("--chip")
+                    .arg("STM32L051C8Tx")
+                    .arg("--probe")
+                    .arg(probe.clone());
+                let res = run_mcu_cmd(paths, mcu, ts, cmd).await?;
+                if res.status == 0
+                    || attempt >= 2
+                    || !session_has_usb_claim_error(&res.session_file)
+                {
+                    break res;
+                }
+                attempt += 1;
+                tokio::time::sleep(Duration::from_millis(300)).await;
+            }
         }
     };
-    let res = run_mcu_cmd(paths, mcu, ts, cmd).await?;
     write_meta(paths, mcu, ts, "reset", &res)?;
 
     let _ = start_monitor_bg(paths, mcu, None).await;
