@@ -39,15 +39,10 @@ const ITERM_EXIT_MULTIPLIER_X10: u16 = 12;
 const FULL_ENTER_SECS: u32 = 60;
 const FULL_EXIT_SECS: u32 = 10;
 
-// SC8815 behaviour toggles (for bring-up / diagnostics)
 // When false, firmware will ignore SC8815 EOC for terminating the session.
+// This allows debugging and tuning around EOC behaviour without causing
+// repeated start/stop cycles in edge cases (e.g. no battery attached).
 const ENABLE_SC_EOC_TERMINATION: bool = false;
-
-// Soft-start parameters (derived from SC8815 + board configuration)
-// IBAT limit requests must be >=300mA per driver API.
-const SOFTSTART_MIN_IBAT_MA: u16 = 300;
-// Step interval is 500ms → 1 LSB (~47mA) every 0.5s.
-const SOFTSTART_STEP_INTERVAL_MS: u32 = 500;
 
 // Logging/diagnostics verbosity for SC8815 task
 const ENABLE_SC8815_DIAG: bool = false;
@@ -72,81 +67,6 @@ fn log_adapter_event(tag: char, hold_secs: u8, ac_present: bool, manual_override
         ac_present,
         manual_override
     );
-}
-
-// Map IBAT ratio enum to the multiplier used in SC8815 formulas.
-#[inline(always)]
-fn ibat_ratio_multiplier(ratio: IbatRatio) -> u32 {
-    match ratio {
-        IbatRatio::Ratio6x => 6,
-        IbatRatio::Ratio12x => 12,
-    }
-}
-
-// Compute DAC "y" (IBAT_LIM_SET + 1) from a requested IBAT limit in mA.
-// Mirrors sc8815::driver::SC8815::set_ibat_limit quantization logic.
-#[inline(always)]
-fn ibat_step_for_limit(limit_ma: u16, ratio: IbatRatio, rs2_mohm: u16) -> Option<u8> {
-    if limit_ma < SOFTSTART_MIN_IBAT_MA || rs2_mohm == 0 {
-        return None;
-    }
-    let ratio_mul = ibat_ratio_multiplier(ratio);
-    let num = (limit_ma as u32)
-        .saturating_mul(256u32)
-        .saturating_mul(rs2_mohm as u32);
-    let den = 1000u32.saturating_mul(ratio_mul).saturating_mul(10u32);
-    if den == 0 {
-        return None;
-    }
-    let y = num / den; // floor
-    if y == 0 || y > 256 {
-        return None;
-    }
-    Some(y as u8)
-}
-
-// Compute an IBAT request in mA that quantizes exactly to the given DAC step y,
-// is within [SOFTSTART_MIN_IBAT_MA, target_limit_ma], and is realizable by hardware.
-#[inline(always)]
-fn ibat_req_ma_for_step(
-    y: u8,
-    ratio: IbatRatio,
-    rs2_mohm: u16,
-    target_limit_ma: u16,
-) -> Option<u16> {
-    if rs2_mohm == 0 {
-        return None;
-    }
-    let ratio_mul = ibat_ratio_multiplier(ratio);
-    let k_num = 256u32.saturating_mul(rs2_mohm as u32);
-    let k_den = 1000u32.saturating_mul(ratio_mul).saturating_mul(10u32);
-    if k_den == 0 {
-        return None;
-    }
-
-    let y_u32 = y as u32;
-    let num_min = y_u32.saturating_mul(k_den);
-    let num_max = (y_u32 + 1).saturating_mul(k_den).saturating_sub(1);
-
-    // ceil(num_min / k_num)
-    let mut limit_min = num_min.saturating_add(k_num.saturating_sub(1)) / k_num;
-    // floor(num_max / k_num)
-    let limit_max = num_max / k_num;
-
-    if limit_min > limit_max {
-        return None;
-    }
-
-    if limit_min < SOFTSTART_MIN_IBAT_MA as u32 {
-        limit_min = SOFTSTART_MIN_IBAT_MA as u32;
-    }
-
-    let target_u32 = target_limit_ma as u32;
-    if target_u32 < limit_min {
-        return None;
-    }
-    let clamped = core::cmp::min(target_u32, limit_max);
-    Some(clamped as u16)
 }
 
 #[inline(always)]
@@ -213,13 +133,6 @@ struct ScSession {
     ibat_ratio: IbatRatio,
     rs1_mohm: u16,
     rs2_mohm: u16,
-}
-
-#[derive(Copy, Clone, PartialEq, Eq)]
-enum ChargePhase {
-    Idle,
-    SoftStart,
-    Normal,
 }
 
 // SC8815 INT → 事件通知（EXTI 边沿触发后唤醒本任务查询状态）
@@ -552,12 +465,6 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
     let mut full_exit_ms: u32 = 0;
     let mut full_latched: bool = false;
     let mut applied_speed = charger_control::current_speed();
-    let mut charge_phase = ChargePhase::Idle;
-    let mut softstart_y_start: u8 = 0;
-    let mut softstart_y_cur: u8 = 0;
-    let mut softstart_y_target: u8 = 0;
-    let mut softstart_next_step_deadline_ms: u32 = 0;
-    let mut softstart_target_ibat_ma: u16 = 0;
     let mut last_status_snapshot: Option<SC8815Status> = None;
     let mut last_adapter_logged: Option<bool> = None;
     let mut last_adapter_log_ms: u32 = 0;
@@ -643,12 +550,6 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
             }
             charger_active = false;
             charge_confirmed = false;
-            charge_phase = ChargePhase::Idle;
-            softstart_y_start = 0;
-            softstart_y_cur = 0;
-            softstart_y_target = 0;
-            softstart_next_step_deadline_ms = 0;
-            softstart_target_ibat_ma = 0;
         }
         // 全局“静默”策略：当 AC 不在时，停靠会话并仅依赖 INT 事件，不再轮询。
         if crate::failsafe::is_quiesced() {
@@ -669,12 +570,6 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
             charge_confirmed = false;
             confirm_streak = 0;
             drop_streak = 0;
-            charge_phase = ChargePhase::Idle;
-            softstart_y_start = 0;
-            softstart_y_cur = 0;
-            softstart_y_target = 0;
-            softstart_next_step_deadline_ms = 0;
-            softstart_target_ibat_ma = 0;
             _adapter_present = false;
             full_latched = false;
             full_enter_ms = 0;
@@ -723,20 +618,6 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
         if control_snapshot.speed != applied_speed {
             applied_speed = control_snapshot.speed;
             if let Some(sess) = sc8815_session.as_mut() {
-                if charge_phase == ChargePhase::SoftStart {
-                    // Abort any in-progress soft-start when speed tier changes.
-                    sess.disable_power_stage();
-                    charger_active = false;
-                    charge_confirmed = false;
-                    confirm_streak = 0;
-                    drop_streak = 0;
-                    charge_phase = ChargePhase::Idle;
-                    softstart_y_start = 0;
-                    softstart_y_cur = 0;
-                    softstart_y_target = 0;
-                    softstart_next_step_deadline_ms = 0;
-                    softstart_target_ibat_ma = 0;
-                }
                 if sess.apply_speed(applied_speed).await.is_err() {
                     warn!("sc:speed_apply_fail");
                 }
@@ -757,12 +638,6 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
             charge_confirmed = false;
             confirm_streak = 0;
             drop_streak = 0;
-            charge_phase = ChargePhase::Idle;
-            softstart_y_start = 0;
-            softstart_y_cur = 0;
-            softstart_y_target = 0;
-            softstart_next_step_deadline_ms = 0;
-            softstart_target_ibat_ma = 0;
         }
 
         if let Some(bq_meas) = latest_bq_measurements.as_ref() {
@@ -797,12 +672,6 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                 charge_confirmed = false;
                 confirm_streak = 0;
                 drop_streak = 0;
-                charge_phase = ChargePhase::Idle;
-                softstart_y_start = 0;
-                softstart_y_cur = 0;
-                softstart_y_target = 0;
-                softstart_next_step_deadline_ms = 0;
-                softstart_target_ibat_ma = 0;
             } else if pack_voltage_mv >= PACK_CHARGE_STOP_THRESHOLD_MV {
                 if !latest_bal_req.require_cv {
                     sc_diag!(
@@ -821,12 +690,6 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                     charge_confirmed = false;
                     confirm_streak = 0;
                     drop_streak = 0;
-                    charge_phase = ChargePhase::Idle;
-                    softstart_y_start = 0;
-                    softstart_y_cur = 0;
-                    softstart_y_target = 0;
-                    softstart_next_step_deadline_ms = 0;
-                    softstart_target_ibat_ma = 0;
                 }
             } else if critical_fault {
                 if charger_active {
@@ -859,12 +722,6 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                 charge_confirmed = false;
                 confirm_streak = 0;
                 drop_streak = 0;
-                charge_phase = ChargePhase::Idle;
-                softstart_y_start = 0;
-                softstart_y_cur = 0;
-                softstart_y_target = 0;
-                softstart_next_step_deadline_ms = 0;
-                softstart_target_ibat_ma = 0;
                 if ov_pause_secs == 0 {
                     ov_pause_secs = 180;
                     // ov cooldown start
@@ -964,12 +821,6 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                             charge_confirmed = false;
                             confirm_streak = 0;
                             drop_streak = 0;
-                            charge_phase = ChargePhase::Idle;
-                            softstart_y_start = 0;
-                            softstart_y_cur = 0;
-                            softstart_y_target = 0;
-                            softstart_next_step_deadline_ms = 0;
-                            softstart_target_ibat_ma = 0;
                             imbalance_phase_charge = false;
                             imbalance_phase_deadline_ms = now_ms.saturating_add(120_000);
                             defmt::info!("sc:imb rec rest spread={}mV vmin={}", spread, min_v);
@@ -1035,12 +886,6 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                         charge_confirmed = false;
                         confirm_streak = 0;
                         drop_streak = 0;
-                        charge_phase = ChargePhase::Idle;
-                        softstart_y_start = 0;
-                        softstart_y_cur = 0;
-                        softstart_y_target = 0;
-                        softstart_next_step_deadline_ms = 0;
-                        softstart_target_ibat_ma = 0;
                         imbalance_recovery_active = false;
                         imbalance_phase_charge = false;
                         imbalance_cycle_count = 0;
@@ -1058,12 +903,6 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                     charge_confirmed = false;
                     confirm_streak = 0;
                     drop_streak = 0;
-                    charge_phase = ChargePhase::Idle;
-                    softstart_y_start = 0;
-                    softstart_y_cur = 0;
-                    softstart_y_target = 0;
-                    softstart_next_step_deadline_ms = 0;
-                    softstart_target_ibat_ma = 0;
                 }
 
                 // Charge start conditions (edge-logged)
@@ -1192,12 +1031,6 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                                 charge_confirmed = false;
                                 confirm_streak = 0;
                                 drop_streak = 0;
-                                charge_phase = ChargePhase::Idle;
-                                softstart_y_start = 0;
-                                softstart_y_cur = 0;
-                                softstart_y_target = 0;
-                                softstart_next_step_deadline_ms = 0;
-                                softstart_target_ibat_ma = 0;
                                 // Backoff to avoid rapid re-init thrash when init fails
                                 if adapter_holdoff_secs < 5 {
                                     adapter_holdoff_secs = 5;
@@ -1208,8 +1041,7 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                         }
                     }
 
-                    // Now that the chip is configured and ADC running, (conditionally) enable power
-                    // stage and enter soft-start when all gating conditions allow.
+                    // Now that the chip is configured and ADC running, (conditionally) enable power stage
                     if ov_pause_secs == 0
                         && uv_pause_secs == 0
                         && oc_pause_secs == 0
@@ -1218,77 +1050,17 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                         && !sc_temp_pause_active
                     {
                         if let Some(sess) = sc8815_session.as_mut() {
-                            let limits = limits_for(control_snapshot.speed);
-                            if let (Some(y_start), Some(y_target)) = (
-                                ibat_step_for_limit(
-                                    SOFTSTART_MIN_IBAT_MA,
-                                    sess.ibat_ratio,
-                                    sess.rs2_mohm,
-                                ),
-                                ibat_step_for_limit(
-                                    limits.ibat_limit_ma,
-                                    sess.ibat_ratio,
-                                    sess.rs2_mohm,
-                                ),
-                            ) {
-                                // Ensure IBUS limit matches selected speed.
-                                let _ = sess
-                                    .sc
-                                    .set_ibus_limit(
-                                        limits.ibus_limit_ma,
-                                        sess.ibus_ratio.into(),
-                                        sess.rs1_mohm,
-                                    )
-                                    .await;
-                                // Start IBAT at the nominal 300mA soft-start floor.
-                                let _ = sess
-                                    .sc
-                                    .set_ibat_limit(
-                                        SOFTSTART_MIN_IBAT_MA,
-                                        sess.ibat_ratio.into(),
-                                        sess.rs2_mohm,
-                                    )
-                                    .await;
-
-                                softstart_y_start = y_start;
-                                softstart_y_cur = y_start;
-                                softstart_y_target = y_target;
-                                softstart_target_ibat_ma = limits.ibat_limit_ma;
-                                let now_ms_ss = embassy_time::Instant::now().as_millis() as u32;
-                                softstart_next_step_deadline_ms =
-                                    now_ms_ss.wrapping_add(SOFTSTART_STEP_INTERVAL_MS);
-                                charge_phase = ChargePhase::SoftStart;
-
-                                sess.enable_power_stage();
-                                defmt::info!(
-                                    "sc:ss start vb={}mV speed={} y0={} yt={}",
-                                    pack_voltage_mv,
-                                    control_snapshot.speed as u8,
-                                    softstart_y_start,
-                                    softstart_y_target
-                                );
-                                charger_active = true;
-                                // leaving pause state → clear last pause report
-                                last_pause_report = None;
-                            } else {
-                                // Fallback: if DAC derivation fails, fall back to legacy direct start.
-                                let _ = sess.apply_speed(control_snapshot.speed).await;
-                                sess.enable_power_stage();
-                                defmt::warn!(
-                                    "sc:ss fallback vb={}mV speed={}",
-                                    pack_voltage_mv,
-                                    control_snapshot.speed as u8
-                                );
-                                charger_active = true;
-                                charge_phase = ChargePhase::Normal;
-                                softstart_y_start = 0;
-                                softstart_y_cur = 0;
-                                softstart_y_target = 0;
-                                softstart_next_step_deadline_ms = 0;
-                                softstart_target_ibat_ma = 0;
-                                last_pause_report = None;
-                            }
+                            let _ = sess.apply_speed(control_snapshot.speed).await;
+                            sess.enable_power_stage();
+                            defmt::info!(
+                                "sc:start vb={}mV speed={}",
+                                pack_voltage_mv,
+                                control_snapshot.speed as u8
+                            );
                         }
+                        charger_active = true;
+                        // leaving pause state → clear last pause report
+                        last_pause_report = None;
                     } else {
                         if let Some(sess) = sc8815_session.as_mut() {
                             sess.disable_power_stage();
@@ -1333,79 +1105,7 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                             last_pause_report = Some(pause_sig);
                         }
                         charger_active = false;
-                        charge_phase = ChargePhase::Idle;
-                        softstart_y_start = 0;
-                        softstart_y_cur = 0;
-                        softstart_y_target = 0;
-                        softstart_next_step_deadline_ms = 0;
-                        softstart_target_ibat_ma = 0;
                     }
-                }
-            }
-        }
-
-        // Soft-start ramp: when in SoftStart phase with an active session and charger,
-        // step IBAT limit by one DAC LSB every SOFTSTART_STEP_INTERVAL_MS.
-        if charge_phase == ChargePhase::SoftStart && charger_active && sc8815_session.is_some() {
-            if let Some(sess) = sc8815_session.as_mut() {
-                let now_ms = embassy_time::Instant::now().as_millis() as u32;
-                if softstart_y_cur < softstart_y_target && now_ms >= softstart_next_step_deadline_ms
-                {
-                    let next_y = softstart_y_cur.saturating_add(1);
-                    if let Some(req_ma) = ibat_req_ma_for_step(
-                        next_y,
-                        sess.ibat_ratio,
-                        sess.rs2_mohm,
-                        softstart_target_ibat_ma,
-                    ) {
-                        match sess
-                            .sc
-                            .set_ibat_limit(req_ma, sess.ibat_ratio.into(), sess.rs2_mohm)
-                            .await
-                        {
-                            Ok(()) => {
-                                softstart_y_cur = next_y;
-                                softstart_next_step_deadline_ms = softstart_next_step_deadline_ms
-                                    .wrapping_add(SOFTSTART_STEP_INTERVAL_MS);
-                            }
-                            Err(_e) => {
-                                warn!("sc:ss_step_fail");
-                                sess.disable_power_stage();
-                                charger_active = false;
-                                charge_confirmed = false;
-                                confirm_streak = 0;
-                                drop_streak = 0;
-                                charge_phase = ChargePhase::Idle;
-                                softstart_y_start = 0;
-                                softstart_y_cur = 0;
-                                softstart_y_target = 0;
-                                softstart_next_step_deadline_ms = 0;
-                                softstart_target_ibat_ma = 0;
-                            }
-                        }
-                    } else {
-                        warn!("sc:ss_step_invalid");
-                        sess.disable_power_stage();
-                        charger_active = false;
-                        charge_confirmed = false;
-                        confirm_streak = 0;
-                        drop_streak = 0;
-                        charge_phase = ChargePhase::Idle;
-                        softstart_y_start = 0;
-                        softstart_y_cur = 0;
-                        softstart_y_target = 0;
-                        softstart_next_step_deadline_ms = 0;
-                        softstart_target_ibat_ma = 0;
-                    }
-                }
-
-                if softstart_y_cur >= softstart_y_target {
-                    charge_phase = ChargePhase::Normal;
-                    defmt::info!(
-                        "sc:ss done y={} ibat_target={}mA",
-                        softstart_y_cur,
-                        softstart_target_ibat_ma
-                    );
                 }
             }
         }
@@ -1421,7 +1121,6 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                 {
                     Ok(Ok(status)) => {
                         sc_fault_flag = status.otp_fault || status.vbus_short_fault;
-                        let prev_eoc = last_status_eoc;
                         last_status_eoc = status.eoc;
                         // status fetched
                         // 更新 AC 静默策略
@@ -1468,12 +1167,6 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                                 charge_confirmed = false;
                                 confirm_streak = 0;
                                 drop_streak = 0;
-                                charge_phase = ChargePhase::Idle;
-                                softstart_y_start = 0;
-                                softstart_y_cur = 0;
-                                softstart_y_target = 0;
-                                softstart_next_step_deadline_ms = 0;
-                                softstart_target_ibat_ma = 0;
                                 adapter_holdoff_secs = adapter_holdoff_secs.max(5);
                                 full_latched = false;
                                 full_enter_ms = 0;
@@ -1540,7 +1233,7 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                             }
                         }
 
-                        // EOC: log always; optionally terminate charging session per configuration.
+                        // EOC: always log; optionally terminate charging session per configuration.
                         if status.eoc {
                             let (vb_mv_eoc, ibat_ma_eoc) =
                                 if let Some(meas) = latest_adc_snapshot.as_ref() {
@@ -1548,19 +1241,14 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                                 } else {
                                     (0, 0)
                                 };
-                            let phase_code = match charge_phase {
-                                ChargePhase::Idle => 'I',
-                                ChargePhase::SoftStart => 'S',
-                                ChargePhase::Normal => 'N',
-                            };
                             defmt::info!(
-                                "sc:eoc vb={}mV ibat={}mA active={} phase={}",
+                                "sc:eoc vb={}mV ibat={}mA active={}",
                                 vb_mv_eoc,
                                 ibat_ma_eoc,
-                                charger_active,
-                                phase_code
+                                charger_active
                             );
                             if ENABLE_SC_EOC_TERMINATION {
+                                sc_diag!("eoc");
                                 pause_cause_bits |= pause_bits::EOC_FULL;
                                 if let Some(sess) = sc8815_session.take() {
                                     let (ce_back, pstop_back, i2c_back) = sess.end().await;
@@ -1572,12 +1260,6 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                                 charge_confirmed = false;
                                 confirm_streak = 0;
                                 drop_streak = 0;
-                                charge_phase = ChargePhase::Idle;
-                                softstart_y_start = 0;
-                                softstart_y_cur = 0;
-                                softstart_y_target = 0;
-                                softstart_next_step_deadline_ms = 0;
-                                softstart_target_ibat_ma = 0;
                                 full_latched = true;
                                 full_exit_ms = 0;
                                 full_enter_ms = FULL_ENTER_SECS * 1000;
@@ -1615,12 +1297,6 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                             charge_confirmed = false;
                             confirm_streak = 0;
                             drop_streak = 0;
-                            charge_phase = ChargePhase::Idle;
-                            softstart_y_start = 0;
-                            softstart_y_cur = 0;
-                            softstart_y_target = 0;
-                            softstart_next_step_deadline_ms = 0;
-                            softstart_target_ibat_ma = 0;
                             refresh_state_flags(StateFlagsCtx {
                                 ac_present: _adapter_present,
                                 sc_active: false,
@@ -1651,12 +1327,6 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                         charge_confirmed = false;
                         confirm_streak = 0;
                         drop_streak = 0;
-                        charge_phase = ChargePhase::Idle;
-                        softstart_y_start = 0;
-                        softstart_y_cur = 0;
-                        softstart_y_target = 0;
-                        softstart_next_step_deadline_ms = 0;
-                        softstart_target_ibat_ma = 0;
                         sc_comm_fail_streak = sc_comm_fail_streak.saturating_add(1);
                         if sc_comm_fail_streak >= 3 {
                             crate::failsafe::set_sc_online(false);
@@ -1677,12 +1347,6 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                     charge_confirmed = false;
                     confirm_streak = 0;
                     drop_streak = 0;
-                    charge_phase = ChargePhase::Idle;
-                    softstart_y_start = 0;
-                    softstart_y_cur = 0;
-                    softstart_y_target = 0;
-                    softstart_next_step_deadline_ms = 0;
-                    softstart_target_ibat_ma = 0;
                 }
             }
 
@@ -1744,12 +1408,6 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                                         charge_confirmed = false;
                                         confirm_streak = 0;
                                         drop_streak = 0;
-                                        charge_phase = ChargePhase::Idle;
-                                        softstart_y_start = 0;
-                                        softstart_y_cur = 0;
-                                        softstart_y_target = 0;
-                                        softstart_next_step_deadline_ms = 0;
-                                        softstart_target_ibat_ma = 0;
                                         sc_temp_pause_active = true;
                                         last_temp_stop_ms = now_ms;
                                         last_temp_stop_cause_hot = true;
@@ -1973,7 +1631,7 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
             last_expected_log = Some(charger_active);
         }
 
-        if last_confirmed_log != Some(charger_active) {
+        if last_confirmed_log != Some(charge_confirmed) {
             if let Some(meas) = latest_adc_snapshot {
                 defmt::info!(
                     "sc:meas vb={}mV ibus={}mA ibat={}mA active={} conf={}",
@@ -1983,8 +1641,14 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                     charger_active,
                     charge_confirmed
                 );
+            } else {
+                defmt::info!(
+                    "sc:meas vb=? ibus=? ibat=? active={} conf={}",
+                    charger_active,
+                    charge_confirmed
+                );
             }
-            last_confirmed_log = Some(charger_active);
+            last_confirmed_log = Some(charge_confirmed);
         }
 
         // 100ms 节拍 → 每 1 秒递减 *_secs 计时器
@@ -2021,7 +1685,7 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
             }
         }
         // Periodic SC8815 ADC snapshot for runtime correlation while charging.
-        // Gated to active/confirmed charging to avoid flooding logs when idle.
+        // Gated to active/confirmed charging to avoid flooding logs when idle or AC-only.
         if snapshot_due && (charger_active || charge_confirmed) {
             if let Some(meas) = latest_adc_snapshot {
                 defmt::info!(
