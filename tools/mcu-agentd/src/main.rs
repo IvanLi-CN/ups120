@@ -15,8 +15,8 @@ use server::Server;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
 use std::time::Instant;
-use tokio::time::sleep;
 use tokio::time::Duration as TokioDuration;
+use tokio::time::sleep;
 
 /// UPS120 agentd – single-instance service to flash/reset/monitor ESP32-S3 & STM32L0.
 #[derive(Parser, Debug)]
@@ -132,12 +132,55 @@ async fn main() -> Result<()> {
             let resp = Server::client_send(ClientRequest::Shutdown).await?;
             println!("{}", serde_json::to_string_pretty(&resp)?);
         }
-        Cmd::Status => match Server::client_send(ClientRequest::Status).await {
-            Ok(resp) => println!("{}", serde_json::to_string_pretty(&resp)?),
-            Err(e) => {
-                eprintln!("status: not running ({e})");
+        Cmd::Status => {
+            // Try to give a more actionable error message instead of a generic "not running".
+            let paths = paths::Paths::new().ok();
+            match Server::client_send(ClientRequest::Status).await {
+                Ok(resp) => println!("{}", serde_json::to_string_pretty(&resp)?),
+                Err(e) => {
+                    if let Some(ioe) = e.downcast_ref::<std::io::Error>() {
+                        use std::io::ErrorKind::*;
+                        if let Some(p) = paths {
+                            let sock = &p.sock;
+                            match ioe.kind() {
+                                NotFound => {
+                                    eprintln!(
+                                        "status: agentd socket {:?} not found: {}.\n  \
+hint: daemon未在运行，或者 logs/agentd 被手动清理导致 sock 丢失；通常可用 `just agentd-start` 重新启动。\n  \
+若你在 daemon 运行时删除了该目录，可能还残留旧的 ups120-agentd 进程，需要先杀掉进程再重启。",
+                                        sock, ioe
+                                    );
+                                }
+                                ConnectionRefused | BrokenPipe | ConnectionReset => {
+                                    eprintln!(
+                                        "status: 无法连接到 agentd {:?}: {} (连接被拒绝/中断)。\n  \
+hint: daemon 正在启动、已崩溃或刚退出，可尝试 `just agentd-start` 重启。",
+                                        sock, ioe
+                                    );
+                                }
+                                PermissionDenied => {
+                                    eprintln!(
+                                        "status: 访问 agentd socket {:?} 权限不足: {}。\n  \
+hint: 检查 logs/agentd 目录以及 sock 文件的所有者与权限。",
+                                        sock, ioe
+                                    );
+                                }
+                                _ => {
+                                    eprintln!(
+                                        "status: 查询 agentd 状态失败 (socket {:?}): {:#}",
+                                        sock, e
+                                    );
+                                }
+                            }
+                        } else {
+                            eprintln!("status: 查询 agentd 状态失败: {:#}", e);
+                        }
+                    } else {
+                        eprintln!("status: 查询 agentd 状态失败: {:#}", e);
+                    }
+                }
             }
-        },
+        }
         Cmd::SetPort { mcu, path } => {
             let mcu_kind: McuKind = mcu.clone().into();
             let p = match path {
@@ -152,7 +195,8 @@ async fn main() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&resp)?);
         }
         Cmd::GetPort { mcu } => {
-            let resp = client_send_with_autostart(ClientRequest::GetPort { mcu: mcu.into() }).await?;
+            let resp =
+                client_send_with_autostart(ClientRequest::GetPort { mcu: mcu.into() }).await?;
             println!("{}", serde_json::to_string_pretty(&resp)?);
         }
         Cmd::Flash { mcu, elf, after } => {
@@ -207,7 +251,12 @@ async fn client_send_with_autostart(req: ClientRequest) -> Result<model::ClientR
             let (is_enoent, is_refused) = match e.downcast_ref::<std::io::Error>() {
                 Some(ioe) => (
                     ioe.kind() == std::io::ErrorKind::NotFound,
-                    matches!(ioe.kind(), std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset),
+                    matches!(
+                        ioe.kind(),
+                        std::io::ErrorKind::ConnectionRefused
+                            | std::io::ErrorKind::BrokenPipe
+                            | std::io::ErrorKind::ConnectionReset
+                    ),
                 ),
                 None => (false, false),
             };
@@ -230,8 +279,9 @@ async fn client_send_with_autostart(req: ClientRequest) -> Result<model::ClientR
                     Err(e) => {
                         return Err(anyhow::anyhow!(
                             "agentd not reachable at {:?}: {}. Try `just agentd-start` or check permissions (logs/agentd).",
-                            sock, e
-                        ))
+                            sock,
+                            e
+                        ));
                     }
                 }
             }

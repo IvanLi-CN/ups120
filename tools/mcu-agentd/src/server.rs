@@ -29,9 +29,6 @@ impl Server {
     pub async fn run() -> Result<()> {
         let paths = Paths::new()?;
         paths.ensure_dirs()?;
-        if paths.sock.exists() {
-            let _ = std::fs::remove_file(&paths.sock);
-        }
         let lock_file = OpenOptions::new()
             .create(true)
             .write(true)
@@ -39,6 +36,13 @@ impl Server {
         lock_file
             .try_lock_exclusive()
             .context("another instance running")?;
+
+        // Only touch the socket file after we successfully acquired the lock,
+        // otherwise a failed second instance would unlink the live daemon's socket
+        // and leave it running but unreachable for new clients.
+        if paths.sock.exists() {
+            let _ = std::fs::remove_file(&paths.sock);
+        }
 
         let clock = Clock::new();
         let listener = UnixListener::bind(&paths.sock)?;
