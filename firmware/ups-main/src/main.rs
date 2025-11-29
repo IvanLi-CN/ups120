@@ -49,6 +49,7 @@ const SB_REG_CHG_CONFIG: u8 = 0x31;
 const SB_REG_CHG_PAUSE_CAUSE: u8 = 0x32;
 const SB_REG_STATE_FLAGS: u8 = 0x20;
 const SB_STATE_FLAG_AC_PRESENT: u16 = 0x0001;
+const SB_CHG_STATUS_BALANCING: u8 = 1 << 5;
 const SB_CFG_BIT_AUTO: u8 = 1 << 0;
 const SB_CFG_BIT_MANUAL: u8 = 1 << 1;
 const SB_CFG_SPEED_SHIFT: u8 = 2;
@@ -65,6 +66,12 @@ const SB_WRITE_RETRY_ATTEMPTS: u8 = 3;
 const SB_WRITE_RETRY_DELAY_MS: u32 = 5;
 const SB_CFG_VERIFY_INTERVAL_MS: u64 = 1_000;
 const SB_STATE_POLL_INTERVAL_MS: u64 = 10_000;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum UiScreen {
+    Dashboard,
+    BattDetail,
+}
 
 fn compose_sb_charge_config(auto: bool, manual: bool, speed_tier: u8) -> u8 {
     let mut value = (speed_tier & 0x03) << SB_CFG_SPEED_SHIFT;
@@ -125,6 +132,13 @@ fn main() -> ! {
     let mut btn_down_state = ButtonState::new(cfg_down, down_initial, boot_millis);
     let mut btn_left_state = ButtonState::new(cfg_left, left_initial, boot_millis);
 
+    // UI navigation state: dashboard vs battery detail, plus blink phase.
+    let mut ui_screen = UiScreen::Dashboard;
+    let mut blink_on = true;
+    let mut blink_elapsed_ms: u32 = 0;
+    let mut prev_down_pressed = btn_down_state.is_pressed();
+    let mut prev_up_pressed = btn_up_state.is_pressed();
+
     info!(
         "Initial button state: center={} up={} right={} down={} left={}",
         center_initial, up_initial, right_initial, down_initial, left_initial
@@ -176,6 +190,8 @@ fn main() -> ! {
     let mut sb_cfg_last_verify_ms = 0u64;
     let mut sb_temp_pause_active = false;
     let mut sb_last_state_poll_ms = 0u64;
+    let mut last_chg_status: Option<u8> = None;
+    let mut last_cells_mv: [Option<u16>; 5] = [None; 5];
     match write_smart_battery_reg_retry(&i2c_bus, &mut delay, SB_REG_CHG_CONFIG, sb_config_value) {
         Ok(()) => info!("smart-battery: config set (manual ctl, tier=0.8A)"),
         Err(()) => warn!("smart-battery: failed to apply charge config"),
@@ -358,6 +374,32 @@ fn main() -> ! {
         btn_right_state.update(now_ms, btn_right.is_low());
         btn_down_state.update(now_ms, btn_down.is_low());
         btn_left_state.update(now_ms, btn_left.is_low());
+
+        // Derive simple edge-triggered navigation events from debounced states.
+        let down_pressed = btn_down_state.is_pressed();
+        let up_pressed = btn_up_state.is_pressed();
+        if down_pressed && !prev_down_pressed {
+            if matches!(ui_screen, UiScreen::Dashboard) {
+                ui_screen = UiScreen::BattDetail;
+                info!("ui: screen -> batt_detail");
+            }
+        }
+        if up_pressed && !prev_up_pressed {
+            if matches!(ui_screen, UiScreen::BattDetail) {
+                ui_screen = UiScreen::Dashboard;
+                info!("ui: screen -> dashboard");
+            }
+        }
+        prev_down_pressed = down_pressed;
+        prev_up_pressed = up_pressed;
+
+        // Blink phase for the battery-detail balancing indicator (~2 Hz, 50% duty).
+        blink_elapsed_ms = blink_elapsed_ms.saturating_add(fan_control::SAMPLE_PERIOD_MS);
+        if blink_elapsed_ms >= 250 {
+            blink_elapsed_ms -= 250;
+            blink_on = !blink_on;
+        }
+
         adin_elapsed_ms = adin_elapsed_ms.saturating_add(fan_control::SAMPLE_PERIOD_MS);
         if adin_elapsed_ms >= 1000 {
             adin_elapsed_ms -= 1000;
@@ -417,6 +459,8 @@ fn main() -> ! {
 
             // Estimate SoC from VBAT (do not probe CELLS_PRESENT at runtime)
             let vbat_mv = read_smart_battery_vbat_mv(&i2c_bus);
+            // Pack current (discharge negative, i16 mA from STM32 smart-battery slave).
+            let ibat_ma = read_smart_battery_ibat_ma(&i2c_bus);
 
             let refresh_in_pg = true;
             if refresh_in_pg {
@@ -562,6 +606,11 @@ fn main() -> ! {
                 } else {
                     warn!("sb:state read CELLS_PRESENT failed");
                 }
+
+                // Cache latest status and per-cell voltages for the UI battery detail page.
+                last_chg_status = status;
+                last_cells_mv = cell_mv;
+
                 // Periodic smart-battery state snapshot; keep at debug level to reduce noise.
                 debug!(
                     "sb:state status=0x{:02x} pause=0x{:02x} flags=0x{:04x}",
@@ -668,6 +717,43 @@ fn main() -> ! {
                     }
                 }
             }
+            // Derive UI mode and pack current magnitude from IBAT.
+            let (ui_mode, pack_i_ma_abs) = match ibat_ma {
+                Some(i) => {
+                    let abs_ma: u32 = if i < 0 { (-i) as u32 } else { i as u32 };
+                    let mode = if abs_ma < 50 {
+                        ui::Mode::Standby
+                    } else if i > 0 {
+                        ui::Mode::Charge
+                    } else {
+                        ui::Mode::Discharge
+                    };
+                    (mode, Some(abs_ma))
+                }
+                None => (ui::Mode::Standby, None),
+            };
+
+            // Best-effort balancing cell index: when the smart-battery reports
+            // "balancing active", highlight the highest-voltage present cell.
+            let balancing_index = if let Some(status) = last_chg_status {
+                if (status & SB_CHG_STATUS_BALANCING) != 0 {
+                    let mut best_idx: Option<usize> = None;
+                    let mut best_mv: u16 = 0;
+                    for (idx, cell_opt) in last_cells_mv.iter().enumerate() {
+                        if let Some(mv) = *cell_opt {
+                            if best_idx.is_none() || mv > best_mv {
+                                best_idx = Some(idx);
+                                best_mv = mv;
+                            }
+                        }
+                    }
+                    best_idx.map(|i| (i + 1) as u8)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
 
             let soc_pct = vbat_mv.map(|v| estimate_soc_from_vbat(v)).unwrap_or(0);
             let uptime_secs = now_millis
@@ -677,7 +763,7 @@ fn main() -> ! {
 
             // Build a minimal dashboard model (real temps + SoC; other fields placeholder)
             let model = ui::DashboardData {
-                mode: ui::Mode::Standby,
+                mode: ui_mode,
                 soc_pct: soc_pct,
                 vbat_mv: vbat_mv,
                 soc_display: if soc_alt_voltage {
@@ -699,7 +785,26 @@ fn main() -> ! {
                 uptime_secs,
                 temp_slot: display_slot,
             };
-            let _ = ui::render_dashboard_once(&mut spi, &mut _cs, &mut _dc, &model);
+
+            // Battery detail view model (reuses most of the same raw inputs).
+            let batt_detail = ui::BattDetailData {
+                mode: ui_mode,
+                pack_v_mv: vbat_mv,
+                pack_i_ma: pack_i_ma_abs,
+                cells_mv: last_cells_mv,
+                balancing_index,
+                temps_c: [pack_temp, charger_temp, adin_temp, None],
+                blink_on,
+            };
+
+            match ui_screen {
+                UiScreen::Dashboard => {
+                    let _ = ui::render_dashboard_once(&mut spi, &mut _cs, &mut _dc, &model);
+                }
+                UiScreen::BattDetail => {
+                    let _ = ui::render_batt_detail_once(&mut spi, &mut _cs, &mut _dc, &batt_detail);
+                }
+            }
         }
     }
 }
@@ -814,6 +919,22 @@ where
     if dev.write_read(STM32_ADDR, &[0x10], &mut vbuf).is_ok() {
         let v = u16::from_le_bytes(vbuf) as u32;
         Some(v)
+    } else {
+        None
+    }
+}
+
+fn read_smart_battery_ibat_ma<'a, I2C, E>(i2c_bus: &'a RefCell<I2C>) -> Option<i32>
+where
+    I2C: embedded_hal::i2c::I2c<Error = E>,
+    E: embedded_hal::i2c::Error,
+{
+    // IBAT is exposed as i16 in milliamps; discharge is negative.
+    let mut dev = RefCellDevice::new(i2c_bus);
+    let mut buf = [0u8; 2];
+    if dev.write_read(STM32_ADDR, &[0x12], &mut buf).is_ok() {
+        let i = i16::from_le_bytes(buf) as i32;
+        Some(i)
     } else {
         None
     }

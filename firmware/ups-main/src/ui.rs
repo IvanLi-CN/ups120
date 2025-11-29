@@ -491,6 +491,22 @@ pub struct DashboardData {
     pub temp_slot: TempSlot,
 }
 
+/// Data model for the battery detail page (accessed via Down from dashboard).
+pub struct BattDetailData {
+    pub mode: Mode,
+    pub pack_v_mv: Option<u32>,
+    /// Pack current magnitude in mA (direction implied by `mode`).
+    pub pack_i_ma: Option<u32>,
+    /// Per-cell voltages in mV (1-based cells mapped to indices 0–4).
+    pub cells_mv: [Option<u16>; 5],
+    /// Optional index (1-based) of the cell currently being balanced.
+    pub balancing_index: Option<u8>,
+    /// Up to four temperature slots; layout is `TEMP a°C b°C c°C d°C`.
+    pub temps_c: [Option<i16>; 4],
+    /// Blink phase for the balancing indicator (true = bright frame).
+    pub blink_on: bool,
+}
+
 fn fmt_voltage(mv: u32, buf: &mut heapless::String<16>) {
     buf.clear();
     let clamped = mv.min(99_990);
@@ -613,6 +629,54 @@ fn mode_text_and_color(mode: Mode) -> (&'static str, Rgb565) {
         Mode::Charge => ("MODE: CHARGE", CYAN),
         Mode::Discharge => ("MODE: DISCHARGE", WHITE),
     }
+}
+
+fn batt_mode_short_text(mode: Mode) -> &'static str {
+    match mode {
+        Mode::Standby => "IDLE",
+        Mode::Charge => "CHG",
+        Mode::Discharge => "DSG",
+    }
+}
+
+fn draw_batt_cell_entry(
+    fb: &mut FrameBuffer,
+    y: u16,
+    col_start: usize,
+    cell_index: u8,
+    value_mv: Option<u16>,
+    balancing_index: Option<u8>,
+    blink_on: bool,
+) {
+    let mut label_buf: heapless::String<4> = heapless::String::new();
+    let _ = write!(&mut label_buf, "{}:", cell_index);
+    let x_label = cell_to_x(col_start);
+    let _ = draw_text(fb, x_label, y, &label_buf, CYAN);
+
+    let mut value_buf: heapless::String<8> = heapless::String::new();
+    let present = if let Some(mv) = value_mv {
+        let _ = write!(&mut value_buf, "{}", mv);
+        true
+    } else {
+        let _ = value_buf.push_str(PLACEHOLDER);
+        false
+    };
+
+    let is_balanced = balancing_index == Some(cell_index);
+    let color = if !present {
+        GRAY
+    } else if is_balanced {
+        if blink_on {
+            ORANGE
+        } else {
+            GRAY
+        }
+    } else {
+        ORANGE
+    };
+
+    let x_val = cell_to_x(col_start + 2);
+    let _ = draw_text(fb, x_val, y, &value_buf, color);
 }
 
 fn draw_soc(fb: &mut FrameBuffer, y: u16, soc: u8) {
@@ -750,6 +814,128 @@ where
             model.ups_temp_c,
             model.fan_pct,
         );
+    });
+    flush_framebuffer(spi, cs, dc)
+}
+
+/// Render the battery detail page:
+/// - Line1: `BAT <CHG|DSG|IDLE> <VV.VV>V <II.I>A`
+/// - Line2: cells 1–3 as `<n>:<mV>`
+/// - Line3: cells 4–5 plus optional `BAL<n>`
+/// - Line4: `TEMP--°C--°C--°C--°C` with optional real values.
+pub fn render_batt_detail_once<SPI, CS, DC>(
+    spi: &mut SPI,
+    cs: &mut CS,
+    dc: &mut DC,
+    model: &BattDetailData,
+) -> Result<(), SPI::Error>
+where
+    SPI: SpiBus<u8>,
+    CS: OutputPin,
+    DC: OutputPin,
+{
+    clear_framebuffer(BLACK);
+    with_framebuffer(|fb| {
+        let y0 = MARGIN_TB;
+        let y1 = MARGIN_TB + LINE_H;
+        let y2 = MARGIN_TB + 2 * LINE_H;
+        let y3 = MARGIN_TB + 3 * LINE_H;
+
+        // ---- Line 1: BAT status + pack voltage/current ----
+        let mut vbuf: heapless::String<16> = heapless::String::new();
+        let mut ibuf: heapless::String<16> = heapless::String::new();
+
+        let mut x = MARGIN_LR;
+        x = draw_text(fb, x, y0, "BAT", CYAN);
+
+        let status = batt_mode_short_text(model.mode);
+        x = draw_text(fb, x + CELL_W, y0, status, CYAN);
+
+        // Pack voltage
+        vbuf.clear();
+        let v_color = if let Some(mv) = model.pack_v_mv {
+            fmt_voltage(mv, &mut vbuf);
+            ORANGE
+        } else {
+            let _ = vbuf.push_str(PLACEHOLDER);
+            GRAY
+        };
+        x = draw_text(fb, x + CELL_W, y0, &vbuf, v_color);
+
+        // Pack current magnitude
+        ibuf.clear();
+        let i_color = if let Some(ma) = model.pack_i_ma {
+            fmt_current(ma, &mut ibuf);
+            RED
+        } else {
+            let _ = ibuf.push_str(PLACEHOLDER);
+            GRAY
+        };
+        let _ = draw_text(fb, x + CELL_W, y0, &ibuf, i_color);
+
+        // ---- Lines 2–3: per-cell voltages + balancing indicator ----
+        // Place three entries per row at columns 0, 6, 12.
+        let cols = [0usize, 6, 12];
+
+        // Cells 1–3 on line 2
+        for (slot, cell_index) in (1u8..=3).enumerate() {
+            let idx = cell_index - 1;
+            draw_batt_cell_entry(
+                fb,
+                y1,
+                cols[slot],
+                cell_index,
+                model.cells_mv[idx as usize],
+                model.balancing_index,
+                model.blink_on,
+            );
+        }
+
+        // Cells 4–5 on line 3
+        for (slot, cell_index) in (4u8..=5).enumerate() {
+            let idx = cell_index - 1;
+            draw_batt_cell_entry(
+                fb,
+                y2,
+                cols[slot],
+                cell_index,
+                model.cells_mv[idx as usize],
+                model.balancing_index,
+                model.blink_on,
+            );
+        }
+
+        // Optional BAL<n> tag on the right of line 3.
+        if let Some(idx) = model.balancing_index {
+            let mut bal_buf: heapless::String<8> = heapless::String::new();
+            let _ = write!(&mut bal_buf, "BAL{}", idx);
+            let bal_color = if model.blink_on { YELLOW } else { GRAY };
+            let x_bal = cell_to_x(cols[2]);
+            let _ = draw_text(fb, x_bal, y2, &bal_buf, bal_color);
+        }
+
+        // ---- Line 4: temperatures ----
+        let mut temp_buf: heapless::String<8> = heapless::String::new();
+        let label_x = cell_to_x(COL_LABEL);
+        let _ = draw_text(fb, label_x, y3, "TEMP", CYAN);
+
+        for (slot_idx, temp) in model.temps_c.iter().enumerate() {
+            // Layout: `TEMP` (4 cells) + 1-cell gap, then 4 cells per temp slot.
+            let start_cell = TEMP_LABEL_CELLS + 1 + slot_idx * TEMP_VALUE_CELLS;
+            let x_digits = cell_to_x(start_cell);
+
+            temp_buf.clear();
+            let (digits_color, c_opt) = if let Some(v) = temp {
+                fmt_temp_digits(*v, &mut temp_buf);
+                (WHITE, Some(*v))
+            } else {
+                let _ = temp_buf.push_str(PLACEHOLDER);
+                (GRAY, None)
+            };
+            let x_after_digits = draw_text(fb, x_digits, y3, &temp_buf, digits_color);
+            let color = if c_opt.is_some() { digits_color } else { GRAY };
+            let _ = draw_celsius(fb, x_after_digits, y3, color);
+        }
     });
     flush_framebuffer(spi, cs, dc)
 }

@@ -112,6 +112,7 @@ impl ButtonConfig {
 ///   remains pressed (see [`ButtonConfig`] for the exact rules).
 pub struct ButtonState {
     cfg: ButtonConfig,
+    /// Debounced logical level (true = pressed).
     stable_pressed: bool,
     last_physical: bool,
     last_bounce_ms: u64,
@@ -137,6 +138,15 @@ impl ButtonState {
             last_click_ms: 0,
             last_repeat_ms: None,
         }
+    }
+
+    /// Return the current debounced logical level of the button.
+    ///
+    /// Higher-level UI layers can use this to derive simple state
+    /// transitions (e.g. screen navigation) without reimplementing
+    /// debouncing or gesture logic.
+    pub fn is_pressed(&self) -> bool {
+        self.stable_pressed
     }
 
     /// Mutable access to the configuration for dynamic tuning at runtime.
