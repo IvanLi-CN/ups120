@@ -3,6 +3,7 @@
 
 mod adin_temp;
 mod batt_est;
+mod button_input;
 mod display;
 mod fan_control;
 mod io_expander;
@@ -11,7 +12,8 @@ mod ui;
 
 use core::cell::RefCell;
 
-use defmt::{info, warn};
+use button_input::{ButtonConfig, ButtonState};
+use defmt::{debug, info, warn};
 use embedded_hal::delay::DelayNs;
 use embedded_hal::i2c::I2c as _; // bring trait into scope for write_read without naming conflict
 use embedded_hal_bus::i2c::RefCellDevice;
@@ -97,11 +99,36 @@ fn main() -> ! {
     // === Restore board bring-up so other subsystems remain functional ===
     // Buttons (internal pull-up, active-low)
     let in_cfg = InputConfig::default().with_pull(Pull::Up);
-    let _btn_center = Input::new(peripherals.GPIO0, in_cfg);
-    let _btn_up = Input::new(peripherals.GPIO1, in_cfg);
-    let _btn_right = Input::new(peripherals.GPIO2, in_cfg);
-    let _btn_down = Input::new(peripherals.GPIO4, in_cfg);
-    let _btn_left = Input::new(peripherals.GPIO5, in_cfg);
+    let btn_center = Input::new(peripherals.GPIO0, in_cfg);
+    let btn_up = Input::new(peripherals.GPIO1, in_cfg);
+    let btn_right = Input::new(peripherals.GPIO2, in_cfg);
+    let btn_down = Input::new(peripherals.GPIO4, in_cfg);
+    let btn_left = Input::new(peripherals.GPIO5, in_cfg);
+
+    // Initialize per-button state machines for debounced/gesture-aware logging.
+    let center_initial = btn_center.is_low();
+    let up_initial = btn_up.is_low();
+    let right_initial = btn_right.is_low();
+    let down_initial = btn_down.is_low();
+    let left_initial = btn_left.is_low();
+
+    // Default configs: long + double enabled for all keys.
+    let cfg_center = ButtonConfig::new("center");
+    let cfg_up = ButtonConfig::new("up");
+    let cfg_right = ButtonConfig::new("right");
+    let cfg_down = ButtonConfig::new("down");
+    let cfg_left = ButtonConfig::new("left");
+
+    let mut btn_center_state = ButtonState::new(cfg_center, center_initial, boot_millis);
+    let mut btn_up_state = ButtonState::new(cfg_up, up_initial, boot_millis);
+    let mut btn_right_state = ButtonState::new(cfg_right, right_initial, boot_millis);
+    let mut btn_down_state = ButtonState::new(cfg_down, down_initial, boot_millis);
+    let mut btn_left_state = ButtonState::new(cfg_left, left_initial, boot_millis);
+
+    info!(
+        "Initial button state: center={} up={} right={} down={} left={}",
+        center_initial, up_initial, right_initial, down_initial, left_initial
+    );
 
     // RESET# to TCA6408A
     let mut _reset_tca = Output::new(peripherals.GPIO6, Level::High, OutputConfig::default());
@@ -321,6 +348,16 @@ fn main() -> ! {
 
     loop {
         controller.tick(&mut delay, sb_temps);
+        // Poll directional buttons once per control loop and feed them into
+        // the debouncing/gesture logic.
+        let now_ms = esp_hal::time::Instant::now()
+            .duration_since_epoch()
+            .as_millis() as u64;
+        btn_center_state.update(now_ms, btn_center.is_low());
+        btn_up_state.update(now_ms, btn_up.is_low());
+        btn_right_state.update(now_ms, btn_right.is_low());
+        btn_down_state.update(now_ms, btn_down.is_low());
+        btn_left_state.update(now_ms, btn_left.is_low());
         adin_elapsed_ms = adin_elapsed_ms.saturating_add(fan_control::SAMPLE_PERIOD_MS);
         if adin_elapsed_ms >= 1000 {
             adin_elapsed_ms -= 1000;
@@ -525,14 +562,15 @@ fn main() -> ! {
                 } else {
                     warn!("sb:state read CELLS_PRESENT failed");
                 }
-                info!(
+                // Periodic smart-battery state snapshot; keep at debug level to reduce noise.
+                debug!(
                     "sb:state status=0x{:02x} pause=0x{:02x} flags=0x{:04x}",
                     status.unwrap_or(0xFF),
                     pause.unwrap_or(0xFF),
                     flags.unwrap_or(0xFFFF)
                 );
                 if let Some(c) = cells_present {
-                    info!(
+                    debug!(
                         "sb:cells n={} mv={:?}",
                         c,
                         [
@@ -750,7 +788,8 @@ where
             let pack_c = temp_from_centi(pack);
             let charger_c = temp_from_centi(charger);
             let temps = fan_control::SmartBatteryTemps::new(pack_c, charger_c);
-            info!(
+            // Keep detailed temperature reporting at debug level to avoid cluttering button logs.
+            debug!(
                 "smart-battery temps => pack={=f32}°C charger={=f32}°C hottest={=f32}°C",
                 pack_c.unwrap_or(f32::NAN),
                 charger_c.unwrap_or(f32::NAN),

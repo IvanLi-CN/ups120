@@ -61,7 +61,9 @@ ups-build:
 	cd firmware/ups-main && cargo build --release
 
 ups-flash: ups-build
-	just agentd flash esp32 ../../target/xtensa-esp32s3-none-elf/release/ups-main
+	# ESP32 ELF is built under firmware/ups-main/target by default
+	# Path is relative to tools/mcu-agentd (see agentd recipe above).
+	just agentd flash esp32 ../../firmware/ups-main/target/xtensa-esp32s3-none-elf/release/ups-main
 
 ups-reset:
 	just agentd reset esp32

@@ -1,4 +1,4 @@
-use defmt::{error, info, warn};
+use defmt::{debug, error, warn};
 use embedded_hal::delay::DelayNs;
 use esp_hal::{
     delay::Delay,
@@ -11,8 +11,11 @@ use esp_hal::{
 
 use crate::tsens;
 
-pub const SAMPLE_PERIOD_MS: u32 = 500;
-const LOG_INTERVAL_TICKS: u8 = 4; // 500 ms * 4 = 2 s
+// Control loop sample period for temperature / fan updates.
+// Kept short so that button polling in the main loop (which runs at
+// the same cadence) can reliably observe human-scale key presses.
+pub const SAMPLE_PERIOD_MS: u32 = 20;
+const LOG_INTERVAL_TICKS: u8 = 100; // 20 ms * 100 ≈ 2 s
 const FILTER_WINDOW: usize = 3;
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -374,8 +377,9 @@ impl<'a> FanController<'a> {
                 let highest_option = temps.highest();
                 let highest_temp = highest_option.unwrap_or(f32::NAN);
                 let highest_valid = highest_option.is_some();
-                info!(
-                    "fan.temps tsens={=f32}°C sb_pack={=f32}°C sb_pack_valid={} sb_charger={=f32}°C sb_charger_valid={} sb_highest={=f32}°C sb_highest_valid={} ctrl={=f32}°C raw={=u8} attr={=u8} delta={=f32}°C duty={=u8}% mode={} vout≈{=f32}V",
+                // Fan telemetry can be verbose; use debug level to avoid cluttering button logs.
+                debug!(
+                    "fan.temps tsens={=f32}°C sb_pack={=f32}°C sb_pack_valid={} sb_charger={=f32}°C sb_charger_valid={} sb_highest={=f32}°C sb_highest_valid={} ctrl={=f32}°C raw={=u8} dac={=u8} delta={=f32}°C duty={=u8}% mode={} vout≈{=f32}V",
                     self.filtered_temp,
                     pack_temp,
                     pack_valid,
