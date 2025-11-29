@@ -548,6 +548,22 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
     }
 
     loop {
+        // 先读取当前充电控制寄存器快照，并更新“手动覆盖”状态，
+        // 再根据 AC/手动状态决定是否进入静默模式。
+        let control_snapshot = charger_control::snapshot();
+        // 现场排查：一次性输出当前充电控制寄存器映射
+        static CTRL_LOGGED: AtomicBool = AtomicBool::new(false);
+        if !CTRL_LOGGED.swap(true, portable_atomic::Ordering::Relaxed) {
+            defmt::info!(
+                "sc:ctrl auto={} manual={} speed={}",
+                control_snapshot.auto_enabled,
+                control_snapshot.manual_enable,
+                control_snapshot.speed as u8
+            );
+        }
+        let manual_override = charger_control::manual_override_active();
+        crate::failsafe::set_manual_override(manual_override);
+
         // 全局 fail-safe：一旦请求，强制功率级停机（PSTOP=高），直到 BQ 成功通信后清除
         if crate::failsafe::is_pstop_requested() {
             if let Some(sess) = sc8815_session.as_mut() {
@@ -558,7 +574,7 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
             charger_active = false;
             charge_confirmed = false;
         }
-        // 全局“静默”策略：当 AC 不在时，停靠会话并仅依赖 INT 事件，不再轮询。
+        // 全局“静默”策略：当 AC 不在且未处于手动充电模式时，停靠会话并仅依赖 INT 事件。
         if crate::failsafe::is_quiesced() {
             if let Some(sess) = sc8815_session.take() {
                 let (ce_back, pstop_back, i2c_back) = sess.end().await;
@@ -609,19 +625,6 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
         // Reset pause cause accumulator each loop
         pause_cause_bits = 0;
 
-        let control_snapshot = charger_control::snapshot();
-        // 现场排查：一次性输出当前充电控制寄存器映射
-        static CTRL_LOGGED: AtomicBool = AtomicBool::new(false);
-        if !CTRL_LOGGED.swap(true, portable_atomic::Ordering::Relaxed) {
-            defmt::info!(
-                "sc:ctrl auto={} manual={} speed={}",
-                control_snapshot.auto_enabled,
-                control_snapshot.manual_enable,
-                control_snapshot.speed as u8
-            );
-        }
-        let manual_override = charger_control::manual_override_active();
-        crate::failsafe::set_manual_override(manual_override);
         if control_snapshot.speed != applied_speed {
             applied_speed = control_snapshot.speed;
             if let Some(sess) = sc8815_session.as_mut() {

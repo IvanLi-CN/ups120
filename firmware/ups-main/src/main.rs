@@ -49,6 +49,8 @@ const SB_REG_CHG_CONFIG: u8 = 0x31;
 const SB_REG_CHG_PAUSE_CAUSE: u8 = 0x32;
 const SB_REG_STATE_FLAGS: u8 = 0x20;
 const SB_STATE_FLAG_AC_PRESENT: u16 = 0x0001;
+// Mirror of STM32 smart-battery state_bits::BALANCING; used for UI overlay.
+const SB_STATE_FLAG_BALANCING: u16 = 1 << 5;
 const SB_CHG_STATUS_BALANCING: u8 = 1 << 5;
 const SB_CFG_BIT_AUTO: u8 = 1 << 0;
 const SB_CFG_BIT_MANUAL: u8 = 1 << 1;
@@ -190,7 +192,7 @@ fn main() -> ! {
     let mut sb_cfg_last_verify_ms = 0u64;
     let mut sb_temp_pause_active = false;
     let mut sb_last_state_poll_ms = 0u64;
-    let mut last_chg_status: Option<u8> = None;
+    let mut last_state_flags: Option<u16> = None;
     let mut last_cells_mv: [Option<u16>; 5] = [None; 5];
     match write_smart_battery_reg_retry(&i2c_bus, &mut delay, SB_REG_CHG_CONFIG, sb_config_value) {
         Ok(()) => info!("smart-battery: config set (manual ctl, tier=0.8A)"),
@@ -393,16 +395,19 @@ fn main() -> ! {
         prev_down_pressed = down_pressed;
         prev_up_pressed = up_pressed;
 
-        // Blink phase for the battery-detail balancing indicator (~2 Hz, 50% duty).
+        // Blink phase for the battery-detail balancing indicator.
+        // UI整体每 1000 ms 重绘一次，所以这里选择 200 ms 作为半周期，
+        // 确保每次重绘都能看到交替的 on/off 状态（1 Hz 可感知闪烁）。
         blink_elapsed_ms = blink_elapsed_ms.saturating_add(fan_control::SAMPLE_PERIOD_MS);
-        if blink_elapsed_ms >= 250 {
-            blink_elapsed_ms -= 250;
+        if blink_elapsed_ms >= 200 {
+            blink_elapsed_ms -= 200;
             blink_on = !blink_on;
         }
 
+        // UI/采样刷新节奏：约 2 Hz（500 ms 一次）
         adin_elapsed_ms = adin_elapsed_ms.saturating_add(fan_control::SAMPLE_PERIOD_MS);
-        if adin_elapsed_ms >= 1000 {
-            adin_elapsed_ms -= 1000;
+        if adin_elapsed_ms >= 500 {
+            adin_elapsed_ms -= 500;
             // advance SoC display alternation (2-second cadence)
             soc_alt_counter = soc_alt_counter.saturating_add(1);
             if soc_alt_counter >= 2 {
@@ -607,8 +612,8 @@ fn main() -> ! {
                     warn!("sb:state read CELLS_PRESENT failed");
                 }
 
-                // Cache latest status and per-cell voltages for the UI battery detail page.
-                last_chg_status = status;
+                // Cache latest state flags and per-cell voltages for the UI battery detail page.
+                last_state_flags = flags;
                 last_cells_mv = cell_mv;
 
                 // Periodic smart-battery state snapshot; keep at debug level to reduce noise.
@@ -655,6 +660,11 @@ fn main() -> ! {
                     }
                 }
             } else if let Some(vbat) = vbat_mv {
+                // Trace current charging decision inputs for现场排查
+                info!(
+                    "charge: decision vin_present={} vbat={}mV manual={} temp_pause={}",
+                    vin_present, vbat, sb_manual_enable, sb_temp_pause_active
+                );
                 if !vin_present {
                     if sb_manual_enable {
                         let desired_config =
@@ -734,9 +744,9 @@ fn main() -> ! {
             };
 
             // Best-effort balancing cell index: when the smart-battery reports
-            // "balancing active", highlight the highest-voltage present cell.
-            let balancing_index = if let Some(status) = last_chg_status {
-                if (status & SB_CHG_STATUS_BALANCING) != 0 {
+            // "balancing active" in STATE_FLAGS, highlight the highest-voltage present cell.
+            let balancing_index = if let Some(flags) = last_state_flags {
+                if (flags & SB_STATE_FLAG_BALANCING) != 0 {
                     let mut best_idx: Option<usize> = None;
                     let mut best_mv: u16 = 0;
                     for (idx, cell_opt) in last_cells_mv.iter().enumerate() {
@@ -787,9 +797,22 @@ fn main() -> ! {
             };
 
             // Battery detail view model (reuses most of the same raw inputs).
+            // Prefer VBAT reading from STM32; if unavailable, fall back to summing per-cell voltages.
+            let pack_v_detail = vbat_mv.or_else(|| {
+                let mut total: u32 = 0;
+                for cell_opt in last_cells_mv.iter() {
+                    if let Some(mv) = *cell_opt {
+                        total = total.saturating_add(mv as u32);
+                    } else {
+                        return None;
+                    }
+                }
+                Some(total)
+            });
+
             let batt_detail = ui::BattDetailData {
                 mode: ui_mode,
-                pack_v_mv: vbat_mv,
+                pack_v_mv: pack_v_detail,
                 pack_i_ma: pack_i_ma_abs,
                 cells_mv: last_cells_mv,
                 balancing_index,

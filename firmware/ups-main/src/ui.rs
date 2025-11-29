@@ -654,6 +654,7 @@ fn draw_batt_cell_entry(
     let _ = draw_text(fb, x_label, y, &label_buf, CYAN);
 
     let mut value_buf: heapless::String<8> = heapless::String::new();
+    // 始终显示电压数值；仅通过颜色变化来表现“闪烁”。
     let present = if let Some(mv) = value_mv {
         let _ = write!(&mut value_buf, "{}", mv);
         true
@@ -666,10 +667,11 @@ fn draw_batt_cell_entry(
     let color = if !present {
         GRAY
     } else if is_balanced {
+        // 被均衡的电芯：在两种颜色之间切换，实现“闪烁”效果。
         if blink_on {
-            ORANGE
+            YELLOW
         } else {
-            GRAY
+            ORANGE
         }
     } else {
         ORANGE
@@ -909,7 +911,8 @@ where
         if let Some(idx) = model.balancing_index {
             let mut bal_buf: heapless::String<8> = heapless::String::new();
             let _ = write!(&mut bal_buf, "BAL{}", idx);
-            let bal_color = if model.blink_on { YELLOW } else { GRAY };
+            // BAL 标签保持恒亮，不随 blink_on 变化，避免干扰电芯电压闪烁的视觉效果。
+            let bal_color = YELLOW;
             let x_bal = cell_to_x(cols[2]);
             let _ = draw_text(fb, x_bal, y2, &bal_buf, bal_color);
         }
