@@ -40,7 +40,8 @@ const RS_PTR_TOTAL_TIMEOUT: Duration = Duration::from_micros(1500);
 static mut REGISTERS: [u8; REG_SPACE] = [0; REG_SPACE];
 static mut REG_PTR: u8 = WINDOW_START;
 
-const ENABLE_I2C_DIAG: bool = false;
+// Enable verbose I2C diagnostics while we investigate host-side read failures.
+const ENABLE_I2C_DIAG: bool = true;
 
 macro_rules! i2c_diag {
     ($($arg:tt)*) => {

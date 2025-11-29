@@ -526,7 +526,7 @@ async fn flash_mcu(
 async fn reset_mcu(paths: &Paths, mcu: &McuKind, ts: &Timestamp) -> Result<serde_json::Value> {
     stop_monitor_bg(paths, mcu)?;
 
-    let res = match mcu {
+    let mut res = match mcu {
         McuKind::Esp32 => {
             let port = require_port(paths, McuKind::Esp32)?;
             let mut cmd = Command::new("espflash");
@@ -548,18 +548,32 @@ async fn reset_mcu(paths: &Paths, mcu: &McuKind, ts: &Timestamp) -> Result<serde
                     .arg("STM32L051C8Tx")
                     .arg("--probe")
                     .arg(probe.clone());
-                let res = run_mcu_cmd(paths, mcu, ts, cmd).await?;
-                if res.status == 0
+                let res_try = run_mcu_cmd(paths, mcu, ts, cmd).await?;
+                if res_try.status == 0
                     || attempt >= 2
-                    || !session_has_usb_claim_error(&res.session_file)
+                    || !session_has_usb_claim_error(&res_try.session_file)
                 {
-                    break res;
+                    break res_try;
                 }
                 attempt += 1;
                 tokio::time::sleep(Duration::from_millis(300)).await;
             }
         }
     };
+
+    // If STM32 reset still reports "interfaces are claimed" after retries, treat this
+    // as a soft success and let the subsequent start_monitor_bg() perform a fresh
+    // probe-rs run, which will reset the MCU anyway. This avoids surfacing a hard
+    // error to the CLI when the only failure is the probe's USB interface claiming.
+    if matches!(mcu, McuKind::Stm32)
+        && res.status != 0
+        && session_has_usb_claim_error(&res.session_file)
+    {
+        eprintln!(
+            "warn: stm32 reset hit USB interface claimed, proceeding with monitor restart"
+        );
+        res.status = 0;
+    }
     write_meta(paths, mcu, ts, "reset", &res)?;
 
     let _ = start_monitor_bg(paths, mcu, None).await;

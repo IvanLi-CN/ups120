@@ -62,6 +62,8 @@ const SOC_EMPTY_VBAT_MV: u32 = 12_500; // Cutoff threshold (pack)
 const SOC_FULL_VBAT_MV: u32 = 18_500; // Full threshold (pack)
 const CHARGE_START_VBAT_MV: u32 = 17_000;
 const CHARGE_STOP_VBAT_MV: u32 = SOC_FULL_VBAT_MV;
+/// AC 适配器恢复后，IN_PG 连续为 High 至少 10 s 才允许重新开始充电。
+const AC_STABLE_MS: u64 = 10_000;
 const TEMP_PAUSE_C: f32 = 40.0;
 const TEMP_RESUME_C: f32 = 35.0;
 const SB_WRITE_RETRY_ATTEMPTS: u8 = 3;
@@ -191,6 +193,7 @@ fn main() -> ! {
         compose_sb_charge_config(SB_AUTO_ENABLED, sb_manual_enable, sb_speed_tier);
     let mut sb_cfg_last_verify_ms = 0u64;
     let mut sb_temp_pause_active = false;
+    let mut sb_last_vbat_mv: Option<u32> = None;
     let mut sb_last_state_poll_ms = 0u64;
     let mut last_state_flags: Option<u16> = None;
     let mut last_cells_mv: [Option<u16>; 5] = [None; 5];
@@ -301,6 +304,10 @@ fn main() -> ! {
     // Global single-instance drivers
     let mut tca = Some(Tca6408a::new(RefCellDevice::new(&i2c_bus)));
     let mut vin_present = true;
+    // Track last time IN_PG changed so we can derive a “stable for AC_STABLE_MS” window.
+    let mut vin_state_last_change_ms: u64 = esp_hal::time::Instant::now()
+        .duration_since_epoch()
+        .as_millis() as u64;
     let mut last_in_pg_logged: Option<bool> = None;
     let mut in_pg_read_failed = false;
     let mut charge_skip_adapter_logged = false;
@@ -312,6 +319,9 @@ fn main() -> ! {
         match t.read_in_pg() {
             Ok(pg) => {
                 vin_present = pg;
+                vin_state_last_change_ms = esp_hal::time::Instant::now()
+                    .duration_since_epoch()
+                    .as_millis() as u64;
                 last_in_pg_logged = Some(pg);
                 info!("tca6408a: IN_PG={}", if pg { "high" } else { "low" });
             }
@@ -464,8 +474,15 @@ fn main() -> ! {
 
             // Estimate SoC from VBAT (do not probe CELLS_PRESENT at runtime)
             let vbat_mv = read_smart_battery_vbat_mv(&i2c_bus);
+            if let Some(v) = vbat_mv {
+                sb_last_vbat_mv = Some(v);
+            }
             // Pack current (discharge negative, i16 mA from STM32 smart-battery slave).
             let ibat_ma = read_smart_battery_ibat_ma(&i2c_bus);
+
+            let now_millis = esp_hal::time::Instant::now()
+                .duration_since_epoch()
+                .as_millis() as u64;
 
             let refresh_in_pg = true;
             if refresh_in_pg {
@@ -478,6 +495,9 @@ fn main() -> ! {
                             }
                             if vin_present != state {
                                 vin_present = state;
+                                // Record the moment of the edge so that charging logic can
+                                // enforce a “VIN stable for AC_STABLE_MS” window on resume.
+                                vin_state_last_change_ms = now_millis;
                                 controller.set_vin_present(state);
                                 if state {
                                     charge_skip_adapter_logged = false;
@@ -523,10 +543,6 @@ fn main() -> ! {
                     info!("charge: temperature pause at {=f32}°C", temp);
                 }
             }
-
-            let now_millis = esp_hal::time::Instant::now()
-                .duration_since_epoch()
-                .as_millis() as u64;
 
             if now_millis.saturating_sub(sb_cfg_last_verify_ms) >= SB_CFG_VERIFY_INTERVAL_MS {
                 sb_cfg_last_verify_ms = now_millis;
@@ -659,11 +675,13 @@ fn main() -> ! {
                         }
                     }
                 }
-            } else if let Some(vbat) = vbat_mv {
-                // Trace current charging decision inputs for现场排查
+            } else if let Some(vbat) = vbat_mv.or(sb_last_vbat_mv) {
+                // Derive adapter稳定性窗口，并追踪当前决策输入便于现场排查。
+                let vin_ok_for_charge = vin_present
+                    && now_millis.saturating_sub(vin_state_last_change_ms) >= AC_STABLE_MS;
                 info!(
-                    "charge: decision vin_present={} vbat={}mV manual={} temp_pause={}",
-                    vin_present, vbat, sb_manual_enable, sb_temp_pause_active
+                    "charge: decision vin_present={} vin_ok_for_charge={} vbat={}mV manual={} temp_pause={}",
+                    vin_present, vin_ok_for_charge, vbat, sb_manual_enable, sb_temp_pause_active
                 );
                 if !vin_present {
                     if sb_manual_enable {
@@ -684,6 +702,15 @@ fn main() -> ! {
                         }
                     } else if vbat <= CHARGE_START_VBAT_MV && !charge_skip_adapter_logged {
                         info!("charge: skip enable (adapter missing, vbat={=u32}mV)", vbat);
+                        charge_skip_adapter_logged = true;
+                    }
+                } else if !vin_ok_for_charge {
+                    // 适配器刚刚恢复或存在抖动：在稳定窗口内禁止重新开启充电，仅输出一次性日志。
+                    if vbat <= CHARGE_START_VBAT_MV && !charge_skip_adapter_logged {
+                        info!(
+                            "charge: skip enable (adapter unstable, vbat={=u32}mV)",
+                            vbat
+                        );
                         charge_skip_adapter_logged = true;
                     }
                 } else {
@@ -939,11 +966,15 @@ where
 {
     let mut dev = RefCellDevice::new(i2c_bus);
     let mut vbuf = [0u8; 2];
-    if dev.write_read(STM32_ADDR, &[0x10], &mut vbuf).is_ok() {
-        let v = u16::from_le_bytes(vbuf) as u32;
-        Some(v)
-    } else {
-        None
+    match dev.write_read(STM32_ADDR, &[0x10], &mut vbuf) {
+        Ok(()) => {
+            let v = u16::from_le_bytes(vbuf) as u32;
+            Some(v)
+        }
+        Err(_) => {
+            warn!("stm32: vbat read failed");
+            None
+        }
     }
 }
 
