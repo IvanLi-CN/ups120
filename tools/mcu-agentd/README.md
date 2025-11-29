@@ -48,9 +48,9 @@ just agentd flash --mcu stm32 --elf <path>
 just agentd reset --mcu esp32
 just agentd reset --mcu stm32
 
-# 实时日志（只看新增，不回放）
-just agentd monitor esp32               # 无限跟随，Ctrl+C 退出
-just agentd monitor stm32 --duration 10s --lines 50
+# 实时日志（默认只看新增，不回放；如需在监视前 reset 一次可加 --reset）
+just agentd monitor esp32 --reset               # reset 后从新 session 开始跟随，Ctrl+C 退出
+just agentd monitor stm32 --reset --duration 10s --lines 50
 
 # 日志查询（元数据 + 可选 session 尾部）
 just agentd logs --mcu all --tail 50 --sessions

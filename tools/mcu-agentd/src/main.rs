@@ -67,6 +67,9 @@ enum Cmd {
         mcu: McuOpt,
         /// Optional ELF path; if省略则尝试默认构建产物。
         elf: Option<PathBuf>,
+        /// Reset MCU before monitoring to capture a fresh boot log.
+        #[arg(long)]
+        reset: bool,
         /// Auto-stop after duration, e.g. 30s/2m/1h (0 = unlimited).
         #[arg(long, value_parser = humantime::parse_duration, default_value = "0")]
         duration: std::time::Duration,
@@ -214,11 +217,24 @@ hint: 检查 logs/agentd 目录以及 sock 文件的所有者与权限。",
         }
         Cmd::Monitor {
             mcu,
+            reset,
             duration,
             lines,
             ..
         } => {
-            monitor_tail(mcu.into(), duration, lines).await?;
+            let mcu_kind: McuKind = mcu.into();
+            if reset {
+                // Capture current session before reset so we can wait for the new one.
+                let paths = paths::Paths::new()?;
+                let prev_session = latest_session(paths.session_dir(mcu_kind.clone()))?;
+                let _ = client_send_with_autostart(ClientRequest::Reset {
+                    mcu: mcu_kind.clone(),
+                })
+                .await?;
+                monitor_tail(mcu_kind, duration, lines, true, prev_session).await?;
+            } else {
+                monitor_tail(mcu_kind, duration, lines, false, None).await?;
+            }
         }
         Cmd::Logs {
             mcu,
@@ -317,14 +333,49 @@ impl From<OptionAfter> for model::AfterPolicy {
     }
 }
 
-async fn monitor_tail(mcu: McuKind, duration: std::time::Duration, lines: usize) -> Result<()> {
+async fn monitor_tail(
+    mcu: McuKind,
+    duration: std::time::Duration,
+    lines: usize,
+    from_start: bool,
+    previous_session: Option<std::path::PathBuf>,
+) -> Result<()> {
     let paths = paths::Paths::new()?;
     let dir = paths.session_dir(mcu.clone());
-    let session =
-        latest_session(dir)?.ok_or_else(|| anyhow::anyhow!("no session log for {:?}", mcu))?;
+    let session: std::path::PathBuf = if from_start {
+        // After a reset we expect a new monitor session file; wait briefly for it to appear.
+        let timeout = std::time::Duration::from_secs(5);
+        let deadline = Instant::now() + timeout;
+        loop {
+            let current = latest_session(dir)?;
+            if let Some(cur) = current {
+                let is_new = match previous_session.as_ref() {
+                    Some(prev) => cur != *prev,
+                    None => true,
+                };
+                if is_new {
+                    break cur;
+                }
+            }
+            if Instant::now() >= deadline {
+                return Err(anyhow::anyhow!(
+                    "no new session log for {:?} after reset (last: {:?})",
+                    mcu,
+                    previous_session
+                ));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    } else {
+        latest_session(dir)?.ok_or_else(|| anyhow::anyhow!("no session log for {:?}", mcu))?
+    };
 
-    // track current offset; start at end (tail-only)
-    let mut pos = std::fs::metadata(&session)?.len();
+    // track current offset; after reset we want full replay, otherwise tail-only
+    let mut pos = if from_start {
+        0
+    } else {
+        std::fs::metadata(&session)?.len()
+    };
     let mut chunk = String::new();
 
     if std::env::var_os("MON_DEBUG").is_some() {
