@@ -58,8 +58,13 @@ impl SpeedLimits {
     }
 }
 
+// Slow tier IBAT limit is chosen to be as low as reasonably possible while still
+// respecting the SC8815 datasheet constraint that IBAT_LIM >= 300 mA.
+// With the current hardware (RS2 = 10 mΩ, IBAT_RATIO = 12x; see sc8815_task.rs),
+// the first valid IBAT_LIM_SET code that satisfies this is ≈328 mA, which we
+// expose here as 330 mA to keep a small safety margin and a round number.
 const SPEED_LIMITS: [SpeedLimits; 4] = [
-    SpeedLimits::new(1000, 425),
+    SpeedLimits::new(1000, 330),
     SpeedLimits::new(1400, 800),
     SpeedLimits::new(1900, 1200),
     SpeedLimits::new(2400, 1600),

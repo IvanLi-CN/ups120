@@ -28,6 +28,13 @@ pub const SC8815_DEFAULT_ADDRESS: u8 = sc8815::registers::constants::DEFAULT_ADD
 const RSENSE_MOHM: u16 = 10;
 const IBUS_RATIO: IbusRatio = IbusRatio::Ratio3x;
 const IBAT_RATIO: IbatRatio = IbatRatio::Ratio12x;
+// SC8815 datasheet requires IBAT_LIM (and IBUS_LIM) to be >=300 mA. With the
+// current hardware (RS2 = 10 mΩ, IBAT_RATIO = 12x) the first valid IBAT_LIM_SET
+// code satisfying this constraint corresponds to ≈328 mA. We treat 330 mA as
+// the canonical minimum IBAT limit for this project; if RSENSE_MOHM or
+// IBAT_RATIO change, this constant must be re-evaluated against the SC8815
+// formula.
+const SC8815_MIN_IBAT_LIMIT_MA: u16 = 330;
 
 const PACK_CHARGE_START_THRESHOLD_MV: i32 = 17_000;
 const PACK_CHARGE_STOP_THRESHOLD_MV: i32 = 18_500;
@@ -793,10 +800,14 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                     imbalance_cycle_start_spread_mv = spread;
                     imbalance_cycle_start_vmin_mv = min_v;
                     if let Some(sess) = sc8815_session.as_mut() {
-                        // Clamp IBAT to hardware minimum and lower CV for recovery
+                        // Clamp IBAT to project-wide minimum consistent with SC8815 spec.
                         let _ = sess
                             .sc
-                            .set_ibat_limit(300, sess.ibat_ratio.into(), sess.rs2_mohm)
+                            .set_ibat_limit(
+                                SC8815_MIN_IBAT_LIMIT_MA,
+                                sess.ibat_ratio.into(),
+                                sess.rs2_mohm,
+                            )
                             .await;
                         sess.enable_power_stage();
                         charger_active = true;
@@ -834,11 +845,15 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                             imbalance_cycle_count = imbalance_cycle_count.saturating_add(1);
                             imbalance_cycle_start_spread_mv = spread;
                             imbalance_cycle_start_vmin_mv = min_v;
-                            // start next charge window
+                            // start next charge window at the same minimum IBAT limit
                             if let Some(sess) = sc8815_session.as_mut() {
                                 let _ = sess
                                     .sc
-                                    .set_ibat_limit(300, sess.ibat_ratio.into(), sess.rs2_mohm)
+                                    .set_ibat_limit(
+                                        SC8815_MIN_IBAT_LIMIT_MA,
+                                        sess.ibat_ratio.into(),
+                                        sess.rs2_mohm,
+                                    )
                                     .await;
                                 sess.enable_power_stage();
                             }
