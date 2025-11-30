@@ -130,22 +130,22 @@ I2C0 通过 `I2cBusMutex = Mutex<NoopRawMutex, I2c<'static, Async>>` 暴露为�
 ### TCA6408A I/O 扩展（`io_expander.rs`）
 
 - 低层：`write_reg` / `read_reg` / `update_register` / `set_outputs`（全部 async）。  
-- 驱动结构：`Tca6408a<I2C>` 单实例，`i2c` 为 `I2cDevice<'static, ...>`。
+- 驱动结构：`io_expander::Tca6408a<I2C>` 单实例，`i2c` 为 `I2cDevice<'static, ...>`。
 
 公开 async 方法：
 
-- `Tca6408a::init`  
+- `io_expander::Tca6408a::init`  
   - 用途：配置端口方向、默认输出，使 CE / PSTOP 处于安全态。  
   - 调用者：`power::power_task` 启动时调用一次。
 
-- `Tca6408a::set_sc_ce` / `set_sc_pstop`  
+- `io_expander::Tca6408a::set_sc_ce` / `set_sc_pstop`  
   - 用途：控制 SC8815 的 CE 与 PSTOP 引脚，实现“逻辑关断 / 启用”与安全停机。  
   - 调用者：  
     - `power::power_task` 在充电 / 保护逻辑中需要时更新 PSTOP。  
     - `log_sc8815_temperature` 在采样 SC8815 ADIN 前后切换 CE。  
   - 频率：500 ms 级别（随 `power_task` 循环和温度采样调用）。
 
-- `Tca6408a::read_in_pg` / `read_alert`  
+- `io_expander::Tca6408a::read_in_pg` / `read_alert`  
   - 用途：读取适配器 PG 状态与告警引脚。  
   - 调用者：  
     - `power::power_task` 每轮 500 ms 读取 IN_PG，用于 AC / stability 判定。  
@@ -162,7 +162,7 @@ I2C0 通过 `I2cBusMutex = Mutex<NoopRawMutex, I2c<'static, Async>>` 暴露为�
 调用节奏（`log_sc8815_temperature`，被 `power_task` 调用）：
 
 - 每 500 ms：  
-  - `Tca6408a::set_sc_ce(true)` → `Timer::after(5 ms)` → `SC8815` init / 测量 / 停止 ADC → `Tca6408a::set_sc_ce(false)`。  
+  - `io_expander::Tca6408a::set_sc_ce(true)` → `Timer::after(5 ms)` → `SC8815` init / 测量 / 停止 ADC → `io_expander::Tca6408a::set_sc_ce(false)`。  
   - 最终将 ADIN 电压转换为 UPS 温度并存入 `PowerState.adin_temp_c`。
 
 ## 关键 await 点与周期总结
@@ -191,4 +191,3 @@ I2C0 通过 `I2cBusMutex = Mutex<NoopRawMutex, I2c<'static, Async>>` 暴露为�
     - 无外设 I/O，纯 GPIO 采样 + 状态机，将边沿转换为 `UiEvent` 发送到 `UI_EVENT_CHANNEL`。
 
 通过以上结构，所有真实硬件 I/O（I2C / SPI / TSENS）都由各自的专用异步任务集中管理，UI 侧只消费经 `PowerState` / `ThermalState` 汇总后的快照，并通过 `UiEvent` 渠道完成页面切换，不直接触碰底层总线。这样既保证了时序可控，也便于后续在不改 UI 的情况下调整 I2C 轮询策略或显示刷新节奏。
-
