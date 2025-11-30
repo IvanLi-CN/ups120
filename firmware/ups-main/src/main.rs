@@ -35,7 +35,7 @@ use esp_hal::{
         channel, channel::ChannelIFace, timer, timer::TimerIFace, LSGlobalClkSource, Ledc, LowSpeed,
     },
     spi::{
-        master::{Config as SpiConfig, Spi},
+        master::{Config as SpiConfig, Spi, SpiDmaBus},
         Mode,
     },
     time::Rate,
@@ -196,6 +196,243 @@ async fn button_task(
     }
 }
 
+/// Asynchronous UI task responsible for:
+///   * Consuming navigation events from the button task.
+///   * Periodically sampling power/thermal state snapshots for display.
+///   * Rendering full-frame dashboard / battery-detail screens over async SPI.
+#[embassy_executor::task]
+async fn ui_task(
+    mut spi: SpiDmaBus<'static, Async>,
+    mut cs: Output<'static>,
+    mut dc: Output<'static>,
+    ui_event_rx: UiEventReceiver,
+    power_state: &'static power::PowerStateMutex,
+    thermal_state: &'static thermal::ThermalStateMutex,
+    boot_millis: u64,
+) {
+    // UI navigation state: dashboard vs battery detail, plus blink phase.
+    let mut ui_screen = UiScreen::Dashboard;
+    let mut blink_on = true;
+    let mut blink_elapsed_ms: u32 = 0;
+
+    // UI: alternate SoC% and VBAT every ~2 seconds.
+    let mut adin_elapsed_ms: u32 = 0;
+    let mut soc_alt_counter: u8 = 0; // seconds within current phase
+    let mut soc_alt_voltage: bool = false; // false => show %, true => show voltage
+
+    // UI: rotate through available temperature sources every ~2 seconds.
+    let mut temp_alt_counter: u8 = 0;
+    let mut temp_cycle_index: usize = 0;
+
+    loop {
+        // Process UI events produced by the button task.
+        while let Ok(event) = ui_event_rx.try_receive() {
+            match event {
+                UiEvent::SwitchToDashboard => {
+                    if !matches!(ui_screen, UiScreen::Dashboard) {
+                        ui_screen = UiScreen::Dashboard;
+                        info!("ui: screen -> dashboard");
+                    }
+                }
+                UiEvent::SwitchToBattDetail => {
+                    if !matches!(ui_screen, UiScreen::BattDetail) {
+                        ui_screen = UiScreen::BattDetail;
+                        info!("ui: screen -> batt_detail");
+                    }
+                }
+            }
+        }
+
+        // Blink phase for the battery-detail balancing indicator.
+        // UI整体每 1000 ms 重绘一次，所以这里选择 200 ms 作为半周期，
+        // 确保每次重绘都能看到交替的 on/off 状态（1 Hz 可感知闪烁）。
+        blink_elapsed_ms = blink_elapsed_ms.saturating_add(fan_control::SAMPLE_PERIOD_MS);
+        if blink_elapsed_ms >= 200 {
+            blink_elapsed_ms -= 200;
+            blink_on = !blink_on;
+        }
+
+        // UI/采样刷新节奏：约 2 Hz（500 ms 一次）
+        adin_elapsed_ms = adin_elapsed_ms.saturating_add(fan_control::SAMPLE_PERIOD_MS);
+        if adin_elapsed_ms >= 500 {
+            adin_elapsed_ms -= 500;
+
+            // advance SoC display alternation (2-second cadence)
+            soc_alt_counter = soc_alt_counter.saturating_add(1);
+            if soc_alt_counter >= 2 {
+                soc_alt_counter = 0;
+                soc_alt_voltage = !soc_alt_voltage;
+            }
+
+            // Snapshot power and thermal readings from background tasks instead of
+            // performing I2C transactions or TSENS reads directly here.
+            let power_snapshot = {
+                let state = power_state.lock().await;
+                *state
+            };
+            let thermal_snapshot = {
+                let state = thermal_state.lock().await;
+                *state
+            };
+            let last_state_flags = power_snapshot.state_flags;
+            let last_cells_mv = power_snapshot.cells_mv;
+
+            let pack_temp = convert_temp_to_i16(thermal_snapshot.sb_pack_temp_c);
+            let charger_temp = convert_temp_to_i16(thermal_snapshot.sb_charger_temp_c);
+            let ups_temp = convert_temp_to_i16(thermal_snapshot.ups_temp_c);
+
+            let temp_sources = [
+                (ui::TempSlot::Battery, pack_temp),
+                (ui::TempSlot::Charger, charger_temp),
+                (ui::TempSlot::Ups, ups_temp),
+            ];
+
+            let mut active_slots = [0usize; 3];
+            let mut active_count = 0;
+            for (idx, (_, value)) in temp_sources.iter().enumerate() {
+                if value.is_some() {
+                    active_slots[active_count] = idx;
+                    active_count += 1;
+                }
+            }
+            if active_count == 0 {
+                active_slots[0] = 0;
+                active_count = 1;
+            }
+            if temp_cycle_index >= active_count {
+                temp_cycle_index = 0;
+            }
+            temp_alt_counter = temp_alt_counter.saturating_add(1);
+            if temp_alt_counter >= 2 {
+                temp_alt_counter = 0;
+                if active_count > 0 {
+                    temp_cycle_index = (temp_cycle_index + 1) % active_count;
+                }
+            }
+            let current_slot_idx = active_slots[temp_cycle_index];
+            let display_slot = temp_sources[current_slot_idx].0;
+
+            // Use latest VBAT / IBAT measurements from power_task.
+            let vbat_mv = power_snapshot.vbat_mv;
+            let ibat_ma = power_snapshot.ibat_ma;
+
+            let now_millis = esp_hal::time::Instant::now()
+                .duration_since_epoch()
+                .as_millis() as u64;
+
+            // Derive UI mode and pack current magnitude from IBAT.
+            let (ui_mode, pack_i_ma_abs) = match ibat_ma {
+                Some(i) => {
+                    let abs_ma: u32 = if i < 0 { (-i) as u32 } else { i as u32 };
+                    let mode = if abs_ma < 50 {
+                        ui::Mode::Standby
+                    } else if i > 0 {
+                        ui::Mode::Charge
+                    } else {
+                        ui::Mode::Discharge
+                    };
+                    (mode, Some(abs_ma))
+                }
+                None => (ui::Mode::Standby, None),
+            };
+
+            // Best-effort balancing cell index: when the smart-battery reports
+            // \"balancing active\" in STATE_FLAGS, highlight the highest-voltage present cell.
+            let balancing_index = if let Some(flags) = last_state_flags {
+                if (flags & SB_STATE_FLAG_BALANCING) != 0 {
+                    let mut best_idx: Option<usize> = None;
+                    let mut best_mv: u16 = 0;
+                    for (idx, cell_opt) in last_cells_mv.iter().enumerate() {
+                        if let Some(mv) = *cell_opt {
+                            if best_idx.is_none() || mv > best_mv {
+                                best_idx = Some(idx);
+                                best_mv = mv;
+                            }
+                        }
+                    }
+                    best_idx.map(|i| (i + 1) as u8)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            let soc_pct = vbat_mv.map(|v| estimate_soc_from_vbat(v)).unwrap_or(0);
+            let uptime_secs = now_millis
+                .saturating_sub(boot_millis)
+                .saturating_div(1000)
+                .min(u64::from(u32::MAX)) as u32;
+
+            // Build a minimal dashboard model (real temps + SoC; other fields placeholder).
+            let model = ui::DashboardData {
+                mode: ui_mode,
+                soc_pct,
+                vbat_mv,
+                soc_display: if soc_alt_voltage {
+                    ui::SocDisplay::Voltage
+                } else {
+                    ui::SocDisplay::Percent
+                },
+                in_v_mv: 0,
+                in_a_ma: 0,
+                in_w_mw: 0,
+                chg_w_mw: 0,
+                out_v_mv: 0,
+                out_a_ma: 0,
+                out_w_mw: 0,
+                bat_temp_c: pack_temp,
+                charger_temp_c: charger_temp,
+                ups_temp_c: ups_temp,
+                fan_pct: thermal_snapshot.fan.duty_pct,
+                uptime_secs,
+                temp_slot: display_slot,
+            };
+
+            // Battery detail view model (reuses most of the same raw inputs).
+            // Prefer VBAT reading from STM32; if unavailable, fall back to summing per-cell voltages.
+            let pack_v_detail = vbat_mv.or_else(|| {
+                let mut total: u32 = 0;
+                for cell_opt in last_cells_mv.iter() {
+                    if let Some(mv) = *cell_opt {
+                        total = total.saturating_add(mv as u32);
+                    } else {
+                        return None;
+                    }
+                }
+                Some(total)
+            });
+
+            let batt_detail = ui::BattDetailData {
+                mode: ui_mode,
+                pack_v_mv: pack_v_detail,
+                pack_i_ma: pack_i_ma_abs,
+                cells_mv: last_cells_mv,
+                balancing_index,
+                temps_c: [pack_temp, charger_temp, ups_temp, None],
+                blink_on,
+            };
+
+            match ui_screen {
+                UiScreen::Dashboard => {
+                    let _ =
+                        ui::render_dashboard_once_async(&mut spi, &mut cs, &mut dc, &model).await;
+                }
+                UiScreen::BattDetail => {
+                    let _ =
+                        ui::render_batt_detail_once_async(&mut spi, &mut cs, &mut dc, &batt_detail)
+                            .await;
+                }
+            }
+        }
+
+        // Maintain the legacy 20 ms UI loop cadence so other tasks (e.g.
+        // button_task, power_task, thermal_task) can make progress between
+        // iterations.
+        Timer::after(Duration::from_millis(fan_control::SAMPLE_PERIOD_MS.into())).await;
+    }
+}
+
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
     // Initialise chip peripherals
@@ -219,11 +456,6 @@ async fn main(spawner: Spawner) -> ! {
     let ui_channel = UI_EVENT_CHANNEL.init(Channel::new());
     let ui_event_tx: UiEventSender = ui_channel.sender();
     let ui_event_rx: UiEventReceiver = ui_channel.receiver();
-
-    // UI navigation state: dashboard vs battery detail, plus blink phase.
-    let mut ui_screen = UiScreen::Dashboard;
-    let mut blink_on = true;
-    let mut blink_elapsed_ms: u32 = 0;
 
     // Spawn asynchronous button scanner task.
     let _ = spawner.spawn(button_task(
@@ -407,227 +639,28 @@ async fn main(spawner: Spawner) -> ! {
 
     // Spawn dedicated thermal-management task owning the fan controller.
     let controller = fan_control::FanController::new(fan_pwm, fan_en, delta_opt, false);
-    let _ = spawner.spawn(thermal::thermal_task(controller, power_state, thermal_state));
+    let _ = spawner.spawn(thermal::thermal_task(
+        controller,
+        power_state,
+        thermal_state,
+    ));
     let _ = ui::boot_update(&mut spi, &mut _cs, &mut _dc, 100, "Ready");
-    let mut adin_elapsed_ms: u32 = 0;
-    // UI: alternate SoC% and VBAT every ~2 seconds
-    let mut soc_alt_counter: u8 = 0; // seconds within current phase
-    let mut soc_alt_voltage: bool = false; // false => show %, true => show voltage
-                                           // UI: rotate through available temperature sources every ~2 seconds
-    let mut temp_alt_counter: u8 = 0;
-    let mut temp_cycle_index: usize = 0;
 
+    // Hand LCD ownership to the dedicated UI task; it will drive periodic
+    // full-frame updates using async SPI and shared state snapshots.
+    let _ = spawner.spawn(ui_task(
+        spi,
+        _cs,
+        _dc,
+        ui_event_rx,
+        power_state,
+        thermal_state,
+        boot_millis,
+    ));
+
+    // Park the main task; all work is now handled by background Embassy tasks.
     loop {
-        // Process UI events produced by the button task.
-        while let Ok(event) = ui_event_rx.try_receive() {
-            match event {
-                UiEvent::SwitchToDashboard => {
-                    if !matches!(ui_screen, UiScreen::Dashboard) {
-                        ui_screen = UiScreen::Dashboard;
-                        info!("ui: screen -> dashboard");
-                    }
-                }
-                UiEvent::SwitchToBattDetail => {
-                    if !matches!(ui_screen, UiScreen::BattDetail) {
-                        ui_screen = UiScreen::BattDetail;
-                        info!("ui: screen -> batt_detail");
-                    }
-                }
-            }
-        }
-
-        // Blink phase for the battery-detail balancing indicator.
-        // UI整体每 1000 ms 重绘一次，所以这里选择 200 ms 作为半周期，
-        // 确保每次重绘都能看到交替的 on/off 状态（1 Hz 可感知闪烁）。
-        blink_elapsed_ms = blink_elapsed_ms.saturating_add(fan_control::SAMPLE_PERIOD_MS);
-        if blink_elapsed_ms >= 200 {
-            blink_elapsed_ms -= 200;
-            blink_on = !blink_on;
-        }
-
-        // UI/采样刷新节奏：约 2 Hz（500 ms 一次）
-        adin_elapsed_ms = adin_elapsed_ms.saturating_add(fan_control::SAMPLE_PERIOD_MS);
-        if adin_elapsed_ms >= 500 {
-            adin_elapsed_ms -= 500;
-            // advance SoC display alternation (2-second cadence)
-            soc_alt_counter = soc_alt_counter.saturating_add(1);
-            if soc_alt_counter >= 2 {
-                soc_alt_counter = 0;
-                soc_alt_voltage = !soc_alt_voltage;
-            }
-            // Snapshot power and thermal readings from background tasks instead of
-            // performing I2C transactions or TSENS reads directly here.
-            let power_snapshot = {
-                let state = power_state.lock().await;
-                *state
-            };
-            let thermal_snapshot = {
-                let state = thermal_state.lock().await;
-                *state
-            };
-            let last_state_flags = power_snapshot.state_flags;
-            let last_cells_mv = power_snapshot.cells_mv;
-
-            let pack_temp = convert_temp_to_i16(thermal_snapshot.sb_pack_temp_c);
-            let charger_temp = convert_temp_to_i16(thermal_snapshot.sb_charger_temp_c);
-            let ups_temp = convert_temp_to_i16(thermal_snapshot.ups_temp_c);
-
-            let temp_sources = [
-                (ui::TempSlot::Battery, pack_temp),
-                (ui::TempSlot::Charger, charger_temp),
-                (ui::TempSlot::Ups, ups_temp),
-            ];
-
-            let mut active_slots = [0usize; 3];
-            let mut active_count = 0;
-            for (idx, (_, value)) in temp_sources.iter().enumerate() {
-                if value.is_some() {
-                    active_slots[active_count] = idx;
-                    active_count += 1;
-                }
-            }
-            if active_count == 0 {
-                active_slots[0] = 0;
-                active_count = 1;
-            }
-            if temp_cycle_index >= active_count {
-                temp_cycle_index = 0;
-            }
-            temp_alt_counter = temp_alt_counter.saturating_add(1);
-            if temp_alt_counter >= 2 {
-                temp_alt_counter = 0;
-                if active_count > 0 {
-                    temp_cycle_index = (temp_cycle_index + 1) % active_count;
-                }
-            }
-            let current_slot_idx = active_slots[temp_cycle_index];
-            let display_slot = temp_sources[current_slot_idx].0;
-
-            // Use latest VBAT / IBAT measurements from power_task.
-            let vbat_mv = power_snapshot.vbat_mv;
-            let ibat_ma = power_snapshot.ibat_ma;
-
-            let now_millis = esp_hal::time::Instant::now()
-                .duration_since_epoch()
-                .as_millis() as u64;
-
-            // Derive UI mode and pack current magnitude from IBAT.
-            let (ui_mode, pack_i_ma_abs) = match ibat_ma {
-                Some(i) => {
-                    let abs_ma: u32 = if i < 0 { (-i) as u32 } else { i as u32 };
-                    let mode = if abs_ma < 50 {
-                        ui::Mode::Standby
-                    } else if i > 0 {
-                        ui::Mode::Charge
-                    } else {
-                        ui::Mode::Discharge
-                    };
-                    (mode, Some(abs_ma))
-                }
-                None => (ui::Mode::Standby, None),
-            };
-
-            // Best-effort balancing cell index: when the smart-battery reports
-            // "balancing active" in STATE_FLAGS, highlight the highest-voltage present cell.
-            let balancing_index = if let Some(flags) = last_state_flags {
-                if (flags & SB_STATE_FLAG_BALANCING) != 0 {
-                    let mut best_idx: Option<usize> = None;
-                    let mut best_mv: u16 = 0;
-                    for (idx, cell_opt) in last_cells_mv.iter().enumerate() {
-                        if let Some(mv) = *cell_opt {
-                            if best_idx.is_none() || mv > best_mv {
-                                best_idx = Some(idx);
-                                best_mv = mv;
-                            }
-                        }
-                    }
-                    best_idx.map(|i| (i + 1) as u8)
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-
-            let soc_pct = vbat_mv.map(|v| estimate_soc_from_vbat(v)).unwrap_or(0);
-            let uptime_secs = now_millis
-                .saturating_sub(boot_millis)
-                .saturating_div(1000)
-                .min(u64::from(u32::MAX)) as u32;
-
-            // Build a minimal dashboard model (real temps + SoC; other fields placeholder)
-            let model = ui::DashboardData {
-                mode: ui_mode,
-                soc_pct: soc_pct,
-                vbat_mv,
-                soc_display: if soc_alt_voltage {
-                    ui::SocDisplay::Voltage
-                } else {
-                    ui::SocDisplay::Percent
-                },
-                in_v_mv: 0,
-                in_a_ma: 0,
-                in_w_mw: 0,
-                chg_w_mw: 0,
-                out_v_mv: 0,
-                out_a_ma: 0,
-                out_w_mw: 0,
-                bat_temp_c: pack_temp,
-                charger_temp_c: charger_temp,
-                ups_temp_c: ups_temp,
-                fan_pct: thermal_snapshot.fan.duty_pct,
-                uptime_secs,
-                temp_slot: display_slot,
-            };
-
-            // Battery detail view model (reuses most of the same raw inputs).
-            // Prefer VBAT reading from STM32; if unavailable, fall back to summing per-cell voltages.
-            let pack_v_detail = vbat_mv.or_else(|| {
-                let mut total: u32 = 0;
-                for cell_opt in last_cells_mv.iter() {
-                    if let Some(mv) = *cell_opt {
-                        total = total.saturating_add(mv as u32);
-                    } else {
-                        return None;
-                    }
-                }
-                Some(total)
-            });
-
-            let batt_detail = ui::BattDetailData {
-                mode: ui_mode,
-                pack_v_mv: pack_v_detail,
-                pack_i_ma: pack_i_ma_abs,
-                cells_mv: last_cells_mv,
-                balancing_index,
-                temps_c: [pack_temp, charger_temp, ups_temp, None],
-                blink_on,
-            };
-
-            match ui_screen {
-                UiScreen::Dashboard => {
-                    let _ =
-                        ui::render_dashboard_once_async(&mut spi, &mut _cs, &mut _dc, &model).await;
-                }
-                UiScreen::BattDetail => {
-                    let _ = ui::render_batt_detail_once_async(
-                        &mut spi,
-                        &mut _cs,
-                        &mut _dc,
-                        &batt_detail,
-                    )
-                    .await;
-                }
-            }
-        }
-
-        // Maintain the legacy 20 ms UI loop cadence so other tasks (e.g.
-        // button_task, power_task, thermal_task) can make progress between
-        // iterations.
-        Timer::after(Duration::from_millis(
-            fan_control::SAMPLE_PERIOD_MS.into(),
-        ))
-        .await;
+        Timer::after(Duration::from_millis(1_000)).await;
     }
 }
 
