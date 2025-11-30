@@ -8,6 +8,7 @@ mod display;
 mod fan_control;
 mod io_expander;
 mod power;
+mod thermal;
 mod tsens;
 mod ui;
 
@@ -84,6 +85,8 @@ pub const SB_STATE_POLL_INTERVAL_MS: u64 = 10_000;
 pub type I2cBusMutex = Mutex<NoopRawMutex, I2c<'static, Async>>;
 pub type SharedI2cDevice<'a> = I2cDevice<'a, NoopRawMutex, I2c<'static, Async>>;
 static I2C0_BUS: StaticCell<I2cBusMutex> = StaticCell::new();
+
+static FAN_TIMER: StaticCell<timer::Timer<'static, LowSpeed>> = StaticCell::new();
 
 const UI_EVENT_CAPACITY: usize = 8;
 
@@ -257,9 +260,10 @@ async fn main(spawner: Spawner) -> ! {
     .into_async();
     let i2c_bus = I2C0_BUS.init(Mutex::new(i2c));
 
-    // Initialise shared power state and spawn background power-management task.
+    // Initialise shared power/thermal state and spawn background management tasks.
     let power_state = power::init_power_state();
-    let _ = spawner.spawn(power::power_task(i2c_bus, power_state));
+    let thermal_state = thermal::init_thermal_state();
+    let _ = spawner.spawn(power::power_task(i2c_bus, power_state, thermal_state));
 
     // SPI for LCD (write-only): MOSI=11, SCLK=12, optional CS/DC/RST/BL as GPIO
     let mut _dc = Output::new(peripherals.GPIO10, Level::Low, OutputConfig::default());
@@ -303,7 +307,7 @@ async fn main(spawner: Spawner) -> ! {
     let mut ledc = Ledc::new(peripherals.LEDC);
     ledc.set_global_slow_clock(LSGlobalClkSource::APBClk);
 
-    let mut t_fan = ledc.timer::<LowSpeed>(timer::Number::Timer0);
+    let t_fan = FAN_TIMER.init(ledc.timer::<LowSpeed>(timer::Number::Timer0));
     t_fan
         .configure(timer::config::Config {
             duty: timer::config::Duty::Duty8Bit,
@@ -325,7 +329,7 @@ async fn main(spawner: Spawner) -> ! {
     let mut fan_pwm = ledc.channel(channel::Number::Channel0, peripherals.GPIO40);
     fan_pwm
         .configure(channel::config::Config {
-            timer: &t_fan,
+            timer: t_fan,
             duty_pct: 0,
             drive_mode: esp_hal::gpio::DriveMode::PushPull,
         })
@@ -384,7 +388,7 @@ async fn main(spawner: Spawner) -> ! {
     let _ = ui::boot_update(&mut spi, &mut _cs, &mut _dc, 40, "TCA6408A");
     let _ = ui::boot_update(&mut spi, &mut _cs, &mut _dc, 60, "SC8815 ADC Read");
 
-    // === Temperature sensor init ===
+    // === Temperature sensor init (TSENS delta calibration only) ===
     tsens::init(&mut delay);
     let delta_opt = tsens::read_delta_calibration();
     let delta_c = delta_opt.unwrap_or(0.0);
@@ -401,7 +405,9 @@ async fn main(spawner: Spawner) -> ! {
     delay.delay_ms(200u32);
     let _ = ui::boot_update(&mut spi, &mut _cs, &mut _dc, 80, "TSENS Calibrated");
 
-    let mut controller = fan_control::FanController::new(fan_pwm, fan_en, delta_opt, false);
+    // Spawn dedicated thermal-management task owning the fan controller.
+    let controller = fan_control::FanController::new(fan_pwm, fan_en, delta_opt, false);
+    let _ = spawner.spawn(thermal::thermal_task(controller, power_state, thermal_state));
     let _ = ui::boot_update(&mut spi, &mut _cs, &mut _dc, 100, "Ready");
     let mut adin_elapsed_ms: u32 = 0;
     // UI: alternate SoC% and VBAT every ~2 seconds
@@ -410,16 +416,8 @@ async fn main(spawner: Spawner) -> ! {
                                            // UI: rotate through available temperature sources every ~2 seconds
     let mut temp_alt_counter: u8 = 0;
     let mut temp_cycle_index: usize = 0;
-    let mut sb_temps: Option<fan_control::SmartBatteryTemps> = None;
 
     loop {
-        controller.tick(&mut delay, sb_temps);
-
-        // Maintain the legacy 20 ms control-loop cadence using an async
-        // timer so that other Embassy tasks (e.g. button_task) can run
-        // between iterations instead of being blocked by a busy delay.
-        Timer::after(Duration::from_millis(fan_control::SAMPLE_PERIOD_MS.into())).await;
-
         // Process UI events produced by the button task.
         while let Ok(event) = ui_event_rx.try_receive() {
             match event {
@@ -457,28 +455,27 @@ async fn main(spawner: Spawner) -> ! {
                 soc_alt_counter = 0;
                 soc_alt_voltage = !soc_alt_voltage;
             }
-            // Snapshot power readings from the dedicated power_task instead of
-            // performing I2C transactions directly here.
+            // Snapshot power and thermal readings from background tasks instead of
+            // performing I2C transactions or TSENS reads directly here.
             let power_snapshot = {
                 let state = power_state.lock().await;
                 *state
             };
-            sb_temps = power_snapshot.smart_batt_temps;
+            let thermal_snapshot = {
+                let state = thermal_state.lock().await;
+                *state
+            };
             let last_state_flags = power_snapshot.state_flags;
             let last_cells_mv = power_snapshot.cells_mv;
 
-            controller.set_vin_present(power_snapshot.ac_present);
-
-            let pack_temp_c = sb_temps.and_then(|t| t.pack_c);
-            let charger_temp_c = sb_temps.and_then(|t| t.charger_c);
-            let pack_temp = convert_temp_to_i16(pack_temp_c);
-            let charger_temp = convert_temp_to_i16(charger_temp_c);
-            let adin_temp = convert_temp_to_i16(power_snapshot.adin_temp_c);
+            let pack_temp = convert_temp_to_i16(thermal_snapshot.sb_pack_temp_c);
+            let charger_temp = convert_temp_to_i16(thermal_snapshot.sb_charger_temp_c);
+            let ups_temp = convert_temp_to_i16(thermal_snapshot.ups_temp_c);
 
             let temp_sources = [
                 (ui::TempSlot::Battery, pack_temp),
                 (ui::TempSlot::Charger, charger_temp),
-                (ui::TempSlot::Ups, adin_temp),
+                (ui::TempSlot::Ups, ups_temp),
             ];
 
             let mut active_slots = [0usize; 3];
@@ -562,7 +559,7 @@ async fn main(spawner: Spawner) -> ! {
             let model = ui::DashboardData {
                 mode: ui_mode,
                 soc_pct: soc_pct,
-                vbat_mv: vbat_mv,
+                vbat_mv,
                 soc_display: if soc_alt_voltage {
                     ui::SocDisplay::Voltage
                 } else {
@@ -577,8 +574,8 @@ async fn main(spawner: Spawner) -> ! {
                 out_w_mw: 0,
                 bat_temp_c: pack_temp,
                 charger_temp_c: charger_temp,
-                ups_temp_c: adin_temp,
-                fan_pct: 0,
+                ups_temp_c: ups_temp,
+                fan_pct: thermal_snapshot.fan.duty_pct,
                 uptime_secs,
                 temp_slot: display_slot,
             };
@@ -603,7 +600,7 @@ async fn main(spawner: Spawner) -> ! {
                 pack_i_ma: pack_i_ma_abs,
                 cells_mv: last_cells_mv,
                 balancing_index,
-                temps_c: [pack_temp, charger_temp, adin_temp, None],
+                temps_c: [pack_temp, charger_temp, ups_temp, None],
                 blink_on,
             };
 
@@ -623,6 +620,14 @@ async fn main(spawner: Spawner) -> ! {
                 }
             }
         }
+
+        // Maintain the legacy 20 ms UI loop cadence so other tasks (e.g.
+        // button_task, power_task, thermal_task) can make progress between
+        // iterations.
+        Timer::after(Duration::from_millis(
+            fan_control::SAMPLE_PERIOD_MS.into(),
+        ))
+        .await;
     }
 }
 

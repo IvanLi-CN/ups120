@@ -107,7 +107,11 @@ pub fn init_power_state() -> &'static PowerStateMutex {
 /// of the system can start integrating with it. The full smart-battery /
 /// charger logic will be migrated here from `main.rs`.
 #[embassy_executor::task]
-pub async fn power_task(i2c_bus: &'static I2cBusMutex, power_state: &'static PowerStateMutex) {
+pub async fn power_task(
+    i2c_bus: &'static I2cBusMutex,
+    power_state: &'static PowerStateMutex,
+    _thermal_state: &'static crate::thermal::ThermalStateMutex,
+) {
     // Before touching other devices on the bus, validate STM32 I2C once
     // (mirrors legacy behaviour from `main.rs`).
     Timer::after(Duration::from_millis(2)).await;

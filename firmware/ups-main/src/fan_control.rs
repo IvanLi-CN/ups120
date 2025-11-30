@@ -1,6 +1,5 @@
 use defmt::{debug, error, warn};
 use esp_hal::{
-    delay::Delay,
     gpio::Output,
     ledc::{
         channel::{self, ChannelIFace},
@@ -61,7 +60,7 @@ const VOUT_BASE: f32 = 4.96;
 const VOUT_GAIN: f32 = 3.98;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Mode {
+pub enum Mode {
     Normal,
     Safe,
     Overtemp,
@@ -97,6 +96,31 @@ pub struct FanController<'a> {
     fan_enabled: bool,
     duty_pct: u8,
     pi_integral: f32,
+}
+
+/// Snapshot of the current fan-control state exposed to other tasks.
+#[derive(Clone, Copy)]
+pub struct FanStatus {
+    pub mode: Mode,
+    pub fan_enabled: bool,
+    /// Raw PWM duty percentage written to the FAN_PWM channel (0–100).
+    pub duty_pct: u8,
+    /// Effective control temperature after combining all inputs.
+    pub control_temp_c: f32,
+    /// Filtered TSENS reading after calibration.
+    pub tsens_filtered_c: f32,
+}
+
+impl Default for FanStatus {
+    fn default() -> Self {
+        Self {
+            mode: Mode::Normal,
+            fan_enabled: false,
+            duty_pct: 0,
+            control_temp_c: 0.0,
+            tsens_filtered_c: 0.0,
+        }
+    }
 }
 
 impl<'a> FanController<'a> {
@@ -140,8 +164,7 @@ impl<'a> FanController<'a> {
         self.vin_present = present;
     }
 
-    pub fn tick(&mut self, delay: &mut Delay, smart_batt_temp: Option<SmartBatteryTemps>) {
-        let reading = tsens::read_celsius(delay);
+    pub fn tick(&mut self, reading: tsens::Reading, smart_batt_temp: Option<SmartBatteryTemps>) {
         let corrected = reading.base_celsius - self.delta_c;
         let filtered = self.push_sample(corrected);
         self.filtered_temp = filtered;
@@ -155,6 +178,19 @@ impl<'a> FanController<'a> {
 
         self.update_outputs(controlling, &reading);
         self.maybe_log();
+    }
+
+    /// Return a snapshot of the current fan-control state for telemetry/diagnostics.
+    pub fn status(&self) -> FanStatus {
+        FanStatus {
+            mode: self.mode,
+            fan_enabled: self.fan_enabled,
+            // Expose 0% when the fan is logically disabled so UI does not treat
+            // the idle 100% duty as “full speed”.
+            duty_pct: if self.fan_enabled { self.duty_pct } else { 0 },
+            control_temp_c: self.control_temp,
+            tsens_filtered_c: self.filtered_temp,
+        }
     }
 
     fn push_sample(&mut self, value: f32) -> f32 {

@@ -1,4 +1,5 @@
 use embedded_hal::delay::DelayNs;
+use embassy_time::Timer;
 use esp_hal::{delay::Delay, efuse::Efuse, peripherals};
 
 #[allow(improper_ctypes)]
@@ -150,6 +151,71 @@ pub fn read_celsius(delay: &mut Delay) -> Reading {
     if raw == 0 {
         defmt::warn!(
             "tsens.read: READY_timeout={} last_out={=u8} ctrl.dump={} ctrl.pu={}",
+            loops,
+            last_out,
+            ((regs.sar_tsens_ctrl().read().bits() >> 24) & 1) as u8,
+            ((regs.sar_tsens_ctrl().read().bits() >> 22) & 1) as u8
+        );
+    }
+
+    Reading {
+        raw,
+        dac,
+        base_celsius: base,
+    }
+}
+
+/// Asynchronous variant of [`read_celsius`] that uses Embassy timers instead of
+/// a busy-waiting [`Delay`]. This allows the caller to integrate TSENS sampling
+/// into an async task without blocking other Embassy tasks.
+pub async fn read_celsius_async() -> Reading {
+    let regs = esp_hal::peripherals::SENS::regs();
+
+    // Re-assert power before each conversion to match robust sequence
+    regs.sar_tsens_ctrl()
+        .modify(|_, w| w.sar_tsens_dump_out().clear_bit());
+    regs.sar_tsens_ctrl()
+        .modify(|_, w| w.sar_tsens_power_up().set_bit());
+    regs.sar_tsens_ctrl()
+        .modify(|_, w| w.sar_tsens_power_up_force().set_bit());
+    // Allow bias & clock to settle before dumping out any data
+    Timer::after_micros(1000).await;
+
+    // Trigger a one-shot conversion
+    regs.sar_tsens_ctrl()
+        .modify(|_, w| w.sar_tsens_dump_out().set_bit());
+
+    // Bounded poll for READY, track how many loops it took and last OUT value
+    let mut raw: u8 = 0;
+    let mut loops: u16 = 0;
+    let mut last_out: u8 = (regs.sar_tsens_ctrl().read().bits() & 0xFF) as u8;
+    while loops < 500 {
+        let regbits = regs.sar_tsens_ctrl().read().bits();
+        let ready = ((regbits >> 8) & 1) != 0;
+        if ready {
+            raw = (regbits & 0xFF) as u8;
+            break;
+        }
+        last_out = (regbits & 0xFF) as u8;
+        loops += 1;
+        Timer::after_micros(200).await;
+    }
+
+    regs.sar_tsens_ctrl()
+        .modify(|_, w| w.sar_tsens_dump_out().clear_bit());
+    // Let FSM regain control between shots to avoid stuck READY=0 on some steppings
+    regs.sar_tsens_ctrl()
+        .modify(|_, w| w.sar_tsens_power_up_force().clear_bit());
+    // Small guard delay before computing the temperature
+    Timer::after_micros(50).await;
+
+    let dac = unsafe { esp_rom_regi2c_read(0x69, 1, 0x06) } & 0x0F;
+    let dac_offset = dac_offset_from_reg(dac);
+    let raw_f = raw as f32;
+    let base = TSENS_ADC_FACTOR * raw_f - TSENS_DAC_FACTOR * (dac_offset as f32) - TSENS_SYS_OFFSET;
+    if raw == 0 {
+        defmt::warn!(
+            "tsens.read_async: READY_timeout={} last_out={=u8} ctrl.dump={} ctrl.pu={}",
             loops,
             last_out,
             ((regs.sar_tsens_ctrl().read().bits() >> 24) & 1) as u8,
