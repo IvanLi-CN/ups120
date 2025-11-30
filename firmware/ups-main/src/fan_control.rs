@@ -1,5 +1,4 @@
 use defmt::{debug, error, warn};
-use embedded_hal::delay::DelayNs;
 use esp_hal::{
     delay::Delay,
     gpio::Output,
@@ -12,8 +11,9 @@ use esp_hal::{
 use crate::tsens;
 
 // Control loop sample period for temperature / fan updates.
-// Kept short so that button polling in the main loop (which runs at
-// the same cadence) can reliably observe human-scale key presses.
+// When used from an async main loop, prefer driving the outer loop timing
+// with `embassy_time::Timer` so other tasks (e.g. button scanning) can
+// continue to make progress between samples.
 pub const SAMPLE_PERIOD_MS: u32 = 20;
 const LOG_INTERVAL_TICKS: u8 = 100; // 20 ms * 100 ≈ 2 s
 const FILTER_WINDOW: usize = 3;
@@ -155,8 +155,6 @@ impl<'a> FanController<'a> {
 
         self.update_outputs(controlling, &reading);
         self.maybe_log();
-
-        delay.delay_ms(SAMPLE_PERIOD_MS);
     }
 
     fn push_sample(&mut self, value: f32) -> f32 {

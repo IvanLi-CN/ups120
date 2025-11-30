@@ -14,7 +14,11 @@ use button_input::{ButtonConfig, ButtonState};
 use defmt::{debug, info, warn};
 use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
 use embassy_executor::Spawner;
-use embassy_sync::{blocking_mutex::raw::NoopRawMutex, mutex::Mutex};
+use embassy_sync::{
+    blocking_mutex::raw::NoopRawMutex,
+    channel::{Channel, Receiver, Sender},
+    mutex::Mutex,
+};
 use embassy_time::{Duration, Timer};
 use embedded_hal::delay::DelayNs;
 use embedded_hal_async::i2c::I2c as AsyncI2c;
@@ -80,11 +84,25 @@ type I2cBusMutex = Mutex<NoopRawMutex, I2c<'static, Async>>;
 type SharedI2cDevice<'a> = I2cDevice<'a, NoopRawMutex, I2c<'static, Async>>;
 static I2C0_BUS: StaticCell<I2cBusMutex> = StaticCell::new();
 
+const UI_EVENT_CAPACITY: usize = 8;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum UiScreen {
     Dashboard,
     BattDetail,
 }
+
+#[derive(Clone, Copy)]
+enum UiEvent {
+    SwitchToDashboard,
+    SwitchToBattDetail,
+}
+
+type UiEventSender = Sender<'static, NoopRawMutex, UiEvent, UI_EVENT_CAPACITY>;
+type UiEventReceiver = Receiver<'static, NoopRawMutex, UiEvent, UI_EVENT_CAPACITY>;
+
+static UI_EVENT_CHANNEL: StaticCell<Channel<NoopRawMutex, UiEvent, UI_EVENT_CAPACITY>> =
+    StaticCell::new();
 
 fn compose_sb_charge_config(auto: bool, manual: bool, speed_tier: u8) -> u8 {
     let mut value = (speed_tier & 0x03) << SB_CFG_SPEED_SHIFT;
@@ -107,26 +125,16 @@ defmt::timestamp!("{=u64} ms", {
         .as_millis() as u64
 });
 
-#[esp_rtos::main]
-async fn main(_spawner: Spawner) -> ! {
-    // Initialise chip peripherals
-    let peripherals = esp_hal::init(esp_hal::Config::default());
-    let timg0 = TimerGroup::new(peripherals.TIMG0);
-    esp_rtos::start(timg0.timer0);
-    let mut delay = Delay::new();
-    let boot_millis = esp_hal::time::Instant::now()
-        .duration_since_epoch()
-        .as_millis() as u64;
-
-    // === Restore board bring-up so other subsystems remain functional ===
-    // Buttons (internal pull-up, active-low)
-    let in_cfg = InputConfig::default().with_pull(Pull::Up);
-    let btn_center = Input::new(peripherals.GPIO0, in_cfg);
-    let btn_up = Input::new(peripherals.GPIO1, in_cfg);
-    let btn_right = Input::new(peripherals.GPIO2, in_cfg);
-    let btn_down = Input::new(peripherals.GPIO4, in_cfg);
-    let btn_left = Input::new(peripherals.GPIO5, in_cfg);
-
+#[embassy_executor::task]
+async fn button_task(
+    btn_center: Input<'static>,
+    btn_up: Input<'static>,
+    btn_right: Input<'static>,
+    btn_down: Input<'static>,
+    btn_left: Input<'static>,
+    ui_tx: UiEventSender,
+    boot_millis: u64,
+) {
     // Initialize per-button state machines for debounced/gesture-aware logging.
     let center_initial = btn_center.is_low();
     let up_initial = btn_up.is_low();
@@ -147,10 +155,6 @@ async fn main(_spawner: Spawner) -> ! {
     let mut btn_down_state = ButtonState::new(cfg_down, down_initial, boot_millis);
     let mut btn_left_state = ButtonState::new(cfg_left, left_initial, boot_millis);
 
-    // UI navigation state: dashboard vs battery detail, plus blink phase.
-    let mut ui_screen = UiScreen::Dashboard;
-    let mut blink_on = true;
-    let mut blink_elapsed_ms: u32 = 0;
     let mut prev_down_pressed = btn_down_state.is_pressed();
     let mut prev_up_pressed = btn_up_state.is_pressed();
 
@@ -158,6 +162,75 @@ async fn main(_spawner: Spawner) -> ! {
         "Initial button state: center={} up={} right={} down={} left={}",
         center_initial, up_initial, right_initial, down_initial, left_initial
     );
+
+    loop {
+        let now_ms = esp_hal::time::Instant::now()
+            .duration_since_epoch()
+            .as_millis() as u64;
+
+        btn_center_state.update(now_ms, btn_center.is_low());
+        btn_up_state.update(now_ms, btn_up.is_low());
+        btn_right_state.update(now_ms, btn_right.is_low());
+        btn_down_state.update(now_ms, btn_down.is_low());
+        btn_left_state.update(now_ms, btn_left.is_low());
+
+        // Derive simple edge-triggered navigation events from debounced states.
+        let down_pressed = btn_down_state.is_pressed();
+        let up_pressed = btn_up_state.is_pressed();
+
+        if down_pressed && !prev_down_pressed {
+            let _ = ui_tx.try_send(UiEvent::SwitchToBattDetail);
+        }
+        if up_pressed && !prev_up_pressed {
+            let _ = ui_tx.try_send(UiEvent::SwitchToDashboard);
+        }
+
+        prev_down_pressed = down_pressed;
+        prev_up_pressed = up_pressed;
+
+        Timer::after(Duration::from_millis(fan_control::SAMPLE_PERIOD_MS.into())).await;
+    }
+}
+
+#[esp_rtos::main]
+async fn main(spawner: Spawner) -> ! {
+    // Initialise chip peripherals
+    let peripherals = esp_hal::init(esp_hal::Config::default());
+    let timg0 = TimerGroup::new(peripherals.TIMG0);
+    esp_rtos::start(timg0.timer0);
+    let mut delay = Delay::new();
+    let boot_millis = esp_hal::time::Instant::now()
+        .duration_since_epoch()
+        .as_millis() as u64;
+
+    // === Restore board bring-up so other subsystems remain functional ===
+    // Buttons (internal pull-up, active-low)
+    let in_cfg = InputConfig::default().with_pull(Pull::Up);
+    let btn_center = Input::new(peripherals.GPIO0, in_cfg);
+    let btn_up = Input::new(peripherals.GPIO1, in_cfg);
+    let btn_right = Input::new(peripherals.GPIO2, in_cfg);
+    let btn_down = Input::new(peripherals.GPIO4, in_cfg);
+    let btn_left = Input::new(peripherals.GPIO5, in_cfg);
+
+    let ui_channel = UI_EVENT_CHANNEL.init(Channel::new());
+    let ui_event_tx: UiEventSender = ui_channel.sender();
+    let ui_event_rx: UiEventReceiver = ui_channel.receiver();
+
+    // UI navigation state: dashboard vs battery detail, plus blink phase.
+    let mut ui_screen = UiScreen::Dashboard;
+    let mut blink_on = true;
+    let mut blink_elapsed_ms: u32 = 0;
+
+    // Spawn asynchronous button scanner task.
+    let _ = spawner.spawn(button_task(
+        btn_center,
+        btn_up,
+        btn_right,
+        btn_down,
+        btn_left,
+        ui_event_tx,
+        boot_millis,
+    ));
 
     // RESET# to TCA6408A
     let mut _reset_tca = Output::new(peripherals.GPIO6, Level::High, OutputConfig::default());
@@ -403,34 +476,32 @@ async fn main(_spawner: Spawner) -> ! {
 
     loop {
         controller.tick(&mut delay, sb_temps);
-        // Poll directional buttons once per control loop and feed them into
-        // the debouncing/gesture logic.
-        let now_ms = esp_hal::time::Instant::now()
-            .duration_since_epoch()
-            .as_millis() as u64;
-        btn_center_state.update(now_ms, btn_center.is_low());
-        btn_up_state.update(now_ms, btn_up.is_low());
-        btn_right_state.update(now_ms, btn_right.is_low());
-        btn_down_state.update(now_ms, btn_down.is_low());
-        btn_left_state.update(now_ms, btn_left.is_low());
 
-        // Derive simple edge-triggered navigation events from debounced states.
-        let down_pressed = btn_down_state.is_pressed();
-        let up_pressed = btn_up_state.is_pressed();
-        if down_pressed && !prev_down_pressed {
-            if matches!(ui_screen, UiScreen::Dashboard) {
-                ui_screen = UiScreen::BattDetail;
-                info!("ui: screen -> batt_detail");
+        // Maintain the legacy 20 ms control-loop cadence using an async
+        // timer so that other Embassy tasks (e.g. button_task) can run
+        // between iterations instead of being blocked by a busy delay.
+        Timer::after(Duration::from_millis(
+            fan_control::SAMPLE_PERIOD_MS.into(),
+        ))
+        .await;
+
+        // Process UI events produced by the button task.
+        while let Ok(event) = ui_event_rx.try_receive() {
+            match event {
+                UiEvent::SwitchToDashboard => {
+                    if !matches!(ui_screen, UiScreen::Dashboard) {
+                        ui_screen = UiScreen::Dashboard;
+                        info!("ui: screen -> dashboard");
+                    }
+                }
+                UiEvent::SwitchToBattDetail => {
+                    if !matches!(ui_screen, UiScreen::BattDetail) {
+                        ui_screen = UiScreen::BattDetail;
+                        info!("ui: screen -> batt_detail");
+                    }
+                }
             }
         }
-        if up_pressed && !prev_up_pressed {
-            if matches!(ui_screen, UiScreen::BattDetail) {
-                ui_screen = UiScreen::Dashboard;
-                info!("ui: screen -> dashboard");
-            }
-        }
-        prev_down_pressed = down_pressed;
-        prev_up_pressed = up_pressed;
 
         // Blink phase for the battery-detail balancing indicator.
         // UI整体每 1000 ms 重绘一次，所以这里选择 200 ms 作为半周期，
