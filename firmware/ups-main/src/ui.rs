@@ -1,10 +1,11 @@
 use core::fmt::Write as _;
 
 use embedded_hal::{delay::DelayNs, digital::OutputPin, spi::SpiBus};
+use embedded_hal_async::spi::SpiBus as AsyncSpiBus;
 
 use crate::display::{
-    clear_framebuffer, fill_rect_buffer, flush_framebuffer, put_pixel_buffer, with_framebuffer,
-    FrameBuffer, Rgb565, LOGICAL_HEIGHT, LOGICAL_WIDTH,
+    clear_framebuffer, fill_rect_buffer, flush_framebuffer, flush_framebuffer_async,
+    put_pixel_buffer, with_framebuffer, FrameBuffer, Rgb565, LOGICAL_HEIGHT, LOGICAL_WIDTH,
 };
 
 // Palette (RGB565)
@@ -415,6 +416,43 @@ where
     flush_framebuffer(spi, cs, dc)
 }
 
+pub async fn boot_init_begin_async<SPI, CS, DC>(
+    spi: &mut SPI,
+    cs: &mut CS,
+    dc: &mut DC,
+) -> Result<(), SPI::Error>
+where
+    SPI: AsyncSpiBus<u8>,
+    CS: OutputPin,
+    DC: OutputPin,
+{
+    clear_framebuffer(BLACK);
+    with_framebuffer(|fb| {
+        let title = "UPS120";
+        let y0 = MARGIN_TB;
+        draw_text(fb, center_x(title), y0, title, WHITE);
+
+        let subtitle = "SYSTEM BOOT";
+        let y1 = y0 + LINE_H;
+        draw_text(fb, center_x(subtitle), y1, subtitle, GRAY);
+
+        let bar_w = LOGICAL_WIDTH - 2 * MARGIN_LR;
+        let bar_h: u16 = 8;
+        let bar_x = MARGIN_LR;
+        let bar_y = LOGICAL_HEIGHT - MARGIN_TB - bar_h - LINE_H;
+
+        let left = bar_x.saturating_sub(1);
+        let right = (bar_x + bar_w).min(LOGICAL_WIDTH - 1);
+        let top = bar_y.saturating_sub(1);
+        let bottom = (bar_y + bar_h).min(LOGICAL_HEIGHT - 1);
+        fill_rect_buffer(fb, left, top, right, top, GRAY);
+        fill_rect_buffer(fb, left, bottom, right, bottom, GRAY);
+        fill_rect_buffer(fb, left, top, left, bottom, GRAY);
+        fill_rect_buffer(fb, right, top, right, bottom, GRAY);
+    });
+    flush_framebuffer_async(spi, cs, dc).await
+}
+
 /// Update boot progress bar and a single-line label above it.
 pub fn boot_update<SPI, CS, DC>(
     spi: &mut SPI,
@@ -462,6 +500,54 @@ where
         draw_text(fb, x, y_text, label, WHITE);
     });
     flush_framebuffer(spi, cs, dc)
+}
+
+pub async fn boot_update_async<SPI, CS, DC>(
+    spi: &mut SPI,
+    cs: &mut CS,
+    dc: &mut DC,
+    pct: u8,
+    label: &str,
+) -> Result<(), SPI::Error>
+where
+    SPI: AsyncSpiBus<u8>,
+    CS: OutputPin,
+    DC: OutputPin,
+{
+    let bar_w = LOGICAL_WIDTH - 2 * MARGIN_LR;
+    let bar_h: u16 = 8;
+    let bar_x = MARGIN_LR;
+    let bar_y = LOGICAL_HEIGHT - MARGIN_TB - bar_h - LINE_H;
+
+    let fill = (u32::from(bar_w) * pct.min(100) as u32 / 100) as u16;
+    with_framebuffer(|fb| {
+        // clear bar area
+        fill_rect_buffer(
+            fb,
+            bar_x,
+            bar_y,
+            bar_x + bar_w - 1,
+            bar_y + bar_h - 1,
+            BLACK,
+        );
+        // fill progress
+        if fill > 0 {
+            fill_rect_buffer(fb, bar_x, bar_y, bar_x + fill - 1, bar_y + bar_h - 1, GREEN);
+        }
+        // draw label line above bar
+        let y_text = bar_y - LINE_H;
+        fill_rect_buffer(
+            fb,
+            MARGIN_LR,
+            y_text,
+            LOGICAL_WIDTH - MARGIN_LR - 1,
+            bar_y - 1,
+            BLACK,
+        );
+        let x = center_x(label);
+        draw_text(fb, x, y_text, label, WHITE);
+    });
+    flush_framebuffer_async(spi, cs, dc).await
 }
 
 #[derive(Clone, Copy)]
@@ -820,6 +906,77 @@ where
     flush_framebuffer(spi, cs, dc)
 }
 
+pub async fn render_dashboard_once_async<SPI, CS, DC>(
+    spi: &mut SPI,
+    cs: &mut CS,
+    dc: &mut DC,
+    model: &DashboardData,
+) -> Result<(), SPI::Error>
+where
+    SPI: AsyncSpiBus<u8>,
+    CS: OutputPin,
+    DC: OutputPin,
+{
+    clear_framebuffer(BLACK);
+    with_framebuffer(|fb| {
+        let mut vs: heapless::String<16> = heapless::String::new();
+        let mut as_: heapless::String<16> = heapless::String::new();
+        let mut ws: heapless::String<16> = heapless::String::new();
+
+        let y0 = MARGIN_TB;
+        let (soc_text, soc_color) =
+            build_soc_text_and_color(model.soc_pct, model.vbat_mv, model.soc_display);
+        let soc_w = text_width(&soc_text);
+        let soc_x = LOGICAL_WIDTH - MARGIN_LR - soc_w;
+        let _ = draw_text(fb, soc_x, y0, &soc_text, soc_color);
+
+        let (mode_text, mode_color) = mode_text_and_color(model.mode);
+        let max_mode_width = soc_x.saturating_sub(MARGIN_LR);
+        let _ = draw_text_clipped(fb, MARGIN_LR, y0, mode_text, mode_color, max_mode_width);
+
+        fmt_voltage(model.in_v_mv, &mut vs);
+        fmt_current(model.in_a_ma, &mut as_);
+        fmt_power(model.in_w_mw, &mut ws);
+        let y1 = MARGIN_TB + LINE_H;
+        draw_trio_line(fb, y1, "IN", &vs, &as_, &ws);
+
+        let y2 = MARGIN_TB + 2 * LINE_H;
+        match model.mode {
+            Mode::Charge => {
+                ws.clear();
+                fmt_power(model.chg_w_mw, &mut ws);
+                draw_trio_line(fb, y2, "CHG", PLACEHOLDER, PLACEHOLDER, &ws);
+            }
+            Mode::Standby => {
+                let mut uptime: heapless::String<16> = heapless::String::new();
+                fmt_uptime(model.uptime_secs, &mut uptime);
+                draw_trio_line(fb, y2, "RUN ", &uptime, PLACEHOLDER, PLACEHOLDER);
+            }
+            Mode::Discharge => {
+                vs.clear();
+                as_.clear();
+                ws.clear();
+                fmt_voltage(model.out_v_mv, &mut vs);
+                fmt_current(model.out_a_ma, &mut as_);
+                fmt_power(model.out_w_mw, &mut ws);
+                draw_trio_line(fb, y2, "OUT", &vs, &as_, &ws);
+            }
+        }
+
+        let y3 = MARGIN_TB + 3 * LINE_H;
+        draw_aux_line(
+            fb,
+            y3,
+            model.temp_slot,
+            model.bat_temp_c,
+            model.charger_temp_c,
+            model.ups_temp_c,
+            model.fan_pct,
+        );
+    });
+    flush_framebuffer_async(spi, cs, dc).await
+}
+
 /// Render the battery detail page:
 /// - Line1: `BAT <CHG|DSG|IDLE> <VV.VV>V <II.I>A`
 /// - Line2: cells 1–3 as `<n>:<mV>`
@@ -941,4 +1098,111 @@ where
         }
     });
     flush_framebuffer(spi, cs, dc)
+}
+
+pub async fn render_batt_detail_once_async<SPI, CS, DC>(
+    spi: &mut SPI,
+    cs: &mut CS,
+    dc: &mut DC,
+    model: &BattDetailData,
+) -> Result<(), SPI::Error>
+where
+    SPI: AsyncSpiBus<u8>,
+    CS: OutputPin,
+    DC: OutputPin,
+{
+    clear_framebuffer(BLACK);
+    with_framebuffer(|fb| {
+        let y0 = MARGIN_TB;
+        let y1 = MARGIN_TB + LINE_H;
+        let y2 = MARGIN_TB + 2 * LINE_H;
+        let y3 = MARGIN_TB + 3 * LINE_H;
+
+        let mut vbuf: heapless::String<16> = heapless::String::new();
+        let mut ibuf: heapless::String<16> = heapless::String::new();
+
+        let mut x = MARGIN_LR;
+        x = draw_text(fb, x, y0, "BAT", CYAN);
+
+        let status = batt_mode_short_text(model.mode);
+        x = draw_text(fb, x + CELL_W, y0, status, CYAN);
+
+        vbuf.clear();
+        let v_color = if let Some(mv) = model.pack_v_mv {
+            fmt_voltage(mv, &mut vbuf);
+            ORANGE
+        } else {
+            let _ = vbuf.push_str(PLACEHOLDER);
+            GRAY
+        };
+        x = draw_text(fb, x + CELL_W, y0, &vbuf, v_color);
+
+        ibuf.clear();
+        let i_color = if let Some(ma) = model.pack_i_ma {
+            fmt_current(ma, &mut ibuf);
+            RED
+        } else {
+            let _ = ibuf.push_str(PLACEHOLDER);
+            GRAY
+        };
+        let _ = draw_text(fb, x + CELL_W, y0, &ibuf, i_color);
+
+        let cols = [0usize, 6, 12];
+
+        for (slot, cell_index) in (1u8..=3).enumerate() {
+            let idx = cell_index - 1;
+            draw_batt_cell_entry(
+                fb,
+                y1,
+                cols[slot],
+                cell_index,
+                model.cells_mv[idx as usize],
+                model.balancing_index,
+                model.blink_on,
+            );
+        }
+
+        for (slot, cell_index) in (4u8..=5).enumerate() {
+            let idx = cell_index - 1;
+            draw_batt_cell_entry(
+                fb,
+                y2,
+                cols[slot],
+                cell_index,
+                model.cells_mv[idx as usize],
+                model.balancing_index,
+                model.blink_on,
+            );
+        }
+
+        if let Some(idx) = model.balancing_index {
+            let mut bal_buf: heapless::String<8> = heapless::String::new();
+            let _ = write!(&mut bal_buf, "BAL{}", idx);
+            let bal_color = YELLOW;
+            let x_bal = cell_to_x(cols[2]);
+            let _ = draw_text(fb, x_bal, y2, &bal_buf, bal_color);
+        }
+
+        let mut temp_buf: heapless::String<8> = heapless::String::new();
+        let label_x = cell_to_x(COL_LABEL);
+        let _ = draw_text(fb, label_x, y3, "TEMP", CYAN);
+
+        for (slot_idx, temp) in model.temps_c.iter().enumerate() {
+            let start_cell = TEMP_LABEL_CELLS + 1 + slot_idx * TEMP_VALUE_CELLS;
+            let x_digits = cell_to_x(start_cell);
+
+            temp_buf.clear();
+            let (digits_color, c_opt) = if let Some(v) = temp {
+                fmt_temp_digits(*v, &mut temp_buf);
+                (WHITE, Some(*v))
+            } else {
+                let _ = temp_buf.push_str(PLACEHOLDER);
+                (GRAY, None)
+            };
+            let x_after_digits = draw_text(fb, x_digits, y3, &temp_buf, digits_color);
+            let color = if c_opt.is_some() { digits_color } else { GRAY };
+            let _ = draw_celsius(fb, x_after_digits, y3, color);
+        }
+    });
+    flush_framebuffer_async(spi, cs, dc).await
 }
