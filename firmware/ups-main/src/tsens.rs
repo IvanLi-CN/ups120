@@ -1,5 +1,5 @@
-use embedded_hal::delay::DelayNs;
 use embassy_time::Timer;
+use embedded_hal::delay::DelayNs;
 use esp_hal::{delay::Delay, efuse::Efuse, peripherals};
 
 #[allow(improper_ctypes)]

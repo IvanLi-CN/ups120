@@ -1,8 +1,5 @@
 use defmt::info;
-use embassy_sync::{
-    blocking_mutex::raw::NoopRawMutex,
-    mutex::Mutex,
-};
+use embassy_sync::{blocking_mutex::raw::NoopRawMutex, mutex::Mutex};
 use embassy_time::{Duration, Timer};
 use static_cell::StaticCell;
 
@@ -54,7 +51,10 @@ pub async fn thermal_task(
     power_state: &'static PowerStateMutex,
     thermal_state: &'static ThermalStateMutex,
 ) {
-    info!("thermal: task started (period={} ms)", fan_control::SAMPLE_PERIOD_MS);
+    info!(
+        "thermal: task started (period={} ms)",
+        fan_control::SAMPLE_PERIOD_MS
+    );
 
     loop {
         // TSENS sampling (async, non-blocking for other Embassy tasks).
