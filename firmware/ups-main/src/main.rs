@@ -726,12 +726,30 @@ pub(crate) async fn log_sc8815_temperature(
     }
 }
 
+fn i2c_error_kind_str<E>(e: &E) -> &'static str
+where
+    E: embedded_hal::i2c::Error,
+{
+    use embedded_hal::i2c::ErrorKind;
+    match e.kind() {
+        ErrorKind::Bus => "bus",
+        ErrorKind::ArbitrationLoss => "arbitration-loss",
+        ErrorKind::NoAcknowledge(_) => "nack",
+        ErrorKind::Overrun => "overrun",
+        _ => "other",
+    }
+}
+
 pub(crate) async fn read_smart_battery_temperatures<I2C>(
     i2c: &mut I2C,
 ) -> Option<fan_control::SmartBatteryTemps>
 where
     I2C: AsyncI2c,
+    <I2C as embedded_hal::i2c::ErrorType>::Error: embedded_hal::i2c::Error,
 {
+    let now_ms = esp_hal::time::Instant::now()
+        .duration_since_epoch()
+        .as_millis() as u64;
     // STM32 smart-battery slave currently exposes raw registers without CRC interleaving.
     // Use pointer write then read 4 bytes: [TPACK_L, TPACK_H, TCHG_L, TCHG_H] (i16 LE, 0.01°C; i16::MIN = invalid).
     let mut data = [0u8; 4];
@@ -751,8 +769,9 @@ where
             );
             Some(temps)
         }
-        Err(_) => {
-            warn!("stm32: temp read failed");
+        Err(e) => {
+            let kind = i2c_error_kind_str(&e);
+            warn!("stm32: temp read failed: kind={} t_ms={}", kind, now_ms);
             None
         }
     }
@@ -761,15 +780,20 @@ where
 pub(crate) async fn read_smart_battery_vbat_mv<I2C>(i2c: &mut I2C) -> Option<u32>
 where
     I2C: AsyncI2c,
+    <I2C as embedded_hal::i2c::ErrorType>::Error: embedded_hal::i2c::Error,
 {
+    let now_ms = esp_hal::time::Instant::now()
+        .duration_since_epoch()
+        .as_millis() as u64;
     let mut vbuf = [0u8; 2];
     match i2c.write_read(STM32_ADDR, &[0x10], &mut vbuf).await {
         Ok(()) => {
             let v = u16::from_le_bytes(vbuf) as u32;
             Some(v)
         }
-        Err(_) => {
-            warn!("stm32: vbat read failed");
+        Err(e) => {
+            let kind = i2c_error_kind_str(&e);
+            warn!("stm32: vbat read failed: kind={} t_ms={}", kind, now_ms);
             None
         }
     }
@@ -778,26 +802,49 @@ where
 pub(crate) async fn read_smart_battery_ibat_ma<I2C>(i2c: &mut I2C) -> Option<i32>
 where
     I2C: AsyncI2c,
+    <I2C as embedded_hal::i2c::ErrorType>::Error: embedded_hal::i2c::Error,
 {
+    let now_ms = esp_hal::time::Instant::now()
+        .duration_since_epoch()
+        .as_millis() as u64;
     // IBAT is exposed as i16 in milliamps; discharge is negative.
     let mut buf = [0u8; 2];
-    if i2c.write_read(STM32_ADDR, &[0x12], &mut buf).await.is_ok() {
-        let i = i16::from_le_bytes(buf) as i32;
-        Some(i)
-    } else {
-        None
+    match i2c.write_read(STM32_ADDR, &[0x12], &mut buf).await {
+        Ok(()) => {
+            let i = i16::from_le_bytes(buf) as i32;
+            Some(i)
+        }
+        Err(e) => {
+            let kind = i2c_error_kind_str(&e);
+            warn!("stm32: ibat read failed: kind={} t_ms={}", kind, now_ms);
+            None
+        }
     }
 }
 
 pub(crate) async fn read_smart_battery_state_flags<I2C>(i2c: &mut I2C) -> Option<u16>
 where
     I2C: AsyncI2c,
+    <I2C as embedded_hal::i2c::ErrorType>::Error: embedded_hal::i2c::Error,
 {
+    let now_ms = esp_hal::time::Instant::now()
+        .duration_since_epoch()
+        .as_millis() as u64;
     let mut buf = [0u8; 2];
-    i2c.write_read(STM32_ADDR, &[SB_REG_STATE_FLAGS], &mut buf)
+    match i2c
+        .write_read(STM32_ADDR, &[SB_REG_STATE_FLAGS], &mut buf)
         .await
-        .ok()
-        .map(|_| u16::from_le_bytes(buf))
+    {
+        Ok(()) => Some(u16::from_le_bytes(buf)),
+        Err(e) => {
+            let kind = i2c_error_kind_str(&e);
+            warn!(
+                "stm32: state-flags read failed: kind={} t_ms={}",
+                kind, now_ms
+            );
+            None
+        }
+    }
 }
 
 pub(crate) async fn read_smart_battery_reg<I2C>(i2c: &mut I2C, reg: u8) -> Result<u8, ()>

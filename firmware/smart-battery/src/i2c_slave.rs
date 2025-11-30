@@ -24,6 +24,7 @@ const WINDOW_START: u8 = 0x08;
 const WINDOW_END: u8 = 0x0F;
 const STATE_FLAGS_ADDR: u8 = 0x20;
 const STATE_BLUE_CODE_ADDR: u8 = 0x22;
+const TEMP_BASE_ADDR: u8 = 0x14;
 const I2C1_BASE: usize = 0x4000_5400;
 const I2C_ISR_OFFSET: usize = 0x18;
 const I2C_RXDR_OFFSET: usize = 0x24;
@@ -195,27 +196,74 @@ fn handle_write(dev: &mut I2c<'static, Blocking, i2c::mode::MultiMaster>, buffer
 
 fn handle_read(dev: &mut I2c<'static, Blocking, i2c::mode::MultiMaster>, buffer: &mut [u8]) {
     let mut start = 0u8;
+    let mut len: usize = 0;
+
     cortex_m::interrupt::free(|_| unsafe {
+        // Refresh dynamic registers that can change between reads.
         REGISTERS[charger_control::CHG_CONFIG_REG as usize] =
             charger_control::config_register_value();
         REGISTERS[CHG_PAUSE_CAUSE_REG as usize] = state_bits::pause_cause();
         enforce_signature();
+
         start = REG_PTR;
+
+        // Host-side protocol only ever issues fixed-size reads from specific
+        // starting addresses. If we always respond with MAX_XFER bytes here,
+        // the STM32 I2C peripheral sees an early NACK (master finished early)
+        // and embassy_stm32 reports Error::Nack. That in turn makes the ESP32
+        // see NACK on every smart-battery read. To avoid this, bound the
+        // response length to what the ESP32 actually requests for each register.
+        len = match start {
+            // One-shot validation window: 16 bytes from 0x00.
+            0x00 => 16,
+            // One-shot validation tail: 4 bytes from WINDOW_END-1 (0x0E).
+            x if x == WINDOW_END.wrapping_sub(1) => 4,
+            // Pack voltage and current (u16 LE).
+            0x10 | 0x12 => 2,
+            // Pack / charger temperatures (two i16 LE).
+            TEMP_BASE_ADDR => 4,
+            // Single-byte status / flags / pause-cause / cells-present.
+            0x1F => 1,
+            STATE_FLAGS_ADDR => 1,
+            x if x == STATE_FLAGS_ADDR.wrapping_add(1) => 1,
+            CHG_PAUSE_CAUSE_REG => 1,
+            0x30..=0x32 => 1,
+            // Per-cell voltages: host reads one byte at a time.
+            0x50..=0x5F => 1,
+            // Default: conservative single-byte response.
+            _ => 1,
+        };
+
+        let buf_len = buffer.len();
+        if buf_len == 0 {
+            len = 0;
+            return;
+        }
+        let used = len.min(buf_len);
+
         let mut ptr = start;
-        for slot in buffer.iter_mut() {
+        for slot in buffer[..used].iter_mut() {
             *slot = REGISTERS[ptr as usize];
             ptr = ptr.wrapping_add(1);
         }
         REG_PTR = ptr;
         REGISTERS[6] = REG_PTR;
         enforce_signature();
+
+        len = used;
     });
 
-    match dev.blocking_respond_to_read(buffer) {
+    if len == 0 {
+        // Nothing to send; just ignore this read gracefully.
+        return;
+    }
+
+    let slice = &buffer[..len];
+    match dev.blocking_respond_to_read(slice) {
         Ok(_) => i2c_diag!(
             "i2c1:read ptr={:02x} -> {=[u8]:02x}",
             start,
-            &buffer[..16.min(buffer.len())]
+            &slice[..16.min(slice.len())]
         ),
         Err(e) => {
             debug!("i2c1:read err={:?}", e);
@@ -406,6 +454,7 @@ fn soft_reset_i2c1(reason: &str) {
 
 fn handle_i2c_fault(reason: &str) {
     // If the bus is physically stuck, do a full recovery; otherwise prefer a light reset.
+    warn!("i2c1:fault reason={}", reason);
     if bus_lines_stuck_low() {
         recover_i2c1(reason);
     } else {
@@ -416,6 +465,7 @@ fn handle_i2c_fault(reason: &str) {
 fn handle_i2c_error(reason: &str, error: i2c::Error) {
     // Rate-limit noisy errors to avoid log storms and potential overflow paths
     log_isr_state(reason);
+    warn!("i2c1:error reason={} err={:?}", reason, error);
     match error {
         i2c::Error::Timeout
         | i2c::Error::Nack
