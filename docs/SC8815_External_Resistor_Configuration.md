@@ -35,7 +35,7 @@ config.battery.use_internal_setting = false;
 // 其他battery参数在外部模式下被硬件完全忽略，无需设置
 ```
 
-## 外部电阻计算
+## 外部电阻计算（电池板 VBATS）
 
 ### 基本公式
 
@@ -127,6 +127,112 @@ VBAT+ ----[R_UP]---- VBATS ----[R_DOWN]---- GND
 1. 检查电阻值和连接
 2. 验证VBATS引脚电压
 3. 检查SC8815配置（use_internal_setting = false）
+
+---
+
+## UPS 电源板 VBUS 外部分压与 9–21V 输出限制
+
+本节针对 **UPS 电源板上的 SC8815 放电 / 输出稳压路径**，说明 VBUS→FB 分压电阻、可编程参考电压与输出电压范围之间的关系，并给出软件层面的 9–21V 约束。
+
+### VBUS→FB 分压电阻（UPS 电源板）
+
+根据 UPS 电源板网表 `docs/ups-power-board/netlist_ups-power-board.enet` 中的 SC8815QDER（ID `gge69_1`）连接关系：
+
+- 引脚分配（参见 `sc8815/docs/SC8815.md`）：  
+  - Pin 14：`FB` – VBUS 电压反馈引脚（放电模式外部分压）。  
+  - Pin 31：`VBUS` – 输出总线节点。
+
+- 在 UPS 电源板网表中，`FB` 与 `VBUS` 的分压网络由以下电阻构成：
+
+  - **R_FB_UP（VBUS→FB 上拉）**  
+    - 组件 ID：`gge89`  
+    - 器件：`0402WGF1003TCE`  
+    - 阻值：**100 kΩ**  
+    - 连接：`pin 1 -> FB`，`pin 2 -> VBUS`  
+    - 来源：`docs/ups-power-board/netlist_ups-power-board.enet` 中 `gge89`。
+
+  - **R_FB_DOWN（FB→GND 下拉）**  
+    - 组件 ID：`gge88`  
+    - 器件：`0402WGF1102TCE`  
+    - 阻值：**11 kΩ**  
+    - 连接：`pin 1 -> GND`，`pin 2 -> FB`  
+    - 来源：`docs/ups-power-board/netlist_ups-power-board.enet` 中 `gge88`。
+
+因此，UPS 电源板上 SC8815 的 VBUS 外部分压比为（完全基于上述网表计算）：
+
+```text
+R_UP   = 100 kΩ  (VBUS → FB)
+R_DOWN = 11  kΩ  (FB   → GND)
+
+1 + R_UP/R_DOWN = 1 + 100k/11k = 111 / 11 ≈ 10.0909
+```
+
+### 外部参考电压与 VBUS 输出的关系
+
+SC8815 在放电模式下，启用外部 VBUS 设定（`FB_SEL = 1`）时，VBUS 与外部参考电压 `VBUSREF_E` 之间的关系为（摘自 `sc8815/docs/SC8815.md`）：
+
+```text
+VBUSREF_E = (4 × VBUSREF_E_SET + VBUSREF_E_SET2 + 1) × 2 mV
+VBUS      = VBUSREF_E × (1 + R_UP/R_DOWN)
+```
+
+代入 UPS 电源板的分压比：
+
+```text
+VBUS = VBUSREF_E × (111 / 11) ≈ VBUSREF_E × 10.0909
+```
+
+其中：
+
+- `VBUSREF_E` 在硬件上支持约 2–2048 mV；  
+- 原厂推荐的 `VBUSREF_E` 参考电压区间为 **0.7 V – 2.048 V**。
+
+### 将软件允许的输出电压限制在 9–21V
+
+项目层面对 UPS 输出电压的约束为：
+
+```text
+9 V ≤ VBUS ≤ 20.6 V
+```
+
+结合分压比，可以得到对应的 `VBUSREF_E` 数值（单位 mV），以下计算完全基于上述 100 kΩ / 11 kΩ 分压比：
+
+- 对于 `VBUS = 9 V`：
+
+  ```text
+  VBUSREF_E = 9000 mV × (11 / 111) ≈ 891.9 mV
+  ```
+
+  该值落在推荐范围 0.7–2.048 V 之内。
+
+- 对于 `VBUS = 20.6 V`：
+
+  ```text
+  VBUSREF_E = 20600 mV × (11 / 111) ≈ 2042.3 mV
+  ```
+
+  该值落在推荐上限 2.048 V 之内。对应的理论最大 VBUS（`VBUSREF_E = 2048 mV`）约为 20.66 V。
+
+综合起来：
+
+- **项目规范层（接口约束）**：  
+  - 上位策略 / UI 只允许请求 9–21 V 的 UPS 输出电压；  
+  - 任何超出 9–21 V 的设定在软件层必须直接拒绝或夹取到边界值，不得写入 SC8815 寄存器。
+
+- **芯片与分压层（物理极限）**：  
+  - 在当前 VBUS 分压（100 kΩ / 11 kΩ）和 `VBUSREF_E` 推荐范围（0.7–2.048 V）下，  
+    实际可生成的 VBUS 区间约为 **7.1–20.7 V**；  
+  - 为满足“9–20.6 V”这一项目约束，固件在计算 `VBUSREF_E` 时必须同时满足：
+
+    ```text
+    9000 mV ≤ VBUS_target ≤ 20600 mV
+    0.7 V   ≤ VBUSREF_E    ≤ 2.048 V
+    ```
+
+    对于接近 21 V 的设定，应将 `VBUSREF_E` 限制在 ≤2.048 V，对应 VBUS 实际略低于 21 V（约 20.7 V）。
+
+> 一旦 UPS 电源板 VBUS 分压电阻（100 kΩ / 11 kΩ）在硬件上发生变更，应以最新网表更新本节中的 R_UP / R_DOWN 及对应计算；本节所有数值均源自 `docs/ups-power-board/netlist_ups-power-board.enet` 与 `sc8815/docs/SC8815.md`，未使用任何假设或虚构数据。
+
 
 ### ADC读数异常
 1. 确认voltage_per_cell设置用于ADC计算

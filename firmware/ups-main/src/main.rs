@@ -62,6 +62,9 @@ pub const SB_REG_STATE_FLAGS: u8 = 0x20;
 pub const SB_STATE_FLAG_AC_PRESENT: u16 = 0x0001;
 // Mirror of STM32 smart-battery state_bits::BALANCING; used for UI overlay.
 pub const SB_STATE_FLAG_BALANCING: u16 = 1 << 5;
+// Mirrors of smart-battery state_bits::FAULT_BQ / FAULT_SC; used for UPS discharge gating.
+pub const SB_STATE_FLAG_FAULT_BQ: u16 = 1 << 6;
+pub const SB_STATE_FLAG_FAULT_SC: u16 = 1 << 7;
 pub const SB_CHG_STATUS_BALANCING: u8 = 1 << 5;
 pub const SB_CFG_BIT_AUTO: u8 = 1 << 0;
 pub const SB_CFG_BIT_MANUAL: u8 = 1 << 1;
@@ -73,10 +76,36 @@ pub const SOC_EMPTY_VBAT_MV: u32 = 12_500; // Cutoff threshold (pack)
 pub const SOC_FULL_VBAT_MV: u32 = 18_500; // Full threshold (pack)
 pub const CHARGE_START_VBAT_MV: u32 = 17_000;
 pub const CHARGE_STOP_VBAT_MV: u32 = SOC_FULL_VBAT_MV;
+/// UPS discharge low-voltage stop threshold (pack), must stay >= PACK_OUTPUT_CUTOFF_THRESHOLD_MV.
+/// match discharge_policy.md §4.3; 5S * 2.7V ≈ 13.5V, keeps margin above PACK_OUTPUT_CUTOFF_THRESHOLD_MV.
+pub const DISCH_STOP_VBAT_MV: u32 = 13_500;
+/// UPS discharge resume threshold with hysteresis (pack).
+/// match discharge_policy.md §4.3; 5S * 3.2V ≈ 16.0V.
+pub const DISCH_RESUME_VBAT_MV: u32 = 16_000;
 /// AC 适配器恢复后，IN_PG 连续为 High 至少 10 s 才允许重新开始充电。
 pub const AC_STABLE_MS: u64 = 10_000;
 pub const TEMP_PAUSE_C: f32 = 40.0;
 pub const TEMP_RESUME_C: f32 = 35.0;
+/// UPS discharge thermal stop threshold (SC8815 ADIN, °C).
+pub const UPS_DISCH_STOP_C: f32 = 70.0;
+/// UPS discharge thermal resume threshold (°C), must be < UPS_DISCH_STOP_C.
+pub const UPS_DISCH_RESUME_C: f32 = 50.0;
+/// UPS VBUS minimum/maximum targets allowed by project spec (see SC8815_External_Resistor_Configuration.md).
+pub const UPS_VBUS_MIN_MV: u16 = 9_000;
+pub const UPS_VBUS_MAX_MV: u16 = 20_600;
+/// SC8815 VBUS/VBAT sense resistor values on the UPS power board (see
+/// docs/ups-power-board/netlist_ups-power-board.enet, R47/R26 = 5mΩ).
+pub const UPS_SC_RS1_MOHM: u16 = 5;
+pub const UPS_SC_RS2_MOHM: u16 = 5;
+/// SC8815 OTG current limits (mA) for UPS OUT path.
+/// With RS1=RS2=5mΩ and IBUS_RATIO=3x, the SC8815 datasheet and driver
+/// formula cap IBUS at ≈6A (IBUS_LIM_SET <= 255). We therefore clamp the
+/// software limit to 6000mA on both sides.
+pub const UPS_SC_IBUS_LIMIT_MA: u16 = 6_000;
+pub const UPS_SC_IBAT_LIMIT_MA: u16 = 6_000;
+/// Default 12V mode targets (VIN present vs missing).
+pub const UPS_VBUS_AC_ONLINE_MV: u16 = 11_500;
+pub const UPS_VBUS_AC_OFFLINE_MV: u16 = 12_000;
 pub const SB_WRITE_RETRY_ATTEMPTS: u8 = 3;
 pub const SB_WRITE_RETRY_DELAY_MS: u32 = 5;
 pub const SB_CFG_VERIFY_INTERVAL_MS: u64 = 1_000;
@@ -312,16 +341,17 @@ async fn ui_task(
             let current_slot_idx = active_slots[temp_cycle_index];
             let display_slot = temp_sources[current_slot_idx].0;
 
-            // Use latest VBAT / IBAT measurements from power_task.
+            // Use latest VBAT / IBAT / OUT measurements from power_task.
             let vbat_mv = power_snapshot.vbat_mv;
             let ibat_ma = power_snapshot.ibat_ma;
+            let out_enabled = power_snapshot.out_enabled;
 
             let now_millis = esp_hal::time::Instant::now()
                 .duration_since_epoch()
                 .as_millis() as u64;
 
             // Derive UI mode and pack current magnitude from IBAT.
-            let (ui_mode, pack_i_ma_abs) = match ibat_ma {
+            let (mut ui_mode, pack_i_ma_abs) = match ibat_ma {
                 Some(i) => {
                     let abs_ma: u32 = if i < 0 { (-i) as u32 } else { i as u32 };
                     let mode = if abs_ma < 50 {
@@ -335,6 +365,12 @@ async fn ui_task(
                 }
                 None => (ui::Mode::Standby, None),
             };
+
+            // Ensure Mode::Discharge is only shown when OUT is actually enabled
+            // (match discharge_policy.md §7 UI wiring note).
+            if matches!(ui_mode, ui::Mode::Discharge) && !out_enabled {
+                ui_mode = ui::Mode::Standby;
+            }
 
             // Best-effort balancing cell index: when the smart-battery reports
             // \"balancing active\" in STATE_FLAGS, highlight the highest-voltage present cell.
@@ -364,6 +400,15 @@ async fn ui_task(
                 .saturating_div(1000)
                 .min(u64::from(u32::MAX)) as u32;
 
+            // OUT trio values for dashboard. When OUT is disabled or missing,
+            // keep them at 0 so the Discharge view renders a neutral value.
+            let out_v_mv = power_snapshot.out_v_mv.unwrap_or(0);
+            let out_a_ma = power_snapshot
+                .out_a_ma
+                .map(|i| if i < 0 { (-i) as u32 } else { i as u32 })
+                .unwrap_or(0);
+            let out_w_mw = power_snapshot.out_w_mw.unwrap_or(0);
+
             // Build a minimal dashboard model (real temps + SoC; other fields placeholder).
             let model = ui::DashboardData {
                 mode: ui_mode,
@@ -378,9 +423,9 @@ async fn ui_task(
                 in_a_ma: 0,
                 in_w_mw: 0,
                 chg_w_mw: 0,
-                out_v_mv: 0,
-                out_a_ma: 0,
-                out_w_mw: 0,
+                out_v_mv,
+                out_a_ma,
+                out_w_mw,
                 bat_temp_c: pack_temp,
                 charger_temp_c: charger_temp,
                 ups_temp_c: ups_temp,
@@ -661,68 +706,6 @@ async fn main(spawner: Spawner) -> ! {
     // Park the main task; all work is now handled by background Embassy tasks.
     loop {
         Timer::after(Duration::from_millis(1_000)).await;
-    }
-}
-
-pub(crate) async fn log_sc8815_temperature(
-    i2c_bus: &'static I2cBusMutex,
-    tca: &mut Option<Tca6408a<SharedI2cDevice<'static>>>,
-    sc: &mut Option<sc8815::SC8815<SharedI2cDevice<'static>>>,
-    sc_init_done: &mut bool,
-    last_adin_temp_c: &mut Option<f32>,
-) {
-    let mut adin_mv_sample: Option<u16> = None;
-    let mut ce_enabled = false;
-
-    if let Some(t) = tca.as_mut() {
-        if let Err(_) = t.set_sc_ce(true).await {
-            warn!("sc8815: failed to pull CE low via TCA6408A");
-        } else {
-            ce_enabled = true;
-        }
-    }
-
-    Timer::after(Duration::from_millis(5)).await;
-
-    if ce_enabled {
-        // Ensure instance exists
-        if sc.is_none() {
-            let dev = I2cDevice::new(i2c_bus);
-            let mut drv = sc8815::SC8815::new(dev, SC8815_ADDR);
-            if !*sc_init_done {
-                match drv.init().await {
-                    Ok(()) => *sc_init_done = true,
-                    Err(_) => warn!("sc8815: init failed"),
-                }
-            }
-            *sc = Some(drv);
-        }
-
-        if let Some(d) = sc.as_mut() {
-            if let Err(_) = d.set_adc_conversion(true).await {
-                warn!("sc8815: ADC start failed");
-            } else {
-                Timer::after(Duration::from_millis(10)).await;
-                if let Ok(meas) = d.get_adc_measurements().await {
-                    adin_mv_sample = Some(meas.adin_mv);
-                }
-                let _ = d.set_adc_conversion(false).await;
-            }
-        }
-    }
-
-    if let Some(t) = tca.as_mut() {
-        if ce_enabled {
-            if let Err(_) = t.set_sc_ce(false).await {
-                warn!("sc8815: failed to restore CE high");
-            }
-        }
-    }
-
-    if let Some(adin_mv) = adin_mv_sample {
-        if let Some(temp_c) = adin_temp::adin_mv_to_celsius(adin_mv) {
-            *last_adin_temp_c = Some(temp_c);
-        }
     }
 }
 
