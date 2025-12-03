@@ -9,11 +9,11 @@ use static_cell::StaticCell;
 use crate::{
     fan_control, io_expander::Tca6408a, I2cBusMutex, SharedI2cDevice, AC_STABLE_MS,
     CHARGE_START_VBAT_MV, CHARGE_STOP_VBAT_MV, DISCH_RESUME_VBAT_MV, DISCH_STOP_VBAT_MV,
-    SB_REG_CHG_CONFIG, SB_REG_CHG_PAUSE_CAUSE, SB_REG_STATE_FLAGS, SB_STATE_FLAG_AC_PRESENT,
-    SB_STATE_FLAG_FAULT_BQ, SB_STATE_FLAG_FAULT_SC, SB_STATE_POLL_INTERVAL_MS, UPS_DISCH_RESUME_C,
-    UPS_DISCH_STOP_C, UPS_SC_IBAT_LIMIT_MA, UPS_SC_IBUS_LIMIT_MA, UPS_SC_RS1_MOHM,
-    UPS_SC_RS2_MOHM, UPS_VBUS_AC_OFFLINE_MV, UPS_VBUS_AC_ONLINE_MV, UPS_VBUS_MAX_MV,
-    UPS_VBUS_MIN_MV,
+    SB_REG_CHG_CONFIG, SB_REG_CHG_PAUSE_CAUSE, SB_REG_STATE_FLAGS, SB_REG_TEMP_STATUS,
+    SB_STATE_FLAG_AC_PRESENT, SB_STATE_FLAG_FAULT_BQ, SB_STATE_FLAG_FAULT_SC,
+    SB_STATE_POLL_INTERVAL_MS, UPS_DISCH_RESUME_C, UPS_DISCH_STOP_C, UPS_SC_IBAT_LIMIT_MA,
+    UPS_SC_IBUS_LIMIT_MA, UPS_SC_RS1_MOHM, UPS_SC_RS2_MOHM, UPS_VBUS_AC_OFFLINE_MV,
+    UPS_VBUS_AC_ONLINE_MV, UPS_VBUS_MAX_MV, UPS_VBUS_MIN_MV,
 };
 
 /// Charging mode exposed to other tasks.
@@ -175,7 +175,9 @@ async fn sc8815_init_otg(
         // OUT path are set purely by external resistor networks
         // (use_internal_setting=false), see SC8815_External_Resistor_Configuration.md.
         let mut config = sc8815::DeviceConfiguration::default();
-        config.battery.use_internal_setting = false;
+        config.battery.cell_count = sc8815::CellCount::Cells4S;
+        config.battery.voltage_per_cell = sc8815::VoltagePerCell::Mv4200;
+        config.battery.use_internal_setting = true;
         // Current-limit configuration per UPS power board shunts:
         // RS1 / RS2 are both 5mΩ (R47/R26, HoLLR1206-1W-5mR-1%), and we start
         // with a conservative 7A OTG limit on both sides to match the DC jack
@@ -184,9 +186,11 @@ async fn sc8815_init_otg(
         config.current_limits.rs2_mohm = UPS_SC_RS2_MOHM;
         config.current_limits.ibus_limit_ma = UPS_SC_IBUS_LIMIT_MA;
         config.current_limits.ibat_limit_ma = UPS_SC_IBAT_LIMIT_MA;
+        config.current_limits.ibus_ratio = sc8815::IbusRatio::Ratio6x;
         config.power.operating_mode = sc8815::OperatingMode::OTG;
         config.power.switching_frequency = sc8815::SwitchingFrequency::Freq450kHz;
         config.power.dead_time = sc8815::DeadTime::Ns80;
+        config.power.pfm_mode = true;
         config.trickle_charging = false;
         config.charging_termination = false;
         config.use_ibus_for_charging = false;
@@ -197,7 +201,7 @@ async fn sc8815_init_otg(
                 // for this UPS application; SC8815 shall not autonomously
                 // reduce IBUS/IBAT on VBUS_SHORT, we rely on our own gating
                 // and current limits instead.
-                let _ = drv.set_short_foldback_disable(true).await;
+                // let _ = drv.set_short_foldback_disable(true).await;
                 // Optional: select 12.5x VBAT monitor ratio so the 12–18.5 V
                 // operating range has headroom and does not saturate a 5x span.
                 let _ = drv.set_vbat_monitor_ratio(0).await;
@@ -354,6 +358,8 @@ pub async fn power_task(
     let mut last_vbus_ac_mode: Option<bool> = None;
     // Throttling for SC8815 ADC debug logs.
     let mut last_sc_meas_log_ms: u64 = 0;
+    // Ensure we log the new TEMP_STATUS register at least once after a successful read.
+    let mut temp_status_logged: bool = false;
 
     // Periodic loop matching the original 500 ms cadence for power sampling and
     // charger control.
@@ -370,6 +376,20 @@ pub async fn power_task(
             let mut sb_i2c = I2cDevice::new(i2c_bus);
             crate::read_smart_battery_temperatures(&mut sb_i2c).await
         };
+
+        if !temp_status_logged {
+            let mut sb_i2c = I2cDevice::new(i2c_bus);
+            match crate::read_smart_battery_reg(&mut sb_i2c, SB_REG_TEMP_STATUS).await {
+                Ok(v) => {
+                    debug!("stm32: TEMP_STATUS=0x{:02X}", v);
+                    temp_status_logged = true;
+                }
+                Err(_) => {
+                    // Leave temp_status_logged=false so we retry on the next loop
+                    // iteration until we get a successful read.
+                }
+            }
+        }
 
         let pack_temp_c = sb_temps.and_then(|t| t.pack_c);
 
@@ -768,10 +788,7 @@ pub async fn power_task(
                     }
 
                     // Periodic SC8815 both-side measurement log (VBUS/VBAT + IBUS/IBAT).
-                    if now_millis
-                        .saturating_sub(last_sc_meas_log_ms)
-                        >= 1_000
-                    {
+                    if now_millis.saturating_sub(last_sc_meas_log_ms) >= 1_000 {
                         last_sc_meas_log_ms = now_millis;
                         info!(
                             "discharge: meas vbus={=u16}mV ibus={=u16}mA vbat={=u16}mV ibat={=u16}mA",

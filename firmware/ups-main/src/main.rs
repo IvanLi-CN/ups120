@@ -51,13 +51,15 @@ pub const STM32_ADDR: u8 = 0x35;
 pub const SB_SIG: [u8; 2] = [b'S', b'B'];
 pub const SB_WINDOW_START: u8 = 0x08;
 pub const SB_WINDOW_END: u8 = 0x0F;
-pub const SB_TEMP_BASE: u8 = 0x14;
-pub const SB_TEMP_DATA_BYTES: usize = 4;
-pub const SB_TEMP_FRAME_BYTES: usize = SB_TEMP_DATA_BYTES * 2;
+// Smart-battery extended temperature window (0x40..0x47, 8×int8 °C).
+pub const SB_TEMP_BASE: u8 = 0x40;
+pub const SB_TEMP_DATA_BYTES: usize = 8;
+pub const SB_TEMP_FRAME_BYTES: usize = SB_TEMP_DATA_BYTES;
 pub const TEST_A: u8 = 0x5A;
 pub const TEST_B: u8 = 0xA5;
 pub const SB_REG_CHG_CONFIG: u8 = 0x31;
 pub const SB_REG_CHG_PAUSE_CAUSE: u8 = 0x32;
+pub const SB_REG_TEMP_STATUS: u8 = 0x23;
 pub const SB_REG_STATE_FLAGS: u8 = 0x20;
 pub const SB_STATE_FLAG_AC_PRESENT: u16 = 0x0001;
 // Mirror of STM32 smart-battery state_bits::BALANCING; used for UI overlay.
@@ -733,19 +735,35 @@ where
     let now_ms = esp_hal::time::Instant::now()
         .duration_since_epoch()
         .as_millis() as u64;
-    // STM32 smart-battery slave currently exposes raw registers without CRC interleaving.
-    // Use pointer write then read 4 bytes: [TPACK_L, TPACK_H, TCHG_L, TCHG_H] (i16 LE, 0.01°C; i16::MIN = invalid).
-    let mut data = [0u8; 4];
+    // STM32 smart-battery exposes an 8-byte temperature window at 0x40..0x47:
+    // [T_PACK_C, T_CHG_C, T_NTC0_C, T_NTC1_C, T_NTC2_C, T_NTC3_C, T_BQ_INT_C, T_MCU_C]
+    // All entries are int8 in °C; i8::MIN is treated as "invalid/missing".
+    let mut data = [0u8; SB_TEMP_DATA_BYTES];
     match i2c.write_read(STM32_ADDR, &[SB_TEMP_BASE], &mut data).await {
         Ok(()) => {
-            let pack = i16::from_le_bytes([data[0], data[1]]);
-            let charger = i16::from_le_bytes([data[2], data[3]]);
-            let pack_c = temp_from_centi(pack);
-            let charger_c = temp_from_centi(charger);
+            let decode = |raw: i8| -> Option<f32> {
+                if raw == i8::MIN {
+                    None
+                } else {
+                    Some(raw as f32)
+                }
+            };
+
+            let pack_c = decode(data[0] as i8);
+            let charger_c = decode(data[1] as i8);
             let temps = fan_control::SmartBatteryTemps::new(pack_c, charger_c);
-            // Keep detailed temperature reporting at debug level to avoid cluttering button logs.
+
+            // Log raw window bytes and derived pack/charger temperatures at debug level.
             debug!(
-                "smart-battery temps => pack={=f32}°C charger={=f32}°C hottest={=f32}°C",
+                "stm32: temp regs[40-47]={:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} pack={=f32}°C charger={=f32}°C hottest={=f32}°C",
+                data[0],
+                data[1],
+                data[2],
+                data[3],
+                data[4],
+                data[5],
+                data[6],
+                data[7],
                 pack_c.unwrap_or(f32::NAN),
                 charger_c.unwrap_or(f32::NAN),
                 temps.highest().unwrap_or(f32::NAN)
