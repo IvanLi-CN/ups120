@@ -34,6 +34,7 @@ defmt-rtt = { version = "1.0.0", features = ["disable-blocking-mode"] }
 embassy-embedded-hal = { path = "../../embassy/embassy-embedded-hal" }
 embassy-futures = { path = "../../embassy/embassy-futures" }
 bq769x0-async-rs = { path = "../../bq76920", features = ["async", "defmt"] }
+sb_temp_policy = { path = "../../libs/sb_temp_policy", default-features = false }
 static_cell = "2.1.0"
 portable-atomic = { version = "1.11.0", features = ["critical-section"] }
 heapless = { version = "0.9.1", default-features = false }

@@ -31,6 +31,8 @@ mod shared;
 #[cfg(not(feature = "ship-mode"))]
 mod sleep_manager;
 #[cfg(not(feature = "ship-mode"))]
+mod temp_policy;
+#[cfg(not(feature = "ship-mode"))]
 mod thermal;
 
 use bq769x0_async_rs::{BatteryConfig, Bq769x0, Enabled as BqCrcEnabled};
@@ -208,6 +210,8 @@ async fn main(_spawner: Spawner) {
         // (Optional: I2C1.CR1.WUPEN for wake-from-STOP is omitted to save flash; RTC remains primary wake source.)
         i2c1_blocking.into_slave_multimaster(SlaveAddrConfig::basic(i2c_slave::SLAVE_ADDRESS))
     };
+    #[cfg(not(feature = "ship-mode"))]
+    let temp_alert = Output::new(p.PB5, Level::High, Speed::Low);
 
     // Keep SC8815 power stage disabled during configuration.
     #[allow(unused_mut)]
@@ -443,6 +447,7 @@ async fn main(_spawner: Spawner) {
                 bq76920_measurements_publisher: bq76920_meas_pub,
                 sc8815_alerts_subscriber: sc8815_alerts_sub,
                 balancing_cv_publisher: balancing_cv_pub,
+                temp_alert_pin: Some(temp_alert),
             })
             .expect("bq token"),
         );

@@ -15,8 +15,8 @@ use crate::shared::{
     BalancingCvRequestSubscriber, Bq76920MeasurementsSubscriber, Sc8815AlertsPublisher,
     Sc8815MeasurementsPublisher,
 };
-use crate::tmp75::{TMP75_DEFAULT_ADDR, Tmp75};
 use crate::thermal::{self, TEMP_INVALID_0_01C};
+use crate::tmp75::{TMP75_DEFAULT_ADDR, Tmp75};
 use crate::{
     charger_control::{self, ChargeSpeedSetting, limits_for},
     state_bits::{self, bits as sbits, pause_bits},

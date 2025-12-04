@@ -411,6 +411,17 @@ pub fn update_state_snapshot(flags: u16, blue_code: u8) {
     });
 }
 
+/// Update the TEMP_STATUS bitfield (0x23) exposed on the I2C slave.
+///
+/// This is written from the unified thermal policy and is kept intentionally
+/// simple so that it can be called from async tasks without holding any
+/// additional locks.
+pub fn update_temp_status(bits: u8) {
+    cortex_m::interrupt::free(|_| unsafe {
+        REGISTERS[TEMP_STATUS_ADDR as usize] = bits;
+    });
+}
+
 fn write_u16_le(addr: u8, value: u16) {
     let lo = (value & 0xFF) as u8;
     let hi = (value >> 8) as u8;

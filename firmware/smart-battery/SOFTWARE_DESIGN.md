@@ -206,9 +206,11 @@ controls, and telemetry loops that underpin bring-up.
   The slave address is `0x35` (7‑bit). Supported bus rates: 100 kHz and 400 kHz.
   Clock stretching is permitted (≤ 150 µs) while copying a fresh telemetry
   snapshot into the I²C TX buffer. General‑call is disabled.
-- **SMBus Alert (PB5) & Alert GPIOs**: Reserved for future SMBus/alert handling;
-  interrupt lines `PB1` (BQ alert) and `PB2` (inner bus INT) are wired for EXTI
-  wakeups.
+- **SMBus Alert (PB5) & Alert GPIOs**: PB5/I2C1_SMBA is used for pack
+  temperature alerts. When `TEMP_STATUS.TEMP_HIGH_CHG` 或
+  `TEMP_STATUS.TEMP_HIGH_DSG` 置位时，固件通过 PB5 拉低向主机发出过温通知；
+  当这两位清零（仅可能在温度恢复到安全窗口后）时，PB5 释放为高电平。  
+  其他告警线：`PB1`（BQ alert）和 `PB2`（inner bus INT）仍用于 EXTI 唤醒。
 - **CE (PA10)**: Active-low charger enable. Held high during safety bring-up
   and whenever no SC8815 activity is required. The firmware asserts it low only
   when the charger must be configured, telemetry must be sampled from the

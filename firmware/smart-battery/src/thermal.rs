@@ -1,4 +1,4 @@
-use embassy_sync::blocking_mutex::{raw::CriticalSectionRawMutex, Mutex as BlockingMutex};
+use embassy_sync::blocking_mutex::{Mutex as BlockingMutex, raw::CriticalSectionRawMutex};
 
 /// Sentinel value for "temperature unknown" in 0.01 °C domain.
 pub const TEMP_INVALID_0_01C: i16 = i16::MIN;
@@ -104,7 +104,13 @@ fn max_valid(a: i16, b: i16) -> i16 {
         (true, true) => TEMP_INVALID_0_01C,
         (false, true) => a,
         (true, false) => b,
-        (false, false) => if a > b { a } else { b },
+        (false, false) => {
+            if a > b {
+                a
+            } else {
+                b
+            }
+        }
     }
 }
 
@@ -152,4 +158,3 @@ pub fn snapshot() -> ThermalSnapshot {
         }
     })
 }
-

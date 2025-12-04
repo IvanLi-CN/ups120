@@ -10,12 +10,12 @@ use core::ptr;
 
 use defmt::debug;
 use embassy_executor::task;
-use embassy_stm32::adc::{Adc, SampleTime, Temperature};
+use embassy_stm32::Peri;
 use embassy_stm32::adc;
+use embassy_stm32::adc::{Adc, SampleTime, Temperature};
 use embassy_stm32::bind_interrupts;
 use embassy_stm32::gpio::{Level, Output, Speed};
 use embassy_stm32::peripherals::{ADC1, PA0, PA1, PA2, PA3, PB12};
-use embassy_stm32::Peri;
 use embassy_time::{Duration, Timer};
 
 use crate::thermal::{self, TEMP_INVALID_0_01C};
@@ -142,10 +142,8 @@ fn ntc_mv_to_temp_0_01c(mv: u16) -> i16 {
             let delta_mv = (hi.mv as i32) - mv_i;
             let temp_span = (lo.temp_0_01c as i32) - (hi.temp_0_01c as i32);
             // Linear interpolation in integer domain with rounding.
-            let temp = (hi.temp_0_01c as i32)
-                + (temp_span * delta_mv + span_mv / 2) / span_mv;
-            return temp
-                .clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+            let temp = (hi.temp_0_01c as i32) + (temp_span * delta_mv + span_mv / 2) / span_mv;
+            return temp.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
         }
     }
 
@@ -181,8 +179,7 @@ fn adc_sample_to_mcu_temp_0_01c(sample: u16, ts_cal1: u16, ts_cal2: u16) -> i16 
         / delta_cal)
         + TS_CAL1_TEMP_C * 100;
 
-    temp_x100
-        .clamp(i16::MIN as i32, i16::MAX as i32) as i16
+    temp_x100.clamp(i16::MIN as i32, i16::MAX as i32) as i16
 }
 
 #[task]
@@ -234,10 +231,7 @@ pub async fn ntc_temp_task(args: NtcTempTaskArgs) {
         thermal::update_ntc_temps(&t_ntc_0_01c);
         thermal::update_mcu_temp(t_mcu_0_01c);
 
-        debug!(
-            "ntc:t={:?} mcu={}x0.01C",
-            t_ntc_0_01c, t_mcu_0_01c
-        );
+        debug!("ntc:t={:?} mcu={}x0.01C", t_ntc_0_01c, t_mcu_0_01c);
 
         Timer::after(Duration::from_millis(NTC_SAMPLE_PERIOD_MS)).await;
     }
