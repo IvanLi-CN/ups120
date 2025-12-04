@@ -4,6 +4,7 @@ use core::ptr::read_volatile;
 
 use crate::data_types::{Bq76920Measurements, Sc8815Measurements};
 use crate::sleep_manager;
+use crate::thermal;
 use crate::{activity::poke_i2c1_activity, charger_control, state_bits};
 use defmt::{debug, info, warn};
 use embassy_executor::task;
@@ -352,28 +353,42 @@ pub fn update_bq_measurements<const N: usize>(meas: &Bq76920Measurements<N>) {
 
     // Extended temperature window (0x40..0x47, all int8 in °C).
     //
-    // At this stage only pack temperature is fully wired; other fields are
-    // exposed as TEMP_INVALID_I8 to indicate "not yet available".
-    let encode_centi_to_i8 = |raw: i16| -> i8 {
-        if raw == i16::MIN {
+    // Values are sourced from the aggregated thermal snapshot so that NTCs,
+    // TMP75, BQ internal temperature and MCU temperature share a single
+    // encoding path.
+    let snapshot = thermal::snapshot();
+
+    let encode_temp_i8 = |raw_0_01c: i16| -> i8 {
+        if raw_0_01c == i16::MIN {
             TEMP_INVALID_I8
         } else {
-            let c = raw / 100;
+            // Round 0.01 °C to nearest whole °C without floats.
+            let c = if raw_0_01c >= 0 {
+                (raw_0_01c + 50) / 100
+            } else {
+                (raw_0_01c - 50) / 100
+            };
             c.clamp(i8::MIN as i16, i8::MAX as i16) as i8
         }
     };
 
-    let t_pack_i8 = encode_centi_to_i8(hottest);
-    // Board/charger, NTCs, BQ internal, and MCU temperatures will be wired up
-    // by later tasks; expose them as invalid for now so the host can treat them
-    // as None.
-    let t_chg_i8 = TEMP_INVALID_I8;
-    let t_ntc0_i8 = TEMP_INVALID_I8;
-    let t_ntc1_i8 = TEMP_INVALID_I8;
-    let t_ntc2_i8 = TEMP_INVALID_I8;
-    let t_ntc3_i8 = TEMP_INVALID_I8;
-    let t_bq_int_i8 = TEMP_INVALID_I8;
-    let t_mcu_i8 = TEMP_INVALID_I8;
+    let t_pack_i8 = encode_temp_i8(snapshot.t_pack_0_01c);
+    let t_chg_i8 = encode_temp_i8(snapshot.t_chg_0_01c);
+    let t_ntc0_i8 = encode_temp_i8(snapshot.t_ntc_0_01c[0]);
+    let t_ntc1_i8 = encode_temp_i8(snapshot.t_ntc_0_01c[1]);
+    let t_ntc2_i8 = encode_temp_i8(snapshot.t_ntc_0_01c[2]);
+    let t_ntc3_i8 = encode_temp_i8(snapshot.t_ntc_0_01c[3]);
+    let t_bq_int_i8 = encode_temp_i8(snapshot.t_bq_int_0_01c);
+    let t_mcu_i8 = encode_temp_i8(snapshot.t_mcu_0_01c);
+
+    debug!(
+        "therm: pack={} chg={} ntc={:?} bq_int={} mcu={}",
+        snapshot.t_pack_0_01c,
+        snapshot.t_chg_0_01c,
+        snapshot.t_ntc_0_01c,
+        snapshot.t_bq_int_0_01c,
+        snapshot.t_mcu_0_01c
+    );
 
     let temp_window: [u8; TEMP_WINDOW_LEN] = [
         t_pack_i8 as u8,

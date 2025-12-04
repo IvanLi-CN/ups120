@@ -18,6 +18,8 @@ mod irq_mux;
 #[cfg(not(feature = "ship-mode"))]
 mod leds4_task;
 #[cfg(not(feature = "ship-mode"))]
+mod ntc_temp;
+#[cfg(not(feature = "ship-mode"))]
 mod sc8815_task;
 #[cfg(not(feature = "ship-mode"))]
 mod state_bits;
@@ -28,6 +30,8 @@ mod tmp75;
 mod shared;
 #[cfg(not(feature = "ship-mode"))]
 mod sleep_manager;
+#[cfg(not(feature = "ship-mode"))]
+mod thermal;
 
 use bq769x0_async_rs::{BatteryConfig, Bq769x0, Enabled as BqCrcEnabled};
 // no direct info! logs to减小尺寸
@@ -210,12 +214,12 @@ async fn main(_spawner: Spawner) {
     let mut ce = Output::new(p.PA10, Level::High, Speed::Low);
     #[allow(unused_mut)]
     let mut pstop = Output::new(p.PA9, Level::High, Speed::Low);
-    let mut exit_shipmode = Output::new(p.PA1, Level::Low, Speed::Low);
-    // BQ76920 may power-up in SHIP; assert wake pin early to bring it to NORMAL.
+    // EXIT_SHIPMODE uses PH0, which is wired (via D3 clamp) onto the BQ76920 TS1 pin.
+    // On this hardware the BQ cannot be woken from SHIP by I2C traffic alone; we must
+    // assert PH0 high long enough for the analog front end to exit ship mode.
+    #[allow(unused_mut)]
+    let mut exit_ship = Output::new(p.PH0, Level::Low, Speed::Low);
     defmt::debug!("bq:wake");
-    exit_shipmode.set_high();
-    Timer::after(Duration::from_millis(1200)).await;
-    exit_shipmode.set_low();
 
     // (Removed: raw I2C1 PAC readbacks to save flash)
 
@@ -251,11 +255,11 @@ async fn main(_spawner: Spawner) {
         balancing_cv_chan,
     ) = shared::init_pubsubs();
 
-    // 先尝试初始化 BQ76920（总重试 ≤ 500 ms）
+    // Bring up BQ76920 with a two-phase sequence:
+    // 1) Try configuration over I2C at the known addresses.
+    // 2) If that fails, assert EXIT_SHIPMODE (PH0 → TS1) high for 500 ms and retry once.
     defmt::debug!("fw:boot smart-battery");
     defmt::debug!("bq:init");
-    let probe_start = Instant::now();
-    let probe_deadline = probe_start + Duration::from_millis(500);
     let tried_addresses = [BQ76920_I2C_ADDR, 0x18u8];
     let mut cfg_template = BatteryConfig {
         overvoltage_trip: 3650,
@@ -267,41 +271,40 @@ async fn main(_spawner: Spawner) {
     cfg_template.protection_config.ocd_limit = 10_000;
 
     let mut bq_init_addr: Option<u8> = None;
-    'addr_loop: for addr in tried_addresses.iter().copied() {
-        if Instant::now() >= probe_deadline {
-            break;
+    let mut did_exit_ship_pulse = false;
+
+    'outer: loop {
+        // Phase: pure I2C configuration attempts.
+        for addr in tried_addresses.iter().copied() {
+            defmt::debug!("bq:try=0x{:02x}", addr);
+            let i2c_dev_for_bq = I2cDevice::new(i2c_bus);
+            let mut probe: Bq769x0<_, BqCrcEnabled, 5> =
+                Bq769x0::new(i2c_dev_for_bq, addr, 3, None);
+            if probe.try_apply_config(&cfg_template).await.is_ok() {
+                defmt::debug!("bq:cfg ok addr=0x{:02x}", addr);
+                crate::failsafe::set_bq_online(true);
+                bq_init_addr = Some(addr);
+                break 'outer;
+            }
         }
-        defmt::debug!("bq:try=0x{:02x}", addr);
-        let i2c_dev_for_bq = I2cDevice::new(i2c_bus);
-        let mut probe: Bq769x0<_, BqCrcEnabled, 5> = Bq769x0::new(i2c_dev_for_bq, addr, 3, None);
-        if probe.try_apply_config(&cfg_template).await.is_ok() {
-            defmt::debug!("bq:0x{:02x}", addr);
-            crate::failsafe::set_bq_online(true);
-            bq_init_addr = Some(addr);
+
+        // If we've already pulsed EXIT_SHIPMODE once, give up after the second round of attempts.
+        if did_exit_ship_pulse {
             break;
         }
 
-        if Instant::now() >= probe_deadline {
-            break;
-        }
-        exit_shipmode.set_high();
-        Timer::after(Duration::from_millis(150)).await;
-        exit_shipmode.set_low();
-        if Instant::now() >= probe_deadline {
-            break;
-        }
-        let i2c_dev_for_bq = I2cDevice::new(i2c_bus);
-        let mut probe: Bq769x0<_, BqCrcEnabled, 5> = Bq769x0::new(i2c_dev_for_bq, addr, 3, None);
-        if probe.try_apply_config(&cfg_template).await.is_ok() {
-            defmt::debug!("bq:0x{:02x}", addr);
-            crate::failsafe::set_bq_online(true);
-            bq_init_addr = Some(addr);
-            break 'addr_loop;
-        }
+        // First round failed: drive PH0 high (through D3 to TS1) to force the BQ out of SHIP mode.
+        defmt::warn!("bq:init failed, pulsing EXIT_SHIPMODE (PH0→TS1)");
+        exit_ship.set_high();
+        Timer::after(Duration::from_millis(500)).await;
+        exit_ship.set_low();
+        did_exit_ship_pulse = true;
+        // Loop back and retry configuration at both addresses.
     }
+
     if bq_init_addr.is_none() {
         crate::failsafe::set_bq_online(false);
-        defmt::warn!("bq:init failed within 500ms");
+        defmt::warn!("bq:init failed after EXIT_SHIPMODE pulse");
     }
 
     let bq_runtime_addr = bq_init_addr.unwrap_or(BQ76920_I2C_ADDR);
@@ -443,6 +446,18 @@ async fn main(_spawner: Spawner) {
             })
             .expect("bq token"),
         );
+
+        // Pack NTC + MCU temperature sampling (ADC1 + PA0..PA3 + PB12).
+        let ntc_args = ntc_temp::NtcTempTaskArgs {
+            adc: p.ADC1,
+            ts45: p.PA0,
+            ts34: p.PA1,
+            ts23: p.PA2,
+            ts12: p.PA3,
+            ntc_vcc: p.PB12,
+        };
+        let ntc_token = ntc_temp::ntc_temp_task(ntc_args).expect("ntc-temp token");
+        _spawner.spawn(ntc_token);
 
         _spawner.spawn(
             ship_button_task(ship_button, i2c_bus, bq_runtime_addr).expect("ship-button token"),

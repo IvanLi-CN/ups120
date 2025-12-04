@@ -216,14 +216,18 @@ controls, and telemetry loops that underpin bring-up.
 - **PSTOP_MCU (PA9, firmware label `PSTOP_CTL`)**: MCU-side “stop request” for the SC8815 power stage. When `PSTOP_MCU = 1` and `TEMP_FAULT_N = 1`, hardware derives `PSTOP_CTL = 1` and, after board inversion, chip `PSTOP = Low` (power allowed). If either `PSTOP_MCU = 0` or `TEMP_FAULT_N = 0`, then `PSTOP_CTL = 0` and chip `PSTOP = High` (forced stop).
   until charger programming succeeds and stays an emergency kill path for any
   detected charger fault.
-- **EXIT_SHIPMODE (PA1)**: Push-pull GPIO used to wake the BQ76920 from ship
-  mode with a high pulse before configuration retries.
+- **EXIT_SHIPMODE (PH0)**: Push-pull GPIO (MCU pin PH0, net `$1N118667`) routed
+  via D3 clamp onto the BQ76920 `TS1` pin. Used to wake the BQ76920 from ship
+  mode with a high pulse before configuration retries. Note: the legacy
+  `smart-battery.ioc` file still labels `PA1` as EXIT_SHIPMODE; the PCB netlist
+  (`docs/battery-pcb/netlist_battery.enet`) is the authoritative mapping.
 
 ## Initialization Sequence
 
 1. Configure MCU clocks (LSE on) and instantiate CE/PSTOP outputs high to keep
-   the charger path disabled. Prepare the `PA1` wake GPIO so the BQ76920 can be
-   nudged out of ship mode if it fails to respond on the first attempt.
+   the charger path disabled. Prepare the `PH0` wake GPIO (EXIT_SHIPMODE → TS1)
+   so the BQ76920 can be nudged out of ship mode if it fails to respond on the
+   first attempt.
 2. Bring up I2C2 with DMA and register it inside a `StaticCell<Mutex<…>>`. This
    shared handle feeds lightweight `I2cDevice` wrappers for each peripheral at
    the moment they need bus access.
@@ -896,6 +900,7 @@ Scope and non‑goals
 - **BQ76920 internal temperature (`T_BQ_INT`)**
   - 来源：BQ76920 TEMP 寄存器，当前驱动暴露为 `temperatures.ts1`（单位 0.01 °C）。
   - 语义：靠近 AFE 本体的“IC/板边环境温度”，偏向电路板热点监控，而非严格意义上的电芯壳温。
+  - 硬件说明：PCB 上虽然在 TS1 附近保留了外部 NTC 焊盘，但当前量产版本 **不焊接该 NTC**，TS1 仅用于芯片内部温度模式，**不再作为外部电芯温度输入**。
 
 - **TMP75A local board sensor (`T_TMP75`)**
   - 位置：靠近 SC8815 / 功率区，用于反映充电路径附近的板温。

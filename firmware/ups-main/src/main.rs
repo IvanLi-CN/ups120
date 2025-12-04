@@ -311,6 +311,13 @@ async fn ui_task(
             let pack_temp = convert_temp_to_i16(thermal_snapshot.sb_pack_temp_c);
             let charger_temp = convert_temp_to_i16(thermal_snapshot.sb_charger_temp_c);
             let ups_temp = convert_temp_to_i16(thermal_snapshot.ups_temp_c);
+            let ntc_temps: [Option<i16>; 4] = {
+                let mut out = [None; 4];
+                for (idx, src) in thermal_snapshot.sb_ntc_temps_c.iter().enumerate() {
+                    out[idx] = convert_temp_to_i16(*src);
+                }
+                out
+            };
 
             let temp_sources = [
                 (ui::TempSlot::Battery, pack_temp),
@@ -456,7 +463,7 @@ async fn ui_task(
                 pack_i_ma: pack_i_ma_abs,
                 cells_mv: last_cells_mv,
                 balancing_index,
-                temps_c: [pack_temp, charger_temp, ups_temp, None],
+                temps_c: ntc_temps,
                 blink_on,
             };
 
@@ -741,21 +748,31 @@ where
     let mut data = [0u8; SB_TEMP_DATA_BYTES];
     match i2c.write_read(STM32_ADDR, &[SB_TEMP_BASE], &mut data).await {
         Ok(()) => {
-            let decode = |raw: i8| -> Option<f32> {
-                if raw == i8::MIN {
+            let decode = |raw: u8| -> Option<f32> {
+                let v = raw as i8;
+                if v == i8::MIN {
                     None
                 } else {
-                    Some(raw as f32)
+                    Some(v as f32)
                 }
             };
 
-            let pack_c = decode(data[0] as i8);
-            let charger_c = decode(data[1] as i8);
-            let temps = fan_control::SmartBatteryTemps::new(pack_c, charger_c);
+            let pack_c = decode(data[0]);
+            let charger_c = decode(data[1]);
+            let ntc_c = [
+                decode(data[2]),
+                decode(data[3]),
+                decode(data[4]),
+                decode(data[5]),
+            ];
+            let t_bq_int_c = decode(data[6]);
+            let t_mcu_c = decode(data[7]);
+
+            let temps = fan_control::SmartBatteryTemps::new(pack_c, charger_c, ntc_c);
 
             // Log raw window bytes and derived pack/charger temperatures at debug level.
             debug!(
-                "stm32: temp regs[40-47]={:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} pack={=f32}°C charger={=f32}°C hottest={=f32}°C",
+                "stm32: temp regs[40-47]={:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} pack={=f32}°C chg={=f32}°C ntc=[{=f32},{=f32},{=f32},{=f32}] bq_int={=f32}°C mcu={=f32}°C hottest={=f32}°C",
                 data[0],
                 data[1],
                 data[2],
@@ -766,6 +783,12 @@ where
                 data[7],
                 pack_c.unwrap_or(f32::NAN),
                 charger_c.unwrap_or(f32::NAN),
+                ntc_c[0].unwrap_or(f32::NAN),
+                ntc_c[1].unwrap_or(f32::NAN),
+                ntc_c[2].unwrap_or(f32::NAN),
+                ntc_c[3].unwrap_or(f32::NAN),
+                t_bq_int_c.unwrap_or(f32::NAN),
+                t_mcu_c.unwrap_or(f32::NAN),
                 temps.highest().unwrap_or(f32::NAN)
             );
             Some(temps)

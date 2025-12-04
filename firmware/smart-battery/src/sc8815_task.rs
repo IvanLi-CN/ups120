@@ -16,6 +16,7 @@ use crate::shared::{
     Sc8815MeasurementsPublisher,
 };
 use crate::tmp75::{TMP75_DEFAULT_ADDR, Tmp75};
+use crate::thermal::{self, TEMP_INVALID_0_01C};
 use crate::{
     charger_control::{self, ChargeSpeedSetting, limits_for},
     state_bits::{self, bits as sbits, pause_bits},
@@ -1391,8 +1392,10 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                             cold_hits = 0;
                             cool_hits = 0;
                             cold_latch_active = false;
+                            // Reflect sensor offline status into thermal aggregation.
+                            thermal::update_tmp75_temp(TEMP_INVALID_0_01C);
                         } else {
-                            // Read latest temperature (°C); on error, mark sensor offline
+                            // Read latest temperature (°C); on error, mark sensor offline.
                             match tmp75.read_temperature_c().await {
                                 Ok(t_c) => {
                                     last_tmp75_temp_c = t_c;
@@ -1407,6 +1410,11 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
 
                             if tmp75_online {
                                 let temp_c = last_tmp75_temp_c;
+                                // Update aggregated board/charger temperature (0.01 °C).
+                                let temp_0_01c = (i32::from(temp_c) * 100)
+                                    .clamp(i16::MIN as i32, i16::MAX as i32)
+                                    as i16;
+                                thermal::update_tmp75_temp(temp_0_01c);
 
                                 if charger_active {
                                     // Running: check for HOT soft-stop (≥50°C).

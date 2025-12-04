@@ -21,6 +21,7 @@ use crate::shared::{
     BalancingCvRequestPublisher, Bq76920AlertsPublisher, Bq76920MeasurementsPublisher,
     Sc8815AlertsSubscriber,
 };
+use crate::thermal::{self, TEMP_INVALID_0_01C};
 use crate::state_bits::{self, bits as sbits};
 
 const PACK_CHARGE_STOP_THRESHOLD_MV: i32 = 18_500;
@@ -707,6 +708,7 @@ pub async fn bq76920_task(args: Bq76920TaskArgs) {
             // last_cellbal_bits already updated earlier on change; keep it as snapshot
 
             // Compute and log temperature (EMA when active; median-of-3 when inactive)
+            let mut t_bq_int_0_01c = TEMP_INVALID_0_01C;
             if let Some(core) = latest_core_measurements.as_ref() {
                 // Choose internal TS1 (die temperature) per project requirement
                 let raw_t_001c: i16 = core.temperatures.ts1;
@@ -759,6 +761,9 @@ pub async fn bq76920_task(args: Bq76920TaskArgs) {
                         buf[2]
                     );
                 }
+
+                // Publish filtered BQ internal temperature into thermal aggregation.
+                t_bq_int_0_01c = used_t_001c;
 
                 // Temperature-based protections
                 let used_i32 = i32::from(used_t_001c);
@@ -817,6 +822,8 @@ pub async fn bq76920_task(args: Bq76920TaskArgs) {
                     temp_chg_gate_active = false;
                 }
             }
+            // If we have no valid core measurements, t_bq_int_0_01c stays INVALID.
+            thermal::update_bq_int_temp(t_bq_int_0_01c);
 
             // 发布测量（即便失败也发布默认值，便于外设镜像）
             let bq76920_measurements_payload_for_main_pub =
