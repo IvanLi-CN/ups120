@@ -510,7 +510,24 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
             }
             Err(_e) => warn!("tmp75:window_read_fail"),
         }
-        tmp75_online = true;
+
+        // Seed thermal aggregation with an initial TMP75 reading so that the
+        // first thermal snapshot already has a valid charger temperature.
+        match tmp75.read_temperature_c().await {
+            Ok(t_c) => {
+                last_tmp75_temp_c = t_c;
+                defmt::info!("tmp75:init T={}C", t_c);
+                let temp_0_01c =
+                    (i32::from(t_c) * 100).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+                crate::thermal::update_tmp75_temp(temp_0_01c);
+                tmp75_online = true;
+            }
+            Err(_e) => {
+                warn!("tmp75:init_read_fail");
+                crate::thermal::update_tmp75_temp(TEMP_INVALID_0_01C);
+                tmp75_online = false;
+            }
+        }
     }
 
     // quiesce INT mode: no probe state needed

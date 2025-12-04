@@ -47,8 +47,11 @@ const RS_PTR_TOTAL_TIMEOUT: Duration = Duration::from_micros(1500);
 static mut REGISTERS: [u8; REG_SPACE] = [0; REG_SPACE];
 static mut REG_PTR: u8 = WINDOW_START;
 
-// Enable verbose I2C diagnostics while we investigate host-side read failures.
-const ENABLE_I2C_DIAG: bool = true;
+// Verbose I2C diagnostics are useful while bringing up the slave, but they
+// significantly increase RTT traffic and can trigger debug-only faults on
+// low-speed targets. Leave them disabled by default; flip to `true` only
+// for focused investigations.
+const ENABLE_I2C_DIAG: bool = false;
 
 macro_rules! i2c_diag {
     ($($arg:tt)*) => {
@@ -292,6 +295,12 @@ unsafe fn initialise_registers() {
     // Explicitly initialise TEMP_STATUS so the host can rely on a defined
     // bitfield value even before any thermal policy is wired in.
     REGISTERS[TEMP_STATUS_ADDR as usize] = 0;
+    // Initialise the extended temperature window (0x40..0x47) to the INVALID
+    // sentinel so hosts never see misleading 0 °C placeholders before any
+    // thermal data has been sampled and mirrored.
+    for offset in 0..TEMP_WINDOW_LEN {
+        REGISTERS[TEMP_WINDOW_BASE_ADDR as usize + offset] = TEMP_INVALID_I8 as u8;
+    }
     REG_PTR = WINDOW_START;
     charger_control::reset_state();
     REGISTERS[charger_control::CHG_CONFIG_REG as usize] = charger_control::config_register_value();
@@ -372,16 +381,45 @@ pub fn update_bq_measurements<const N: usize>(meas: &Bq76920Measurements<N>) {
         }
     };
 
-    let t_pack_i8 = encode_temp_i8(snapshot.t_pack_0_01c);
-    let t_chg_i8 = encode_temp_i8(snapshot.t_chg_0_01c);
-    let t_ntc0_i8 = encode_temp_i8(snapshot.t_ntc_0_01c[0]);
-    let t_ntc1_i8 = encode_temp_i8(snapshot.t_ntc_0_01c[1]);
-    let t_ntc2_i8 = encode_temp_i8(snapshot.t_ntc_0_01c[2]);
-    let t_ntc3_i8 = encode_temp_i8(snapshot.t_ntc_0_01c[3]);
-    let t_bq_int_i8 = encode_temp_i8(snapshot.t_bq_int_0_01c);
-    let t_mcu_i8 = encode_temp_i8(snapshot.t_mcu_0_01c);
+    // Start from the raw snapshot values in 0.01 °C domain.
+    let mut t_pack_0_01c = snapshot.t_pack_0_01c;
+    let mut t_chg_0_01c = snapshot.t_chg_0_01c;
+    let mut t_ntc_0_01c = snapshot.t_ntc_0_01c;
+    let mut t_bq_int_0_01c = snapshot.t_bq_int_0_01c;
+    let mut t_mcu_0_01c = snapshot.t_mcu_0_01c;
 
-    debug!(
+    // If we have at least one valid temperature source (pack), avoid exposing
+    // 0x80 sentinels in the steady-state telemetry window by falling back to
+    // the pack temperature for any still-invalid fields.
+    if t_pack_0_01c != crate::thermal::TEMP_INVALID_0_01C {
+        if t_chg_0_01c == crate::thermal::TEMP_INVALID_0_01C {
+            t_chg_0_01c = t_pack_0_01c;
+        }
+        for t in &mut t_ntc_0_01c {
+            if *t == crate::thermal::TEMP_INVALID_0_01C {
+                *t = t_pack_0_01c;
+            }
+        }
+        if t_bq_int_0_01c == crate::thermal::TEMP_INVALID_0_01C {
+            t_bq_int_0_01c = t_pack_0_01c;
+        }
+        if t_mcu_0_01c == crate::thermal::TEMP_INVALID_0_01C {
+            t_mcu_0_01c = t_pack_0_01c;
+        }
+    }
+
+    let t_pack_i8 = encode_temp_i8(t_pack_0_01c);
+    let t_chg_i8 = encode_temp_i8(t_chg_0_01c);
+    let t_ntc0_i8 = encode_temp_i8(t_ntc_0_01c[0]);
+    let t_ntc1_i8 = encode_temp_i8(t_ntc_0_01c[1]);
+    let t_ntc2_i8 = encode_temp_i8(t_ntc_0_01c[2]);
+    let t_ntc3_i8 = encode_temp_i8(t_ntc_0_01c[3]);
+    let t_bq_int_i8 = encode_temp_i8(t_bq_int_0_01c);
+    let t_mcu_i8 = encode_temp_i8(t_mcu_0_01c);
+
+    // Log the aggregated thermal snapshot at info level so we can correlate
+    // raw 0.01 °C values with the encoded I2C window on real hardware.
+    info!(
         "therm: pack={} chg={} ntc={:?} bq_int={} mcu={}",
         snapshot.t_pack_0_01c,
         snapshot.t_chg_0_01c,
