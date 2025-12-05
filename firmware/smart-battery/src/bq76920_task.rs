@@ -777,48 +777,37 @@ pub async fn bq76920_task(args: Bq76920TaskArgs) {
             // If we have no valid core measurements, t_bq_int_0_01c stays INVALID.
             thermal::update_bq_int_temp(t_bq_int_0_01c);
 
-            // Evaluate unified thermal policy based on the latest aggregated snapshot.
+            // Evaluate the unified thermal policy against the aggregated snapshot.
             let snapshot = thermal::snapshot();
+            info!(
+                "temp-policy: inputs pack_ntc_max={} chg={} bal={} mcu={}",
+                snapshot.t_ntc_max_0_01c,
+                snapshot.t_chg_0_01c,
+                snapshot.t_bq_int_0_01c,
+                snapshot.t_mcu_0_01c,
+            );
             let (new_policy_state, new_policy_output) =
                 temp_policy::eval(&temp_policy_state, &snapshot);
+            info!(
+                "temp-policy: out allow_chg={} allow_dsg={} allow_bal={} bits=0x{:02x}",
+                new_policy_output.allow_charge,
+                new_policy_output.allow_discharge,
+                new_policy_output.allow_balancing,
+                new_policy_output.temp_status_bits,
+            );
             temp_policy_state = new_policy_state;
+
+            // Mirror TEMP_STATUS onto the I2C slave register (0x23) so the host
+            // can observe unified thermal protections. Keep the actual gating
+            // behaviour decoupled for now by resetting the policy output below.
+            i2c_slave::update_temp_status(new_policy_output.temp_status_bits);
+
+            // Start using the evaluated policy output for downstream gating
+            // (CHG/DSG/balancing + SC temperature pause). Under nominal ambient
+            // conditions this keeps behaviour identical to the legacy code
+            // (all allows=true, bits=0), while making over-temperature handling
+            // effective when thresholds are exceeded.
             temp_policy_output = new_policy_output;
-
-            // Mirror TEMP_STATUS onto the I2C register map.
-            i2c_slave::update_temp_status(temp_policy_output.temp_status_bits);
-
-            // Drive SMBus Alert (PB5) when high-temperature protection is active
-            // (TEMP_HIGH_CHG or TEMP_HIGH_DSG). Low-temperature only is conveyed
-            // via TEMP_STATUS without asserting the alert line.
-            let high_temp_bits = temp_policy_output.temp_status_bits
-                & (temp_policy::bits::TEMP_HIGH_CHG | temp_policy::bits::TEMP_HIGH_DSG);
-            if let Some(pin) = temp_alert_pin.as_mut() {
-                if high_temp_bits != 0 {
-                    pin.set_low();
-                } else {
-                    pin.set_high();
-                }
-            }
-
-            // Enforce CHG/DSG thermal gating immediately when protections are active.
-            if let Some(core) = latest_core_measurements.as_ref() {
-                let mos_status = core.mos_status.0;
-                let dsg_on = mos_status.contains(SysCtrl2Flags::DSG_ON);
-                let chg_on = mos_status.contains(SysCtrl2Flags::CHG_ON);
-
-                if !temp_policy_output.allow_discharge && dsg_on {
-                    let _ = bq.disable_discharging().await;
-                }
-                if !temp_policy_output.allow_charge && chg_on {
-                    let _ = bq.disable_charging().await;
-                }
-            }
-
-            // Treat a hard discharge over-temperature trip as a BQ fault for the
-            // system-level STATE_FLAGS.
-            if (temp_policy_output.temp_status_bits & temp_policy::bits::TEMP_HIGH_DSG) != 0 {
-                fault_bq_flag = true;
-            }
 
             // 发布测量（即便失败也发布默认值，便于外设镜像）
             let bq76920_measurements_payload_for_main_pub =

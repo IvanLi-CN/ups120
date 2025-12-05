@@ -12,7 +12,7 @@ use defmt::debug;
 use embassy_executor::task;
 use embassy_stm32::Peri;
 use embassy_stm32::adc;
-use embassy_stm32::adc::{Adc, SampleTime, Temperature};
+use embassy_stm32::adc::{Adc, SampleTime};
 use embassy_stm32::bind_interrupts;
 use embassy_stm32::gpio::{Level, Output, Speed};
 use embassy_stm32::peripherals::{ADC1, PA0, PA1, PA2, PA3, PB12};
@@ -186,52 +186,61 @@ fn adc_sample_to_mcu_temp_0_01c(sample: u16, ts_cal1: u16, ts_cal2: u16) -> i16 
 pub async fn ntc_temp_task(args: NtcTempTaskArgs) {
     let NtcTempTaskArgs {
         adc,
-        mut ts45,
-        mut ts34,
-        mut ts23,
-        mut ts12,
+        ts45,
+        ts34,
+        ts23,
+        ts12,
         ntc_vcc,
     } = args;
 
-    let mut adc = Adc::new(adc, AdcIrqs);
-    // Use a long sampling time to satisfy the high source impedance of the NTC network.
-    adc.set_sample_time(SampleTime::from_bits(7));
+    // For the first staged rollout, only TS45 (PA0) is used as an NTC input.
+    // The remaining NTC channels stay disconnected so we can validate a single
+    // ladder without increasing the surface area.
+    let mut ch_ntc0 = ts45;
+    let _ = (ts34, ts23, ts12);
 
-    // Internal MCU temperature channel.
-    let mut temp_chan = adc.enable_temperature();
+    let mut ntc_vcc = Output::new(ntc_vcc, Level::Low, Speed::Low);
+    ntc_vcc.set_low();
 
-    // Read factory calibration points once at boot.
+    // One-shot fetch of factory calibration points for the internal
+    // temperature sensor.
     let ts_cal1 = unsafe { ptr::read_volatile(TS_CAL1_ADDR) };
     let ts_cal2 = unsafe { ptr::read_volatile(TS_CAL2_ADDR) };
 
-    // PB12 powers the 4× 43 k pull-ups.
-    let mut ntc_vcc = Output::new(ntc_vcc, Level::Low, Speed::Low);
+    // Async ADC1 with interrupt-driven completion.
+    let mut adc = Adc::new(adc, AdcIrqs);
+    // Use the longest sample time to satisfy ts_temp >= 4 µs regardless of
+    // clock configuration; SampleTime bits map directly to the SMP field.
+    adc.set_sample_time(SampleTime::from_bits(0b111));
+    let mut ts_channel = adc.enable_temperature();
 
     loop {
+        // 1) MCU internal temperature (independent of NTC ladder state).
+        let mcu_sample = adc.read(&mut ts_channel).await;
+        let t_mcu_0_01c = adc_sample_to_mcu_temp_0_01c(mcu_sample, ts_cal1, ts_cal2);
+
+        // 2) Single NTC ladder on TS45 (PA0). Power the pull-up, allow a short
+        // RC warm-up, then take one blocking sample and turn the ladder off.
         ntc_vcc.set_high();
         Timer::after(Duration::from_millis(NTC_WARMUP_MS)).await;
-
-        let raw0 = adc.read(&mut ts45).await;
-        let raw1 = adc.read(&mut ts34).await;
-        let raw2 = adc.read(&mut ts23).await;
-        let raw3 = adc.read(&mut ts12).await;
-
-        let mcu_raw = adc.read(&mut temp_chan).await;
-
+        let ntc0_sample = adc.read(&mut ch_ntc0).await;
         ntc_vcc.set_low();
 
+        let t_ntc0_0_01c = adc_sample_to_ntc_temp_0_01c(ntc0_sample);
         let t_ntc_0_01c = [
-            adc_sample_to_ntc_temp_0_01c(raw0),
-            adc_sample_to_ntc_temp_0_01c(raw1),
-            adc_sample_to_ntc_temp_0_01c(raw2),
-            adc_sample_to_ntc_temp_0_01c(raw3),
+            t_ntc0_0_01c,
+            TEMP_INVALID_0_01C,
+            TEMP_INVALID_0_01C,
+            TEMP_INVALID_0_01C,
         ];
-        let t_mcu_0_01c = adc_sample_to_mcu_temp_0_01c(mcu_raw, ts_cal1, ts_cal2);
 
         thermal::update_ntc_temps(&t_ntc_0_01c);
         thermal::update_mcu_temp(t_mcu_0_01c);
 
-        debug!("ntc:t={:?} mcu={}x0.01C", t_ntc_0_01c, t_mcu_0_01c);
+        debug!(
+            "ntc:mcu+ntc0 raw_mcu={} raw_ntc0={} t_ntc={:?} mcu={}x0.01C",
+            mcu_sample, ntc0_sample, t_ntc_0_01c, t_mcu_0_01c
+        );
 
         Timer::after(Duration::from_millis(NTC_SAMPLE_PERIOD_MS)).await;
     }

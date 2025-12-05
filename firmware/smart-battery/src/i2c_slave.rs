@@ -47,11 +47,10 @@ const RS_PTR_TOTAL_TIMEOUT: Duration = Duration::from_micros(1500);
 static mut REGISTERS: [u8; REG_SPACE] = [0; REG_SPACE];
 static mut REG_PTR: u8 = WINDOW_START;
 
-// Verbose I2C diagnostics are useful while bringing up the slave, but they
-// significantly increase RTT traffic and can trigger debug-only faults on
-// low-speed targets. Leave them disabled by default; flip to `true` only
-// for focused investigations.
-const ENABLE_I2C_DIAG: bool = false;
+// Verbose I2C diagnostics are useful while bringing up the slave; enable them
+// while we investigate host-side NACKs. Once stable, this can be flipped back
+// to `false` to reduce RTT traffic.
+const ENABLE_I2C_DIAG: bool = true;
 
 macro_rules! i2c_diag {
     ($($arg:tt)*) => {

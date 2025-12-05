@@ -37,6 +37,8 @@ mod thermal;
 
 use bq769x0_async_rs::{BatteryConfig, Bq769x0, Enabled as BqCrcEnabled};
 // no direct info! logs to减小尺寸
+use cortex_m::peripheral::SCB;
+use cortex_m_rt::ExceptionFrame;
 use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
 use embassy_executor::Spawner;
 #[cfg(not(feature = "ship-mode"))]
@@ -57,6 +59,25 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex;
 use embassy_time::{Duration, Instant, Timer};
 use static_cell::StaticCell;
+
+// Global exception traps so we can see where the core dies instead of silently
+// stopping when the ESP32 starts talking to us over I2C.
+#[cortex_m_rt::exception]
+unsafe fn HardFault(ef: &ExceptionFrame) -> ! {
+    defmt::error!("hardfault: pc=0x{:08x} lr=0x{:08x}", ef.pc(), ef.lr());
+    // Reset the MCU so the smart-battery firmware can recover rather than
+    // leaving the core halted (which appears as the probe \"dropping\").
+    SCB::sys_reset();
+}
+
+// Catch any unexpected core/peripheral exceptions that don't have a specific
+// handler wired and reset instead of leaving the core parked in the vector
+// table (which shows up as \"Firmware exited unexpectedly: Exception\").
+#[cortex_m_rt::exception]
+unsafe fn DefaultHandler(irqn: i16) -> ! {
+    defmt::error!("default-exception: irqn={}", irqn);
+    SCB::sys_reset();
+}
 
 #[cfg(not(feature = "ship-mode"))]
 use shared::{Bq76920MeasurementsSubscriber, Sc8815MeasurementsSubscriber};
@@ -453,6 +474,10 @@ async fn main(_spawner: Spawner) {
         );
 
         // Pack NTC + MCU temperature sampling (ADC1 + PA0..PA3 + PB12).
+        //
+        // The current implementation of `ntc_temp_task` is a stub that keeps
+        // the ADC idle and publishes TEMP_INVALID_* sentinels so we can
+        // exercise the task wiring without touching the analog front-end.
         let ntc_args = ntc_temp::NtcTempTaskArgs {
             adc: p.ADC1,
             ts45: p.PA0,

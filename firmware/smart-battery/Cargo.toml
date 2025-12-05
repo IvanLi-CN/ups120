@@ -56,7 +56,8 @@ test = false
 
 [profile.dev]
 codegen-units = 1
-debug = false
+# Enable line information so probe-rs can show where Exceptions occur.
+debug = 2
 debug-assertions = false
 incremental = false
 lto = 'fat'
@@ -66,7 +67,8 @@ panic = 'abort'
 
 [profile.release]
 codegen-units = 1
-debug = false
+# Keep size-optimised but still emit DWARF so we can unwind faults.
+debug = 2
 debug-assertions = false
 incremental = false
 lto = 'fat'
