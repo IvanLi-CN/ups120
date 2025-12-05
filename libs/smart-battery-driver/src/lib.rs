@@ -162,9 +162,26 @@ where
         Ok(i16::from_le_bytes([b[0], b[1]]))
     }
 
-    pub async fn read_tpack_cc(&mut self) -> Result<i16, Error<E>> {
-        let b = <Self as RegisterAccess<E>>::read_registers(self, regs::TPACK_L, 2).await?;
-        Ok(i16::from_le_bytes([b[0], b[1]]))
+    /// Read the compact temperature window (0x40..0x47, all int8 in °C).
+    ///
+    /// Layout (per smart-battery firmware spec):
+    ///   [0] = pack temperature (T_PACK_C)
+    ///   [1] = charger/board temperature (T_CHG_C)
+    ///   [2..=5] = NTC0..3 temperatures
+    ///   [6] = BQ internal temperature (T_BQ_INT_C)
+    ///   [7] = MCU on-die temperature (T_MCU_C)
+    pub async fn read_temp_window_i8(&mut self) -> Result<[i8; regs::TEMP_WINDOW_LEN], Error<E>> {
+        let b = <Self as RegisterAccess<E>>::read_registers(
+            self,
+            regs::TEMP_WINDOW_BASE,
+            regs::TEMP_WINDOW_LEN,
+        )
+        .await?;
+        let mut out = [0i8; regs::TEMP_WINDOW_LEN];
+        for (i, v) in b.iter().enumerate() {
+            out[i] = *v as i8;
+        }
+        Ok(out)
     }
 
     pub async fn read_status(&mut self) -> Result<(u8, u8, u8, u8), Error<E>> {

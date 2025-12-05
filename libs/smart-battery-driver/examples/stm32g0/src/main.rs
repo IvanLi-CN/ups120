@@ -76,9 +76,19 @@ async fn main(_spawner: Spawner) {
     loop {
         let v = bat.read_vbat_mv().await;
         let i = bat.read_ibat_ma().await;
-        let t = bat.read_tpack_cc().await;
-        match (v, i, t) {
-            (Ok(v), Ok(i), Ok(t)) => info!("VBAT={} mV IBAT={} mA Tpack={} cC", v, i, t),
+        let temps = bat.read_temp_window_i8().await;
+        match (v, i, temps) {
+            (Ok(v), Ok(i), Ok(ts)) => {
+                let tpack = ts[0];
+                if tpack == i8::MIN {
+                    info!("VBAT={} mV IBAT={} mA Tpack=NA raw_window={:?}", v, i, ts);
+                } else {
+                    info!(
+                        "VBAT={} mV IBAT={} mA Tpack={} C raw_window={:?}",
+                        v, i, tpack, ts
+                    );
+                }
+            }
             _ => warn!("read telemetry failed"),
         }
 

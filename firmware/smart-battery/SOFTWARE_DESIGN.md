@@ -652,9 +652,10 @@ Diagnostics & reserved:
 
 ### Example Transactions
 
-- Read pack voltage/current/temperature in one burst (8 data bytes → 16 bus bytes with CRC):
+- Read pack voltage/current/temperature in one burst（当前固件使用“纯寄存器窗口”，未来如启用 CRC 将按相同模式在每个数据字节后插入 CRC 字节）：
   - Master: `START → 0x6A(W) → 0x10 → REPEATED START → 0x6B(R)`
-  - Device returns: `VBAT_L, CRC(VBAT_L with 0x6B), VBAT_H, CRC(VBAT_H), IBAT_L, CRC(IBAT_L), IBAT_H, CRC(IBAT_H), TPACK_L, CRC(TPACK_L), TPACK_H, CRC(TPACK_H), TMOS_L, CRC(TMOS_L), TMOS_H, CRC(TMOS_H)`; master NACKs the last CRC then `STOP`.
+  - Device returns 4 字节电压/电流快照（`VBAT_L/H`, `IBAT_L/H`），以及在单独一次读取中返回 8 字节温度窗口 `0x40..0x47`（`T_PACK_C`, `T_CHG_C`, 4×`T_NTC*_C`, `T_BQ_INT_C`, `T_MCU_C`）。  
+    > 说明：早期设计中曾计划在 `0x14/0x16` 暴露 `TPACK_L/TMOS_L`（i16、0.01 °C）并对 `0x10..0x17` 做带 CRC 的长 burst；该路径已废弃，当前分支下 `0x14..0x17` 为保留位，唯一的温度入口是 `0x40..0x47` 的 int8 温度窗口。
 - Enable charging (with CRC per‑byte):
   - Master: `START → 0x6A(W) → 0x31 → 0x03 → CRC(0x6A,0x31,0x03) → STOP` (`AUTO=1, MANUAL=1, SPEED=0`).
 - Set current limit tier to ≈1.2 A (tier 2):
@@ -999,16 +1000,14 @@ Scope and non‑goals
 - **内部温度表示**：固件内部统一使用 `i16`、单位 0.01 °C（centi‑degree）存放 BQ/TMP75/NTC/MCU 温度，用于比较阈值（40/50/55/60 °C）、做滤波和滞环。
 - **I2C 温度表示**：对外通过 I2C 寄存器暴露的温度，一律使用 **`int8`、单位 1 °C**，每个传感器占用 1 字节。内部 centi‑degree 会在快照阶段通过 `round(T_internal/100)` 压缩成 1 °C 步进。
 
-温度相关寄存器（与上文 Register Map 保持一致）：
+温度相关寄存器（与上文 Register Map 保持一致，0x40–0x47 为唯一温度入口，0x14..0x17 不再承载温度数据）：
 
-- 基本温度：
-  - `0x14 T_PACK_C`：电池温度（°C，NTC hottest / 多源聚合后的 pack 温度）。
-  - `0x16 T_CHG_C`：充电器/板级温度（°C，来自 TMP75）。
-
-- 扩展温度：
-  - `0x24..0x27 T_NTC0_C..T_NTC3_C`：4 路 NTC 分别对应的温度（°C，按固定顺序映射 TS12/TS23/TS34/TS45）。
-  - `0x28 T_BQ_INT_C`：BQ76920 内部温度（°C）。
-  - `0x29 T_MCU_C`：MCU 内部温度（°C）。
+- 温度窗口（均为 `int8`、单位 1 °C）：
+  - `0x40 T_PACK_C`：电池温度（°C，NTC hottest / 多源聚合后的 pack 温度）。
+  - `0x41 T_CHG_C`：充电器/板级温度（°C，来自 TMP75）。
+  - `0x42..0x45 T_NTC0_C..T_NTC3_C`：4 路 NTC 分别对应的温度（°C，按固定顺序映射 TS12/TS23/TS34/TS45）。
+  - `0x46 T_BQ_INT_C`：BQ76920 内部温度（°C）。
+  - `0x47 T_MCU_C`：MCU 内部温度（°C）。
 
 - 温度保护状态：
   - `0x23 TEMP_STATUS`：

@@ -25,8 +25,11 @@ const WINDOW_START: u8 = 0x08;
 const WINDOW_END: u8 = 0x0F;
 const STATE_FLAGS_ADDR: u8 = 0x20;
 const STATE_BLUE_CODE_ADDR: u8 = 0x22;
+// Legacy temperature base (0x14..0x17) kept as a reserved 4-byte window to
+// preserve read-length expectations; no meaningful temperature data is written
+// there anymore. All temperatures are exposed exclusively via 0x40..0x47.
 const TEMP_BASE_ADDR: u8 = 0x14;
-// New temperature/status window (see SOFTWARE_DESIGN.md Register Map).
+// Temperature/status window (see SOFTWARE_DESIGN.md Register Map).
 const TEMP_STATUS_ADDR: u8 = 0x23;
 const TEMP_WINDOW_BASE_ADDR: u8 = 0x40;
 const TEMP_WINDOW_LEN: usize = 8;
@@ -344,11 +347,6 @@ pub fn update_bq_measurements<const N: usize>(meas: &Bq76920Measurements<N>) {
     }
     write_u16_le(0x10, pack_mv);
     write_i16_le(0x12, pack_current);
-    // Legacy centi-degree temperature registers at 0x14/0x16 are kept for
-    // backward compatibility. New code should prefer the int8 °C window at
-    // TEMP_WINDOW_BASE_ADDR (0x40..0x47).
-    write_i16_le(0x14, hottest);
-    write_i16_le(0x16, temps.ts1);
 
     // CELLS_PRESENT (0x1F) and per-cell voltages (0x50..)
     let cells_present = core.cell_voltages.voltages.len().min(5) as u8;
