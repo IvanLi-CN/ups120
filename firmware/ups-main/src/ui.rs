@@ -3,9 +3,12 @@ use core::fmt::Write as _;
 use embedded_hal::{delay::DelayNs, digital::OutputPin, spi::SpiBus};
 use embedded_hal_async::spi::SpiBus as AsyncSpiBus;
 
-use crate::display::{
-    clear_framebuffer, fill_rect_buffer, flush_framebuffer, flush_framebuffer_async,
-    put_pixel_buffer, with_framebuffer, FrameBuffer, Rgb565, LOGICAL_HEIGHT, LOGICAL_WIDTH,
+use crate::{
+    display::{
+        clear_framebuffer, fill_rect_buffer, flush_framebuffer, flush_framebuffer_async,
+        put_pixel_buffer, with_framebuffer, FrameBuffer, Rgb565, LOGICAL_HEIGHT, LOGICAL_WIDTH,
+    },
+    TempFaultFlags,
 };
 
 // Palette (RGB565)
@@ -589,6 +592,8 @@ pub struct BattDetailData {
     pub balancing_index: Option<u8>,
     /// Up to four temperature slots; layout is `TEMP a°C b°C c°C d°C`.
     pub temps_c: [Option<i16>; 4],
+    /// Smart-battery TEMP_STATUS-derived thermal protection flags, if available.
+    pub temp_fault: Option<TempFaultFlags>,
     /// Blink phase for the balancing indicator (true = bright frame).
     pub blink_on: bool,
 }
@@ -1095,6 +1100,27 @@ where
             let x_after_digits = draw_text(fb, x_digits, y3, &temp_buf, digits_color);
             let color = if c_opt.is_some() { digits_color } else { GRAY };
             let _ = draw_celsius(fb, x_after_digits, y3, color);
+        }
+
+        // Optional temperature protection tag on the right: prefer showing the
+        // most restrictive condition (DSG HI > CHG HI > LO).
+        if let Some(flags) = model.temp_fault {
+            let label = if flags.temp_high_dsg {
+                "DSG HI"
+            } else if flags.temp_high_chg {
+                "CHG HI"
+            } else if flags.temp_low {
+                "LO"
+            } else {
+                ""
+            };
+
+            if !label.is_empty() {
+                let x = LOGICAL_WIDTH
+                    .saturating_sub(text_width(label))
+                    .saturating_sub(MARGIN_LR);
+                let _ = draw_text(fb, x, y3, label, YELLOW);
+            }
         }
     });
     flush_framebuffer(spi, cs, dc)

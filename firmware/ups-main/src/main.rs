@@ -51,22 +51,50 @@ pub const STM32_ADDR: u8 = 0x35;
 pub const SB_SIG: [u8; 2] = [b'S', b'B'];
 pub const SB_WINDOW_START: u8 = 0x08;
 pub const SB_WINDOW_END: u8 = 0x0F;
-// Smart-battery extended temperature window (0x40..0x47, 8×int8 °C).
-pub const SB_TEMP_BASE: u8 = 0x40;
-pub const SB_TEMP_DATA_BYTES: usize = 8;
-pub const SB_TEMP_FRAME_BYTES: usize = SB_TEMP_DATA_BYTES;
+// Legacy smart-battery temperature window (0x14..0x17, 2×i16 in 0.01 °C).
+// Newer firmware also mirrors an extended int8 °C window at 0x40..0x47, but
+// the host continues to use the proven 0x14 layout until the new path has
+// been exhaustively validated on hardware.
+pub const SB_TEMP_BASE: u8 = 0x14;
+pub const SB_TEMP_DATA_BYTES: usize = 4;
+pub const SB_TEMP_FRAME_BYTES: usize = SB_TEMP_DATA_BYTES * 2;
+// Compact temperature telemetry window (0x40..0x47, all int8 in °C) sourced
+// from the STM32 smart-battery thermal aggregation:
+//   [0]=pack, [1]=charger, [2..5]=NTC0..3, [6]=BQ_INT, [7]=MCU.
+pub const SB_TEMP_WINDOW_BASE: u8 = 0x40;
+pub const SB_TEMP_WINDOW_LEN: usize = 8;
 pub const TEST_A: u8 = 0x5A;
 pub const TEST_B: u8 = 0xA5;
 pub const SB_REG_CHG_CONFIG: u8 = 0x31;
 pub const SB_REG_CHG_PAUSE_CAUSE: u8 = 0x32;
-pub const SB_REG_TEMP_STATUS: u8 = 0x23;
 pub const SB_REG_STATE_FLAGS: u8 = 0x20;
+/// Smart-battery TEMP_STATUS register (single-byte thermal fault flags).
+/// See `TempFaultFlags` / `decode_temp_status` for the decoded view.
+pub const SB_REG_TEMP_STATUS: u8 = 0x23;
 pub const SB_STATE_FLAG_AC_PRESENT: u16 = 0x0001;
 // Mirror of STM32 smart-battery state_bits::BALANCING; used for UI overlay.
 pub const SB_STATE_FLAG_BALANCING: u16 = 1 << 5;
 // Mirrors of smart-battery state_bits::FAULT_BQ / FAULT_SC; used for UPS discharge gating.
 pub const SB_STATE_FLAG_FAULT_BQ: u16 = 1 << 6;
 pub const SB_STATE_FLAG_FAULT_SC: u16 = 1 << 7;
+
+/// Decoded view of the STM32 smart-battery TEMP_STATUS register (0x23).
+#[derive(Clone, Copy, Debug)]
+pub struct TempFaultFlags {
+    pub temp_low: bool,
+    pub temp_high_chg: bool,
+    pub temp_high_dsg: bool,
+}
+
+/// Decode TEMP_STATUS bits into a strongly-typed flag set.
+pub fn decode_temp_status(raw: u8) -> TempFaultFlags {
+    TempFaultFlags {
+        temp_low: (raw & 0x01) != 0,
+        temp_high_chg: (raw & 0x02) != 0,
+        temp_high_dsg: (raw & 0x04) != 0,
+    }
+}
+
 pub const SB_CHG_STATUS_BALANCING: u8 = 1 << 5;
 pub const SB_CFG_BIT_AUTO: u8 = 1 << 0;
 pub const SB_CFG_BIT_MANUAL: u8 = 1 << 1;
@@ -464,6 +492,7 @@ async fn ui_task(
                 cells_mv: last_cells_mv,
                 balancing_index,
                 temps_c: ntc_temps,
+                temp_fault: power_snapshot.sb_temp_status.map(decode_temp_status),
                 blink_on,
             };
 
@@ -742,53 +771,56 @@ where
     let now_ms = esp_hal::time::Instant::now()
         .duration_since_epoch()
         .as_millis() as u64;
-    // STM32 smart-battery exposes an 8-byte temperature window at 0x40..0x47:
-    // [T_PACK_C, T_CHG_C, T_NTC0_C, T_NTC1_C, T_NTC2_C, T_NTC3_C, T_BQ_INT_C, T_MCU_C]
-    // All entries are int8 in °C; i8::MIN is treated as "invalid/missing".
+    // STM32 smart-battery slave currently exposes raw registers without CRC
+    // interleaving. Use pointer write then read 4 bytes:
+    // [TPACK_L, TPACK_H, TCHG_L, TCHG_H] (i16 LE, 0.01°C; i16::MIN = invalid).
     let mut data = [0u8; SB_TEMP_DATA_BYTES];
     match i2c.write_read(STM32_ADDR, &[SB_TEMP_BASE], &mut data).await {
         Ok(()) => {
-            let decode = |raw: u8| -> Option<f32> {
-                let v = raw as i8;
-                if v == i8::MIN {
-                    None
-                } else {
-                    Some(v as f32)
-                }
-            };
+            let pack_raw = i16::from_le_bytes([data[0], data[1]]);
+            let chg_raw = i16::from_le_bytes([data[2], data[3]]);
+            let pack_c = temp_from_centi(pack_raw);
+            let charger_c = temp_from_centi(chg_raw);
+            // Start with all NTC channels disabled; if the compact temperature
+            // window (0x40..0x47) read succeeds, we will fill these slots
+            // below.
+            let mut ntc_c: [Option<f32>; 4] = [None; 4];
 
-            let pack_c = decode(data[0]);
-            let charger_c = decode(data[1]);
-            let ntc_c = [
-                decode(data[2]),
-                decode(data[3]),
-                decode(data[4]),
-                decode(data[5]),
-            ];
-            let t_bq_int_c = decode(data[6]);
-            let t_mcu_c = decode(data[7]);
+            // Compact temperature window (0x40..0x47, int8 °C). Layout:
+            // [0]=pack, [1]=charger, [2..5]=NTC0..3, [6]=BQ_INT, [7]=MCU.
+            if let Ok(win) = read_smart_battery_temp_window(i2c).await {
+                let [pack_i8, chg_i8, n0, n1, n2, n3, bq_int_i8, mcu_i8] = win;
+                let to_opt = |v: i8| -> Option<f32> {
+                    if v == i8::MIN {
+                        None
+                    } else {
+                        Some(v as f32)
+                    }
+                };
+                ntc_c[0] = to_opt(n0);
+                ntc_c[1] = to_opt(n1);
+                ntc_c[2] = to_opt(n2);
+                ntc_c[3] = to_opt(n3);
+                // We currently keep pack/chg temperatures sourced from the
+                // legacy 0x14..0x17 window to minimise behavioural deltas; the
+                // compact window is used only for per-NTC temps and optional
+                // diagnostics.
+                debug!(
+                    "stm32: temp-window raw pack={}C chg={}C ntc=[{}, {}, {}, {}] bq_int={}C mcu={}C",
+                    pack_i8, chg_i8, n0, n1, n2, n3, bq_int_i8, mcu_i8
+                );
+            }
 
             let temps = fan_control::SmartBatteryTemps::new(pack_c, charger_c, ntc_c);
-
-            // Log raw window bytes and derived pack/charger temperatures at debug level.
+            // Keep detailed temperature reporting at debug level to avoid cluttering logs.
             debug!(
-                "stm32: temp regs[40-47]={:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} pack={=f32}°C chg={=f32}°C ntc=[{=f32},{=f32},{=f32},{=f32}] bq_int={=f32}°C mcu={=f32}°C hottest={=f32}°C",
+                "stm32: temp regs[14-17]={:02X} {:02X} {:02X} {:02X} pack={=f32}°C chg={=f32}°C hottest={=f32}°C",
                 data[0],
                 data[1],
                 data[2],
                 data[3],
-                data[4],
-                data[5],
-                data[6],
-                data[7],
                 pack_c.unwrap_or(f32::NAN),
                 charger_c.unwrap_or(f32::NAN),
-                ntc_c[0].unwrap_or(f32::NAN),
-                ntc_c[1].unwrap_or(f32::NAN),
-                ntc_c[2].unwrap_or(f32::NAN),
-                ntc_c[3].unwrap_or(f32::NAN),
-                t_bq_int_c.unwrap_or(f32::NAN),
-                t_mcu_c.unwrap_or(f32::NAN),
                 temps.highest().unwrap_or(f32::NAN)
             );
             Some(temps)
@@ -869,6 +901,28 @@ where
             None
         }
     }
+}
+
+/// Diagnostic helper: read the STM32 smart-battery compact temperature window
+/// (0x40..0x47, all int8 in °C) and return the decoded values as signed
+/// degrees Celsius. Layout matches the STM32-side `therm:` log:
+///   [0]=pack, [1]=charger, [2..5]=NTC0..3, [6]=BQ_INT, [7]=MCU.
+pub(crate) async fn read_smart_battery_temp_window<I2C>(
+    i2c: &mut I2C,
+) -> Result<[i8; SB_TEMP_WINDOW_LEN], ()>
+where
+    I2C: AsyncI2c,
+{
+    let mut buf = [0u8; SB_TEMP_WINDOW_LEN];
+    i2c.write_read(STM32_ADDR, &[SB_TEMP_WINDOW_BASE], &mut buf)
+        .await
+        .map_err(|_| ())?;
+
+    let mut out = [0i8; SB_TEMP_WINDOW_LEN];
+    for (i, b) in buf.iter().enumerate() {
+        out[i] = *b as i8;
+    }
+    Ok(out)
 }
 
 pub(crate) async fn read_smart_battery_reg<I2C>(i2c: &mut I2C, reg: u8) -> Result<u8, ()>
