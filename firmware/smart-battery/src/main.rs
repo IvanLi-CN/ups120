@@ -62,15 +62,11 @@ use static_cell::StaticCell;
 // Log reset cause so we can distinguish power-on, brown-out, watchdog and
 // software resets when analysing field logs.
 fn log_reset_cause() {
-    // Safety: reading RCC CSR and setting RMVF is a single-writer operation
-    // during early boot. No concurrent accesses exist at this point.
-    unsafe {
-        let rcc = embassy_stm32::pac::RCC;
-        let csr = rcc.csr().read();
-        defmt::info!("reset: csr={:?}", csr);
-        // Clearing reset flags is optional here; leave them latched so multiple
-        // faults can be correlated if needed.
-    }
+    let rcc = embassy_stm32::pac::RCC;
+    let csr = rcc.csr().read();
+    defmt::info!("reset: csr={:?}", csr);
+    // Clearing reset flags is optional here; leave them latched so multiple
+    // faults can be correlated if needed.
 }
 
 // Global exception traps so we can see where the core dies instead of silently
