@@ -59,6 +59,20 @@ use embassy_sync::mutex::Mutex;
 use embassy_time::{Duration, Instant, Timer};
 use static_cell::StaticCell;
 
+// Log reset cause so we can distinguish power-on, brown-out, watchdog and
+// software resets when analysing field logs.
+fn log_reset_cause() {
+    // Safety: reading RCC CSR and setting RMVF is a single-writer operation
+    // during early boot. No concurrent accesses exist at this point.
+    unsafe {
+        let rcc = embassy_stm32::pac::RCC;
+        let csr = rcc.csr().read();
+        defmt::info!("reset: csr={:?}", csr);
+        // Clearing reset flags is optional here; leave them latched so multiple
+        // faults can be correlated if needed.
+    }
+}
+
 // Global exception traps so we can see where the core dies instead of silently
 // stopping when the ESP32 starts talking to us over I2C.
 #[cortex_m_rt::exception]
@@ -208,6 +222,10 @@ async fn main(_spawner: Spawner) {
     // Single firmware profile: keep debug disabled during sleep for lowest current.
     config.enable_debug_during_sleep = false;
     let p = embassy_stm32::init(config);
+
+    // Emit reset cause once per boot so that unexpected terminations observed
+    // by the host can be correlated with RCC reset flags.
+    log_reset_cause();
 
     // 使用默认线程模式执行器：WFE 进入轻度 SLEEP（非 STOP）。
     // 启动日志（必须打印，复用与 sleep_task 相同的格式字符串以节省 FLASH）。
