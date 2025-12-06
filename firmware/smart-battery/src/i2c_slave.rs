@@ -52,13 +52,13 @@ static mut REG_PTR: u8 = WINDOW_START;
 
 // Verbose I2C diagnostics are useful while bringing up the slave; enable them
 // while we investigate host-side NACKs. Once stable, this can be flipped back
-// to `false` to reduce RTT traffic.
-const ENABLE_I2C_DIAG: bool = true;
+// to `false` to reduce RTT traffic. Keep disabled in production builds.
+const ENABLE_I2C_DIAG: bool = false;
 
 macro_rules! i2c_diag {
     ($($arg:tt)*) => {
         if ENABLE_I2C_DIAG {
-            defmt::info!($($arg)*);
+            defmt::debug!($($arg)*);
         }
     };
 }

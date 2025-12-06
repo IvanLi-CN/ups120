@@ -779,7 +779,7 @@ pub async fn bq76920_task(args: Bq76920TaskArgs) {
 
             // Evaluate the unified thermal policy against the aggregated snapshot.
             let snapshot = thermal::snapshot();
-            info!(
+            debug!(
                 "temp-policy: inputs pack_ntc_max={} chg={} bal={} mcu={}",
                 snapshot.t_ntc_max_0_01c,
                 snapshot.t_chg_0_01c,
@@ -788,7 +788,7 @@ pub async fn bq76920_task(args: Bq76920TaskArgs) {
             );
             let (new_policy_state, new_policy_output) =
                 temp_policy::eval(&temp_policy_state, &snapshot);
-            info!(
+            debug!(
                 "temp-policy: out allow_chg={} allow_dsg={} allow_bal={} bits=0x{:02x}",
                 new_policy_output.allow_charge,
                 new_policy_output.allow_discharge,

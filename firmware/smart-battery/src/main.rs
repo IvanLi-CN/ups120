@@ -64,10 +64,15 @@ use static_cell::StaticCell;
 // stopping when the ESP32 starts talking to us over I2C.
 #[cortex_m_rt::exception]
 unsafe fn HardFault(ef: &ExceptionFrame) -> ! {
-    defmt::error!("hardfault: pc=0x{:08x} lr=0x{:08x}", ef.pc(), ef.lr());
-    // Reset the MCU so the smart-battery firmware can recover rather than
-    // leaving the core halted (which appears as the probe \"dropping\").
-    SCB::sys_reset();
+    let pc = ef.pc();
+    let lr = ef.lr();
+    defmt::error!("hardfault: pc=0x{:08x} lr=0x{:08x}", pc, lr);
+    // In diagnostics builds keep the core parked here so that RTT logs are
+    // flushed and the faulting PC/LR can be recovered from logs/ELF instead
+    // of immediately resetting and losing context.
+    loop {
+        cortex_m::asm::bkpt();
+    }
 }
 
 // Catch any unexpected core/peripheral exceptions that don't have a specific
@@ -76,7 +81,9 @@ unsafe fn HardFault(ef: &ExceptionFrame) -> ! {
 #[cortex_m_rt::exception]
 unsafe fn DefaultHandler(irqn: i16) -> ! {
     defmt::error!("default-exception: irqn={}", irqn);
-    SCB::sys_reset();
+    loop {
+        cortex_m::asm::bkpt();
+    }
 }
 
 #[cfg(not(feature = "ship-mode"))]
