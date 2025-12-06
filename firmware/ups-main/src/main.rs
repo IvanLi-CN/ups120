@@ -263,10 +263,8 @@ async fn ui_task(
     thermal_state: &'static thermal::ThermalStateMutex,
     boot_millis: u64,
 ) {
-    // UI navigation state: dashboard vs battery detail, plus blink phase.
+    // UI navigation state: dashboard vs battery detail.
     let mut ui_screen = UiScreen::Dashboard;
-    let mut blink_on = true;
-    let mut blink_elapsed_ms: u32 = 0;
 
     // UI: alternate SoC% and VBAT every ~2 seconds.
     let mut adin_elapsed_ms: u32 = 0;
@@ -276,6 +274,10 @@ async fn ui_task(
     // UI: rotate through available temperature sources every ~2 seconds.
     let mut temp_alt_counter: u8 = 0;
     let mut temp_cycle_index: usize = 0;
+
+    // UI: batt-detail cells frame (voltages vs temperatures) alternation (~2 seconds).
+    let mut cells_frame = ui::CellsFrame::Voltage;
+    let mut cells_alt_counter: u8 = 0;
 
     loop {
         // Process UI events produced by the button task.
@@ -296,15 +298,6 @@ async fn ui_task(
             }
         }
 
-        // Blink phase for the battery-detail balancing indicator.
-        // UI整体每 1000 ms 重绘一次，所以这里选择 200 ms 作为半周期，
-        // 确保每次重绘都能看到交替的 on/off 状态（1 Hz 可感知闪烁）。
-        blink_elapsed_ms = blink_elapsed_ms.saturating_add(fan_control::SAMPLE_PERIOD_MS);
-        if blink_elapsed_ms >= 200 {
-            blink_elapsed_ms -= 200;
-            blink_on = !blink_on;
-        }
-
         // UI/采样刷新节奏：约 2 Hz（500 ms 一次）
         adin_elapsed_ms = adin_elapsed_ms.saturating_add(fan_control::SAMPLE_PERIOD_MS);
         if adin_elapsed_ms >= 500 {
@@ -315,6 +308,16 @@ async fn ui_task(
             if soc_alt_counter >= 2 {
                 soc_alt_counter = 0;
                 soc_alt_voltage = !soc_alt_voltage;
+            }
+
+            // advance batt-detail cells frame alternation (~2-second cadence)
+            cells_alt_counter = cells_alt_counter.saturating_add(1);
+            if cells_alt_counter >= 4 {
+                cells_alt_counter = 0;
+                cells_frame = match cells_frame {
+                    ui::CellsFrame::Voltage => ui::CellsFrame::Temp,
+                    ui::CellsFrame::Temp => ui::CellsFrame::Voltage,
+                };
             }
 
             // Snapshot power and thermal readings from background tasks instead of
@@ -333,13 +336,7 @@ async fn ui_task(
             let pack_temp = convert_temp_to_i16(thermal_snapshot.sb_pack_temp_c);
             let charger_temp = convert_temp_to_i16(thermal_snapshot.sb_charger_temp_c);
             let ups_temp = convert_temp_to_i16(thermal_snapshot.ups_temp_c);
-            let ntc_temps: [Option<i16>; 4] = {
-                let mut out = [None; 4];
-                for (idx, src) in thermal_snapshot.sb_ntc_temps_c.iter().enumerate() {
-                    out[idx] = convert_temp_to_i16(*src);
-                }
-                out
-            };
+            let cell_temps = estimate_cell_temps_i16(thermal_snapshot.sb_ntc_temps_c);
 
             let temp_sources = [
                 (ui::TempSlot::Battery, pack_temp),
@@ -484,10 +481,9 @@ async fn ui_task(
                 pack_v_mv: pack_v_detail,
                 pack_i_ma: pack_i_ma_abs,
                 cells_mv: last_cells_mv,
+                cells_temp_c: cell_temps,
                 balancing_index,
-                temps_c: ntc_temps,
                 temp_fault: power_snapshot.sb_temp_status.map(decode_temp_status),
-                blink_on,
             };
 
             match ui_screen {
@@ -496,9 +492,14 @@ async fn ui_task(
                         ui::render_dashboard_once_async(&mut spi, &mut cs, &mut dc, &model).await;
                 }
                 UiScreen::BattDetail => {
-                    let _ =
-                        ui::render_batt_detail_once_async(&mut spi, &mut cs, &mut dc, &batt_detail)
-                            .await;
+                    let _ = ui::render_batt_detail_once_async(
+                        &mut spi,
+                        &mut cs,
+                        &mut dc,
+                        &batt_detail,
+                        cells_frame,
+                    )
+                    .await;
                 }
             }
         }
@@ -991,6 +992,58 @@ fn round_temp_to_i16(temp: f32) -> i16 {
 
 fn convert_temp_to_i16(temp: Option<f32>) -> Option<i16> {
     temp.filter(|t| t.is_finite()).map(|t| round_temp_to_i16(t))
+}
+
+/// Estimate 5 cell-surface temperatures (degC) from 4 NTC probes using a simple
+/// positional model:
+/// - NTC0: between cells 1–2
+/// - NTC1: between cells 2–3
+/// - NTC2: between cells 3–4
+/// - NTC3: between cells 4–5
+///
+/// Mapping (in integer domain, after per-probe conversion):
+/// - T1 = NTC0
+/// - T2 = avg(NTC0, NTC1)
+/// - T3 = avg(NTC1, NTC2)
+/// - T4 = avg(NTC2, NTC3)
+/// - T5 = NTC3
+///
+/// avg(a, b):
+/// - both Some: rounded average
+/// - one Some: that value
+/// - both None: None
+fn estimate_cell_temps_i16(ntc_c: [Option<f32>; 4]) -> [Option<i16>; 5] {
+    fn avg_i16(a: Option<i16>, b: Option<i16>) -> Option<i16> {
+        match (a, b) {
+            (Some(x), Some(y)) => {
+                let sum = x as i32 + y as i32;
+                // Round to nearest, keeping behavior symmetric around zero.
+                let avg = if sum >= 0 {
+                    (sum + 1) / 2
+                } else {
+                    (sum - 1) / 2
+                };
+                Some(avg as i16)
+            }
+            (Some(x), None) | (None, Some(x)) => Some(x),
+            (None, None) => None,
+        }
+    }
+
+    let ntc_i16: [Option<i16>; 4] = [
+        convert_temp_to_i16(ntc_c[0]),
+        convert_temp_to_i16(ntc_c[1]),
+        convert_temp_to_i16(ntc_c[2]),
+        convert_temp_to_i16(ntc_c[3]),
+    ];
+
+    let t1 = ntc_i16[0];
+    let t2 = avg_i16(ntc_i16[0], ntc_i16[1]);
+    let t3 = avg_i16(ntc_i16[1], ntc_i16[2]);
+    let t4 = avg_i16(ntc_i16[2], ntc_i16[3]);
+    let t5 = ntc_i16[3];
+
+    [t1, t2, t3, t4, t5]
 }
 
 // (reserved) SMBus CRC8 helper left here if smart-battery read switches to interleaved CRC in future

@@ -560,6 +560,12 @@ pub enum TempSlot {
     Ups,
 }
 
+#[derive(Clone, Copy)]
+pub enum CellsFrame {
+    Voltage,
+    Temp,
+}
+
 pub struct DashboardData {
     pub mode: Mode,
     pub soc_pct: u8,
@@ -588,14 +594,12 @@ pub struct BattDetailData {
     pub pack_i_ma: Option<u32>,
     /// Per-cell voltages in mV (1-based cells mapped to indices 0–4).
     pub cells_mv: [Option<u16>; 5],
+    /// Estimated per-cell surface temperatures in degC (1-based cells 1–5).
+    pub cells_temp_c: [Option<i16>; 5],
     /// Optional index (1-based) of the cell currently being balanced.
     pub balancing_index: Option<u8>,
-    /// Up to four temperature slots; layout is `TEMP a°C b°C c°C d°C`.
-    pub temps_c: [Option<i16>; 4],
     /// Smart-battery TEMP_STATUS-derived thermal protection flags, if available.
     pub temp_fault: Option<TempFaultFlags>,
-    /// Blink phase for the balancing indicator (true = bright frame).
-    pub blink_on: bool,
 }
 
 fn fmt_voltage(mv: u32, buf: &mut heapless::String<16>) {
@@ -737,15 +741,24 @@ fn draw_batt_cell_entry(
     cell_index: u8,
     value_mv: Option<u16>,
     balancing_index: Option<u8>,
-    blink_on: bool,
 ) {
+    // For the battery detail view we want a half-character (~4px) gap between
+    // adjacent cell groups. We keep the logical column indices [0, 6, 12] but
+    // add a small pixel offset per group so that the overall layout still fits
+    // while matching the spec.
+    let x_offset = match col_start {
+        0 => 0,
+        6 => CELL_W / 2,
+        12 => CELL_W,
+        _ => 0,
+    };
+
     let mut label_buf: heapless::String<4> = heapless::String::new();
     let _ = write!(&mut label_buf, "{}:", cell_index);
-    let x_label = cell_to_x(col_start);
+    let x_label = cell_to_x(col_start) + x_offset;
     let _ = draw_text(fb, x_label, y, &label_buf, CYAN);
 
     let mut value_buf: heapless::String<8> = heapless::String::new();
-    // 始终显示电压数值；仅通过颜色变化来表现“闪烁”。
     let present = if let Some(mv) = value_mv {
         let _ = write!(&mut value_buf, "{}", mv);
         true
@@ -758,18 +771,48 @@ fn draw_batt_cell_entry(
     let color = if !present {
         GRAY
     } else if is_balanced {
-        // 被均衡的电芯：在两种颜色之间切换，实现“闪烁”效果。
-        if blink_on {
-            YELLOW
-        } else {
-            ORANGE
-        }
+        // Balanced cell: highlight voltage in YELLOW; others stay ORANGE.
+        YELLOW
     } else {
         ORANGE
     };
 
-    let x_val = cell_to_x(col_start + 2);
+    let x_val = cell_to_x(col_start + 2) + x_offset;
     let _ = draw_text(fb, x_val, y, &value_buf, color);
+}
+
+fn draw_batt_cell_temp_entry(
+    fb: &mut FrameBuffer,
+    y: u16,
+    col_start: usize,
+    cell_index: u8,
+    value_c: Option<i16>,
+) {
+    let x_offset = match col_start {
+        0 => 0,
+        6 => CELL_W / 2,
+        12 => CELL_W,
+        _ => 0,
+    };
+
+    let mut label_buf: heapless::String<4> = heapless::String::new();
+    let _ = write!(&mut label_buf, "{}:", cell_index);
+    let x_label = cell_to_x(col_start) + x_offset;
+    let _ = draw_text(fb, x_label, y, &label_buf, CYAN);
+
+    let mut temp_buf: heapless::String<8> = heapless::String::new();
+    let (digits_color, has_value) = if let Some(v) = value_c {
+        fmt_temp_digits(v, &mut temp_buf);
+        (WHITE, true)
+    } else {
+        let _ = temp_buf.push_str(PLACEHOLDER);
+        (GRAY, false)
+    };
+
+    let x_digits = cell_to_x(col_start + 2) + x_offset;
+    let x_after_digits = draw_text(fb, x_digits, y, &temp_buf, digits_color);
+    let c_color = if has_value { WHITE } else { GRAY };
+    let _ = draw_celsius(fb, x_after_digits, y, c_color);
 }
 
 fn draw_soc(fb: &mut FrameBuffer, y: u16, soc: u8) {
@@ -984,14 +1027,15 @@ where
 
 /// Render the battery detail page:
 /// - Line1: `BAT <CHG|DSG|IDLE> <VV.VV>V <II.I>A`
-/// - Line2: cells 1–3 as `<n>:<mV>`
-/// - Line3: cells 4–5 plus optional `BAL<n>`
-/// - Line4: `TEMP--°C--°C--°C--°C` with optional real values.
+/// - Lines2–3: either per-cell voltages or per-cell temperatures (5 cells total),
+///   depending on `cells_frame`.
+/// - Line4: `WARN <label>` using highest-priority thermal fault or `--`.
 pub fn render_batt_detail_once<SPI, CS, DC>(
     spi: &mut SPI,
     cs: &mut CS,
     dc: &mut DC,
     model: &BattDetailData,
+    cells_frame: CellsFrame,
 ) -> Result<(), SPI::Error>
 where
     SPI: SpiBus<u8>,
@@ -1037,91 +1081,102 @@ where
         };
         let _ = draw_text(fb, x + CELL_W, y0, &ibuf, i_color);
 
-        // ---- Lines 2–3: per-cell voltages + balancing indicator ----
+        // ---- Lines 2–3: per-cell voltages / temperatures + balancing indicator ----
         // Place three entries per row at columns 0, 6, 12.
         let cols = [0usize, 6, 12];
 
-        // Cells 1–3 on line 2
-        for (slot, cell_index) in (1u8..=3).enumerate() {
-            let idx = cell_index - 1;
-            draw_batt_cell_entry(
-                fb,
-                y1,
-                cols[slot],
-                cell_index,
-                model.cells_mv[idx as usize],
-                model.balancing_index,
-                model.blink_on,
-            );
-        }
+        match cells_frame {
+            CellsFrame::Voltage => {
+                // Cells 1–3 on line 2
+                for (slot, cell_index) in (1u8..=3).enumerate() {
+                    let idx = cell_index - 1;
+                    draw_batt_cell_entry(
+                        fb,
+                        y1,
+                        cols[slot],
+                        cell_index,
+                        model.cells_mv[idx as usize],
+                        model.balancing_index,
+                    );
+                }
 
-        // Cells 4–5 on line 3
-        for (slot, cell_index) in (4u8..=5).enumerate() {
-            let idx = cell_index - 1;
-            draw_batt_cell_entry(
-                fb,
-                y2,
-                cols[slot],
-                cell_index,
-                model.cells_mv[idx as usize],
-                model.balancing_index,
-                model.blink_on,
-            );
-        }
+                // Cells 4–5 on line 3
+                for (slot, cell_index) in (4u8..=5).enumerate() {
+                    let idx = cell_index - 1;
+                    draw_batt_cell_entry(
+                        fb,
+                        y2,
+                        cols[slot],
+                        cell_index,
+                        model.cells_mv[idx as usize],
+                        model.balancing_index,
+                    );
+                }
+            }
+            CellsFrame::Temp => {
+                // Cells 1–3 on line 2
+                for (slot, cell_index) in (1u8..=3).enumerate() {
+                    let idx = cell_index - 1;
+                    draw_batt_cell_temp_entry(
+                        fb,
+                        y1,
+                        cols[slot],
+                        cell_index,
+                        model.cells_temp_c[idx as usize],
+                    );
+                }
 
-        // Optional BAL<n> tag on the right of line 3.
-        if let Some(idx) = model.balancing_index {
-            let mut bal_buf: heapless::String<8> = heapless::String::new();
-            let _ = write!(&mut bal_buf, "BAL{}", idx);
-            // BAL 标签保持恒亮，不随 blink_on 变化，避免干扰电芯电压闪烁的视觉效果。
-            let bal_color = YELLOW;
-            let x_bal = cell_to_x(cols[2]);
-            let _ = draw_text(fb, x_bal, y2, &bal_buf, bal_color);
-        }
-
-        // ---- Line 4: temperatures ----
-        let mut temp_buf: heapless::String<8> = heapless::String::new();
-        let label_x = cell_to_x(COL_LABEL);
-        let _ = draw_text(fb, label_x, y3, "TEMP", CYAN);
-
-        for (slot_idx, temp) in model.temps_c.iter().enumerate() {
-            // Layout: `TEMP` (4 cells) + 1-cell gap, then 4 cells per temp slot.
-            let start_cell = TEMP_LABEL_CELLS + 1 + slot_idx * TEMP_VALUE_CELLS;
-            let x_digits = cell_to_x(start_cell);
-
-            temp_buf.clear();
-            let (digits_color, c_opt) = if let Some(v) = temp {
-                fmt_temp_digits(*v, &mut temp_buf);
-                (WHITE, Some(*v))
-            } else {
-                let _ = temp_buf.push_str(PLACEHOLDER);
-                (GRAY, None)
-            };
-            let x_after_digits = draw_text(fb, x_digits, y3, &temp_buf, digits_color);
-            let color = if c_opt.is_some() { digits_color } else { GRAY };
-            let _ = draw_celsius(fb, x_after_digits, y3, color);
-        }
-
-        // Optional temperature protection tag on the right: prefer showing the
-        // most restrictive condition (DSG HI > CHG HI > LO).
-        if let Some(flags) = model.temp_fault {
-            let label = if flags.temp_high_dsg {
-                "DSG HI"
-            } else if flags.temp_high_chg {
-                "CHG HI"
-            } else if flags.temp_low {
-                "LO"
-            } else {
-                ""
-            };
-
-            if !label.is_empty() {
-                let x = LOGICAL_WIDTH
-                    .saturating_sub(text_width(label))
-                    .saturating_sub(MARGIN_LR);
-                let _ = draw_text(fb, x, y3, label, YELLOW);
+                // Cells 4–5 on line 3
+                for (slot, cell_index) in (4u8..=5).enumerate() {
+                    let idx = cell_index - 1;
+                    draw_batt_cell_temp_entry(
+                        fb,
+                        y2,
+                        cols[slot],
+                        cell_index,
+                        model.cells_temp_c[idx as usize],
+                    );
+                }
             }
         }
+
+        // Optional BAL<n> tag on the right of line 3 (voltage frame only).
+        if let Some(idx) = model.balancing_index {
+            if let CellsFrame::Voltage = cells_frame {
+                let mut bal_buf: heapless::String<8> = heapless::String::new();
+                let _ = write!(&mut bal_buf, "BAL{}", idx);
+                let bal_color = YELLOW;
+                let x_offset = match cols[2] {
+                    0 => 0,
+                    6 => CELL_W / 2,
+                    12 => CELL_W,
+                    _ => 0,
+                };
+                let x_bal = cell_to_x(cols[2]) + x_offset;
+                let _ = draw_text(fb, x_bal, y2, &bal_buf, bal_color);
+            }
+        }
+
+        // ---- Line 4: WARN + thermal status ----
+        let label_x = cell_to_x(COL_LABEL);
+        let _ = draw_text(fb, label_x, y3, "WARN", CYAN);
+
+        let (warn_label, warn_color) = if let Some(flags) = model.temp_fault {
+            if flags.temp_high_dsg {
+                ("DSG HI", YELLOW)
+            } else if flags.temp_high_chg {
+                ("CHG HI", YELLOW)
+            } else if flags.temp_low {
+                ("TEMP LO", YELLOW)
+            } else {
+                ("--", GRAY)
+            }
+        } else {
+            ("--", GRAY)
+        };
+
+        let x_warn = cell_to_x(COL_VOLT);
+        let _ = draw_text(fb, x_warn, y3, warn_label, warn_color);
     });
     flush_framebuffer(spi, cs, dc)
 }
@@ -1131,6 +1186,7 @@ pub async fn render_batt_detail_once_async<SPI, CS, DC>(
     cs: &mut CS,
     dc: &mut DC,
     model: &BattDetailData,
+    cells_frame: CellsFrame,
 ) -> Result<(), SPI::Error>
 where
     SPI: AsyncSpiBus<u8>,
@@ -1173,62 +1229,97 @@ where
         };
         let _ = draw_text(fb, x + CELL_W, y0, &ibuf, i_color);
 
+        // ---- Lines 2–3: per-cell voltages / temperatures + balancing indicator ----
         let cols = [0usize, 6, 12];
 
-        for (slot, cell_index) in (1u8..=3).enumerate() {
-            let idx = cell_index - 1;
-            draw_batt_cell_entry(
-                fb,
-                y1,
-                cols[slot],
-                cell_index,
-                model.cells_mv[idx as usize],
-                model.balancing_index,
-                model.blink_on,
-            );
+        match cells_frame {
+            CellsFrame::Voltage => {
+                for (slot, cell_index) in (1u8..=3).enumerate() {
+                    let idx = cell_index - 1;
+                    draw_batt_cell_entry(
+                        fb,
+                        y1,
+                        cols[slot],
+                        cell_index,
+                        model.cells_mv[idx as usize],
+                        model.balancing_index,
+                    );
+                }
+
+                for (slot, cell_index) in (4u8..=5).enumerate() {
+                    let idx = cell_index - 1;
+                    draw_batt_cell_entry(
+                        fb,
+                        y2,
+                        cols[slot],
+                        cell_index,
+                        model.cells_mv[idx as usize],
+                        model.balancing_index,
+                    );
+                }
+            }
+            CellsFrame::Temp => {
+                for (slot, cell_index) in (1u8..=3).enumerate() {
+                    let idx = cell_index - 1;
+                    draw_batt_cell_temp_entry(
+                        fb,
+                        y1,
+                        cols[slot],
+                        cell_index,
+                        model.cells_temp_c[idx as usize],
+                    );
+                }
+
+                for (slot, cell_index) in (4u8..=5).enumerate() {
+                    let idx = cell_index - 1;
+                    draw_batt_cell_temp_entry(
+                        fb,
+                        y2,
+                        cols[slot],
+                        cell_index,
+                        model.cells_temp_c[idx as usize],
+                    );
+                }
+            }
         }
 
-        for (slot, cell_index) in (4u8..=5).enumerate() {
-            let idx = cell_index - 1;
-            draw_batt_cell_entry(
-                fb,
-                y2,
-                cols[slot],
-                cell_index,
-                model.cells_mv[idx as usize],
-                model.balancing_index,
-                model.blink_on,
-            );
-        }
-
+        // Optional BAL<n> tag on the right of line 3 (voltage frame only).
         if let Some(idx) = model.balancing_index {
-            let mut bal_buf: heapless::String<8> = heapless::String::new();
-            let _ = write!(&mut bal_buf, "BAL{}", idx);
-            let bal_color = YELLOW;
-            let x_bal = cell_to_x(cols[2]);
-            let _ = draw_text(fb, x_bal, y2, &bal_buf, bal_color);
+            if let CellsFrame::Voltage = cells_frame {
+                let mut bal_buf: heapless::String<8> = heapless::String::new();
+                let _ = write!(&mut bal_buf, "BAL{}", idx);
+                let bal_color = YELLOW;
+                let x_offset = match cols[2] {
+                    0 => 0,
+                    6 => CELL_W / 2,
+                    12 => CELL_W,
+                    _ => 0,
+                };
+                let x_bal = cell_to_x(cols[2]) + x_offset;
+                let _ = draw_text(fb, x_bal, y2, &bal_buf, bal_color);
+            }
         }
 
-        let mut temp_buf: heapless::String<8> = heapless::String::new();
+        // ---- Line 4: WARN + thermal status ----
         let label_x = cell_to_x(COL_LABEL);
-        let _ = draw_text(fb, label_x, y3, "TEMP", CYAN);
+        let _ = draw_text(fb, label_x, y3, "WARN", CYAN);
 
-        for (slot_idx, temp) in model.temps_c.iter().enumerate() {
-            let start_cell = TEMP_LABEL_CELLS + 1 + slot_idx * TEMP_VALUE_CELLS;
-            let x_digits = cell_to_x(start_cell);
-
-            temp_buf.clear();
-            let (digits_color, c_opt) = if let Some(v) = temp {
-                fmt_temp_digits(*v, &mut temp_buf);
-                (WHITE, Some(*v))
+        let (warn_label, warn_color) = if let Some(flags) = model.temp_fault {
+            if flags.temp_high_dsg {
+                ("DSG HI", YELLOW)
+            } else if flags.temp_high_chg {
+                ("CHG HI", YELLOW)
+            } else if flags.temp_low {
+                ("TEMP LO", YELLOW)
             } else {
-                let _ = temp_buf.push_str(PLACEHOLDER);
-                (GRAY, None)
-            };
-            let x_after_digits = draw_text(fb, x_digits, y3, &temp_buf, digits_color);
-            let color = if c_opt.is_some() { digits_color } else { GRAY };
-            let _ = draw_celsius(fb, x_after_digits, y3, color);
-        }
+                ("--", GRAY)
+            }
+        } else {
+            ("--", GRAY)
+        };
+
+        let x_warn = cell_to_x(COL_VOLT);
+        let _ = draw_text(fb, x_warn, y3, warn_label, warn_color);
     });
     flush_framebuffer_async(spi, cs, dc).await
 }
