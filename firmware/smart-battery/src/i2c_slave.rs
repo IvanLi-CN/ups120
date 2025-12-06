@@ -294,6 +294,19 @@ unsafe fn initialise_registers() {
     REGISTERS[4] = 0;
     REGISTERS[5] = WINDOW_START;
     REGISTERS[6] = WINDOW_START;
+    // For the legacy 0x14..0x17 temperature window that some hosts may still
+    // poll, seed the two i16 (0.01 °C) slots with the explicit INVALID
+    // sentinel instead of leaving them at 0 °C. This makes any stale use of
+    // the old registers fail loudly rather than silently disabling thermal
+    // protections.
+    let invalid_0_01c = thermal::TEMP_INVALID_0_01C as u16;
+    let lo = (invalid_0_01c & 0xFF) as u8;
+    let hi = (invalid_0_01c >> 8) as u8;
+    let base = TEMP_BASE_ADDR as usize;
+    REGISTERS[base] = lo;
+    REGISTERS[base + 1] = hi;
+    REGISTERS[base + 2] = lo;
+    REGISTERS[base + 3] = hi;
     // Explicitly initialise TEMP_STATUS so the host can rely on a defined
     // bitfield value even before any thermal policy is wired in.
     REGISTERS[TEMP_STATUS_ADDR as usize] = 0;
