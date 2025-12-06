@@ -1,7 +1,6 @@
 use crate::thermal::ThermalSnapshot;
 use sb_temp_policy as core;
 
-pub use core::bits;
 pub use core::{TempInputs, TempPolicyOutput, TempPolicyState};
 
 /// Evaluate the unified thermal policy using the project-level ThermalSnapshot.

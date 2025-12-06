@@ -37,7 +37,6 @@ mod thermal;
 
 use bq769x0_async_rs::{BatteryConfig, Bq769x0, Enabled as BqCrcEnabled};
 // no direct info! logs to减小尺寸
-use cortex_m::peripheral::SCB;
 use cortex_m_rt::ExceptionFrame;
 use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
 use embassy_executor::Spawner;

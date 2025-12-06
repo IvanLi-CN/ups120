@@ -378,8 +378,9 @@ pub async fn bq76920_task(args: Bq76920TaskArgs) {
     // Unified thermal policy state/output (shared across iterations).
     let mut temp_policy_state: TempPolicyState = TempPolicyState::default();
     let mut temp_policy_output: TempPolicyOutput = TempPolicyOutput::default();
-    // SMBus Alert GPIO (PB5) passed in from main, if available.
-    let mut temp_alert_pin = temp_alert_pin;
+    // SMBus Alert GPIO (PB5) passed in from main, if available. Keep owned to
+    // preserve its lifetime even if we are not actively using it yet.
+    let _temp_alert_pin = temp_alert_pin;
     // Last-known pack spread computed from BQ measurements
     let mut last_delta_mv: Option<i32> = None;
     let mut last_delta_pct: Option<u8> = None;
@@ -942,23 +943,21 @@ pub async fn bq76920_task(args: Bq76920TaskArgs) {
         // Publish the coupling signal each tick
         // Severe imbalance flag (Δ>=100 mV)
         let mut severe_imbalance_flag = delta_mv.map(|d| d >= 100).unwrap_or(false);
-        if !severe_imbalance_flag {
-            if let Some(meas) = latest_core_measurements.as_ref() {
-                let mut min_v = i32::MAX;
-                let mut max_v = i32::MIN;
-                for &v in meas.cell_voltages.voltages.iter() {
-                    if v > 0 {
-                        if v < min_v {
-                            min_v = v;
-                        }
-                        if v > max_v {
-                            max_v = v;
-                        }
+        if !severe_imbalance_flag && let Some(meas) = latest_core_measurements.as_ref() {
+            let mut min_v = i32::MAX;
+            let mut max_v = i32::MIN;
+            for &v in meas.cell_voltages.voltages.iter() {
+                if v > 0 {
+                    if v < min_v {
+                        min_v = v;
+                    }
+                    if v > max_v {
+                        max_v = v;
                     }
                 }
-                if max_v != i32::MIN && min_v != i32::MAX {
-                    severe_imbalance_flag = (max_v - min_v) >= 100;
-                }
+            }
+            if max_v != i32::MIN && min_v != i32::MAX {
+                severe_imbalance_flag = (max_v - min_v) >= 100;
             }
         }
 

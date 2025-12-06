@@ -350,14 +350,6 @@ pub fn update_bq_measurements<const N: usize>(meas: &Bq76920Measurements<N>) {
     let core = &meas.core_measurements;
     let pack_mv = core.total_voltage_mv.clamp(0, u16::MAX as i32) as u16;
     let pack_current = core.current_ma.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
-    let temps = &core.temperatures;
-    let mut hottest = temps.ts1;
-    if let Some(ts2) = temps.ts2 {
-        hottest = hottest.max(ts2);
-    }
-    if let Some(ts3) = temps.ts3 {
-        hottest = hottest.max(ts3);
-    }
     write_u16_le(0x10, pack_mv);
     write_i16_le(0x12, pack_current);
 
@@ -392,7 +384,7 @@ pub fn update_bq_measurements<const N: usize>(meas: &Bq76920Measurements<N>) {
     };
 
     // Start from the raw snapshot values in 0.01 °C domain.
-    let mut t_pack_0_01c = snapshot.t_pack_0_01c;
+    let t_pack_0_01c = snapshot.t_pack_0_01c;
     let mut t_chg_0_01c = snapshot.t_chg_0_01c;
     let mut t_ntc_0_01c = snapshot.t_ntc_0_01c;
     let mut t_bq_int_0_01c = snapshot.t_bq_int_0_01c;
@@ -430,10 +422,11 @@ pub fn update_bq_measurements<const N: usize>(meas: &Bq76920Measurements<N>) {
     // Log the aggregated thermal snapshot at info level so we can correlate
     // raw 0.01 °C values with the encoded I2C window on real hardware.
     info!(
-        "therm: pack={} chg={} ntc={:?} bq_int={} mcu={}",
+        "therm: pack={} chg={} ntc={:?} ntc_min={} bq_int={} mcu={}",
         snapshot.t_pack_0_01c,
         snapshot.t_chg_0_01c,
         snapshot.t_ntc_0_01c,
+        snapshot.t_ntc_min_0_01c,
         snapshot.t_bq_int_0_01c,
         snapshot.t_mcu_0_01c
     );
