@@ -13,6 +13,8 @@
 
 ## Sensor & Bias Selection
 
+> Note: The smart-battery PCB also carries an older, optional NTC footprint on the BQ7692003 TS1 pin. On current project hardware this TS1-side NTC is **not stuffed** and TS1 is not used as an external pack sensor; BQ7692003 runs in internal-temperature mode only. All pack-surface temperature sensing described in this document comes from the 4× NTC network into the STM32 ADC.
+
 - NTC: Cantherm MF52C1103F3380, 10 kΩ ±1 % @ 25 °C, B25/50 = 3380 K ±1 %, epoxy bead ≤2 mm with 0.2 mm enamelled copper leads (length can be specified before crimping), 50 mW rating, −55 °C to +125 °C operating window.
 - Pull-up: 43 kΩ ±1 %, 1/16 W or higher, tied to MCU GPIO when enabled.
 - Filter capacitor: 100 nF X7R to ground at ADC pin for noise suppression.

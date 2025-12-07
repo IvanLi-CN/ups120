@@ -24,13 +24,13 @@ I2C pins (per CubeMX .ioc):
 - `I2C2` (INNER bus): `PB10` = SCL, `PB11` = SDA
 - `I2C1` (SMBus alert mode enabled): `PB6` = SCL, `PB7` = SDA, `PB5` = SMBA
 
-GPIO mapping (per smart-battery.ioc):
+GPIO mapping (netlist‑accurate; the `.ioc` file is slightly stale):
 - `PA9`: `PSTOP` (GPIO Output) — HIGH = power stage gated, LOW = enable
 - `PA10`: `CE` (GPIO Output) — LOW = charger enabled
 - `PA5`: `LEDK` (TIM2_CH1 alternate, open‑drain LED in firmware)
-- `PA2`: `PCHG_EN` (GPIO Output)
-- `PA1`: `EXIT_SHIPMODE` (GPIO Output)
-- `PA0`: `ADC_IN0`
+- `PA2`: `PCHG_EN` (GPIO Output)  *(per .ioc; see PCB netlist for the exact pad)*
+- `PA0..PA3`: `ADC_IN0..3` for the 4× NTC network (`TS45`/`TS34`/`TS23`/`TS12` → pack temperatures)
+- `PH0`: `EXIT_SHIPMODE` (GPIO Output) — routed via D3 clamp onto BQ76920 `TS1`, used to wake from SHIP mode
 - `PB1`: `ALERT` (EXTI1)
 - `PB2`: `INNER_INT` (EXTI2)
 

@@ -17,6 +17,8 @@ pub struct ThermalState {
     pub sb_pack_temp_c: Option<f32>,
     /// Smart-battery charger/FET temperature (°C), if available.
     pub sb_charger_temp_c: Option<f32>,
+    /// Per-pack NTC temperatures (0..3), if available.
+    pub sb_ntc_temps_c: [Option<f32>; 4],
     /// Latest fan-control status snapshot.
     pub fan: fan_control::FanStatus,
 }
@@ -27,6 +29,7 @@ impl Default for ThermalState {
             ups_temp_c: None,
             sb_pack_temp_c: None,
             sb_charger_temp_c: None,
+            sb_ntc_temps_c: [None; 4],
             fan: fan_control::FanStatus::default(),
         }
     }
@@ -70,9 +73,9 @@ pub async fn thermal_task(
         controller.tick(reading, sb_temps);
 
         let fan_status = controller.status();
-        let (pack_c, charger_c) = match sb_temps {
-            Some(t) => (t.pack_c, t.charger_c),
-            None => (None, None),
+        let (pack_c, charger_c, ntc_c) = match sb_temps {
+            Some(t) => (t.pack_c, t.charger_c, t.ntc_c),
+            None => (None, None, [None; 4]),
         };
 
         // Publish current snapshot for UI and power tasks.
@@ -82,6 +85,7 @@ pub async fn thermal_task(
                 ups_temp_c,
                 sb_pack_temp_c: pack_c,
                 sb_charger_temp_c: charger_c,
+                sb_ntc_temps_c: ntc_c,
                 fan: fan_status,
             };
         }

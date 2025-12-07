@@ -5,7 +5,7 @@ use embassy_time::{Duration, Timer, with_timeout};
 
 use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
 // EXTI is handled by irq_mux; no direct dependency here
-use embassy_stm32::i2c::I2c;
+use embassy_stm32::{gpio::Output, i2c::I2c};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use portable_atomic::AtomicBool;
 
@@ -17,11 +17,14 @@ use bq769x0_async_rs::{
 // Import necessary data types
 use crate::charger_control;
 use crate::data_types::BalancingCvRequest;
+use crate::i2c_slave;
 use crate::shared::{
     BalancingCvRequestPublisher, Bq76920AlertsPublisher, Bq76920MeasurementsPublisher,
     Sc8815AlertsSubscriber,
 };
 use crate::state_bits::{self, bits as sbits};
+use crate::temp_policy::{self, TempPolicyOutput, TempPolicyState};
+use crate::thermal::{self, TEMP_INVALID_0_01C};
 
 const PACK_CHARGE_STOP_THRESHOLD_MV: i32 = 18_500;
 const PACK_CHARGE_START_THRESHOLD_MV: i32 = 17_000;
@@ -42,15 +45,6 @@ const VERBOSE_BQ_LOG: bool = false; // set true for full register-by-register du
 const TEST_FORCE_BQ_FETS_OFF: bool = false;
 // Interlock deadtime when switching balancing target cells (safety)
 const BALANCE_SWITCH_DEADTIME_MS: u64 = 40;
-// Temperature protection thresholds (0.01°C units)
-// NOTE: Temporarily disable BQ-driven temp pause for SC testing
-const DISABLE_BQ_TEMP_PAUSE: bool = false; // re-enabled per request
-const TEMP_PAUSE_HIGH_001C: i32 = 50_00; // > +50.00°C → request SC pause (no CHG action)
-const TEMP_PAUSE_LOW_001C: i32 = 0; // <  +0.00°C → request SC pause (no CHG action)
-const TEMP_CHG_GATE_HIGH_001C: i32 = 60_00; // > +60.00°C → gate CHG (with 5°C hysteresis)
-const TEMP_CUTOFF_HIGH_001C: i32 = 70_00; // > +70.00°C → cut output (DSG off), 5°C hysteresis
-const TEMP_CUTOFF_LOW_001C: i32 = -10_00; // < -10.00°C → cut output (DSG off), 5°C hysteresis
-const TEMP_HYST_001C: i32 = 5_00; // 5°C hysteresis
 // EMA coefficient in percent (for active mode temperature smoothing)
 const TEMP_EMA_ALPHA_PCT: i32 = 20; // 20% new sample, 80% history
 
@@ -95,6 +89,8 @@ pub struct Bq76920TaskArgs {
     pub bq76920_measurements_publisher: Bq76920MeasurementsPublisher<'static, 5>,
     pub sc8815_alerts_subscriber: Sc8815AlertsSubscriber<'static>,
     pub balancing_cv_publisher: BalancingCvRequestPublisher<'static>,
+    /// Optional SMBus Alert (PB5) GPIO used to signal temperature events.
+    pub temp_alert_pin: Option<Output<'static>>,
 }
 
 // BQ ALERT EXTI is handled in irq_mux::irq_mux_task
@@ -276,6 +272,7 @@ pub async fn bq76920_task(args: Bq76920TaskArgs) {
         bq76920_measurements_publisher,
         mut sc8815_alerts_subscriber,
         balancing_cv_publisher,
+        temp_alert_pin,
     } = args;
     // dbg: test_fets_off
     // Initialize the BQ769x0 driver instance with CRC enabled and for 5 cells.
@@ -378,10 +375,12 @@ pub async fn bq76920_task(args: Bq76920TaskArgs) {
     // Temperature smoothing state
     let mut temp_ema_001c: i32 = 0;
     let mut temp_ema_inited: bool = false;
-    // Temperature protection latches (edge-log once)
-    let mut temp_pause_active: bool = false; // request to SC (pubsub)
-    let mut temp_chg_gate_active: bool = false; // local CHG gating (>60°C with hysteresis)
-    let mut temp_cutoff_active: bool = false;
+    // Unified thermal policy state/output (shared across iterations).
+    let mut temp_policy_state: TempPolicyState = TempPolicyState::default();
+    let mut temp_policy_output: TempPolicyOutput = TempPolicyOutput::default();
+    // SMBus Alert GPIO (PB5) passed in from main, if available. Keep owned to
+    // preserve its lifetime even if we are not actively using it yet.
+    let _temp_alert_pin = temp_alert_pin;
     // Last-known pack spread computed from BQ measurements
     let mut last_delta_mv: Option<i32> = None;
     let mut last_delta_pct: Option<u8> = None;
@@ -579,6 +578,13 @@ pub async fn bq76920_task(args: Bq76920TaskArgs) {
                         should_enable_discharge = false;
                     }
 
+                    // Apply unified thermal gating (previous iteration's policy
+                    // output). Immediate reactions for new events are handled
+                    // after the thermal evaluation near the end of the loop.
+                    if !temp_policy_output.allow_discharge {
+                        should_enable_discharge = false;
+                    }
+
                     let is_discharge_currently_on =
                         core_meas.mos_status.0.contains(SysCtrl2Flags::DSG_ON);
 
@@ -653,6 +659,11 @@ pub async fn bq76920_task(args: Bq76920TaskArgs) {
                         should_enable_charging = false;
                     }
 
+                    // Thermal policy may further restrict charging.
+                    if !temp_policy_output.allow_charge {
+                        should_enable_charging = false;
+                    }
+
                     if should_enable_charging {
                         let ctrl = charger_control::snapshot();
                         if !ctrl.auto_enabled && !ctrl.manual_enable {
@@ -707,6 +718,7 @@ pub async fn bq76920_task(args: Bq76920TaskArgs) {
             // last_cellbal_bits already updated earlier on change; keep it as snapshot
 
             // Compute and log temperature (EMA when active; median-of-3 when inactive)
+            let mut t_bq_int_0_01c = TEMP_INVALID_0_01C;
             if let Some(core) = latest_core_measurements.as_ref() {
                 // Choose internal TS1 (die temperature) per project requirement
                 let raw_t_001c: i16 = core.temperatures.ts1;
@@ -760,63 +772,43 @@ pub async fn bq76920_task(args: Bq76920TaskArgs) {
                     );
                 }
 
-                // Temperature-based protections
-                let used_i32 = i32::from(used_t_001c);
-                let pause_needed =
-                    !(TEMP_PAUSE_LOW_001C..=TEMP_PAUSE_HIGH_001C).contains(&used_i32);
-                // CHG gate with hysteresis around 60°C
-                let chg_gate_enter = used_i32 > TEMP_CHG_GATE_HIGH_001C;
-                let chg_gate_exit = used_i32 <= (TEMP_CHG_GATE_HIGH_001C - TEMP_HYST_001C);
-                // DSG cutoff with hysteresis around ±70/−10°C
-                let cutoff_enter =
-                    !(TEMP_CUTOFF_LOW_001C..=TEMP_CUTOFF_HIGH_001C).contains(&used_i32);
-                let cutoff_exit = ((TEMP_CUTOFF_LOW_001C + TEMP_HYST_001C)
-                    ..=(TEMP_CUTOFF_HIGH_001C - TEMP_HYST_001C))
-                    .contains(&used_i32);
-
-                // Cutoff dominates pause
-                if cutoff_enter && !temp_cutoff_active {
-                    // Immediately cut discharge output
-                    let _ = bq.disable_discharging().await;
-                    defmt::warn!("bq:temp_cut DSG_OFF t001c={}", used_i32);
-                    temp_cutoff_active = true;
-                    fault_bq_flag = true;
-                } else if cutoff_exit && temp_cutoff_active {
-                    // Recover discharge path when temperature returns to safe band
-                    let _ = bq.enable_discharging().await;
-                    defmt::debug!("bq:temp_cut clr t001c={}", used_i32);
-                    temp_cutoff_active = false;
-                    fault_bq_flag = false;
-                }
-
-                // Request SC pause (disabled when DISABLE_BQ_TEMP_PAUSE)
-                if !DISABLE_BQ_TEMP_PAUSE {
-                    if pause_needed && !temp_pause_active {
-                        defmt::warn!("sc:req temp_pause t001c={}", used_i32);
-                        temp_pause_active = true;
-                    } else if !pause_needed && temp_pause_active {
-                        defmt::debug!("sc:req temp_pause clr t001c={}", used_i32);
-                        temp_pause_active = false;
-                    }
-                } else {
-                    // keep temp_pause_active=false during SC-only testing
-                    if temp_pause_active {
-                        defmt::debug!("sc:req temp_pause DISABLED");
-                    }
-                    temp_pause_active = false;
-                }
-
-                // Local CHG gating only above 60°C with hysteresis
-                if chg_gate_enter && !temp_chg_gate_active {
-                    let _ = bq.disable_charging().await;
-                    defmt::warn!("bq:temp_chg_gate CHG_OFF t001c={}", used_i32);
-                    temp_chg_gate_active = true;
-                } else if chg_gate_exit && temp_chg_gate_active {
-                    let _ = bq.enable_charging().await;
-                    defmt::debug!("bq:temp_chg_gate clr t001c={}", used_i32);
-                    temp_chg_gate_active = false;
-                }
+                // Publish filtered BQ internal temperature into thermal aggregation.
+                t_bq_int_0_01c = used_t_001c;
             }
+            // If we have no valid core measurements, t_bq_int_0_01c stays INVALID.
+            thermal::update_bq_int_temp(t_bq_int_0_01c);
+
+            // Evaluate the unified thermal policy against the aggregated snapshot.
+            let snapshot = thermal::snapshot();
+            debug!(
+                "temp-policy: inputs pack_ntc_max={} chg={} bal={} mcu={}",
+                snapshot.t_ntc_max_0_01c,
+                snapshot.t_chg_0_01c,
+                snapshot.t_bq_int_0_01c,
+                snapshot.t_mcu_0_01c,
+            );
+            let (new_policy_state, new_policy_output) =
+                temp_policy::eval(&temp_policy_state, &snapshot);
+            debug!(
+                "temp-policy: out allow_chg={} allow_dsg={} allow_bal={} bits=0x{:02x}",
+                new_policy_output.allow_charge,
+                new_policy_output.allow_discharge,
+                new_policy_output.allow_balancing,
+                new_policy_output.temp_status_bits,
+            );
+            temp_policy_state = new_policy_state;
+
+            // Mirror TEMP_STATUS onto the I2C slave register (0x23) so the host
+            // can observe unified thermal protections. Keep the actual gating
+            // behaviour decoupled for now by resetting the policy output below.
+            i2c_slave::update_temp_status(new_policy_output.temp_status_bits);
+
+            // Start using the evaluated policy output for downstream gating
+            // (CHG/DSG/balancing + SC temperature pause). Under nominal ambient
+            // conditions this keeps behaviour identical to the legacy code
+            // (all allows=true, bits=0), while making over-temperature handling
+            // effective when thresholds are exceeded.
+            temp_policy_output = new_policy_output;
 
             // 发布测量（即便失败也发布默认值，便于外设镜像）
             let bq76920_measurements_payload_for_main_pub =
@@ -874,9 +866,9 @@ pub async fn bq76920_task(args: Bq76920TaskArgs) {
         // Determine if we should request CV hold from charger
         let hw_balancing_active = last_cellbal_bits != 0;
         // Charger should hold CV when balancing is required or active, but only when AC is present
-        // and not during temperature pause.
+        // and the unified thermal policy allows balancing.
         let mut require_cv = adapter_present
-            && !temp_pause_active
+            && temp_policy_output.allow_balancing
             && (active_balancing_cell.is_some()
                 || hw_balancing_active
                 || balancing_needed_by_delta);
@@ -894,8 +886,9 @@ pub async fn bq76920_task(args: Bq76920TaskArgs) {
             // 3600 seconds = 1 hour
             if !TEST_FORCE_BQ_FETS_OFF {
                 // Strict policy: balancing only allowed when adapter is present.
-                // Additionally, never allow balancing during temperature pause.
-                let balancing_env = adapter_present && !temp_pause_active;
+                // Additionally, never allow balancing when the thermal policy
+                // has disabled it.
+                let balancing_env = adapter_present && temp_policy_output.allow_balancing;
                 if balancing_env && charging_phase {
                     execute_smart_battery_balancing(
                         &mut bq,
@@ -916,8 +909,10 @@ pub async fn bq76920_task(args: Bq76920TaskArgs) {
         // --- End Battery Balancing Logic ---
 
         // If temperature pause becomes active while balancing, stop immediately.
-        if temp_pause_active && (active_balancing_cell.is_some() || last_cellbal_bits != 0) {
-            defmt::debug!("bal:stop temp_pause hw=0x{:02X}", last_cellbal_bits);
+        if !temp_policy_output.allow_balancing
+            && (active_balancing_cell.is_some() || last_cellbal_bits != 0)
+        {
+            defmt::debug!("bal:stop temp_protect hw=0x{:02X}", last_cellbal_bits);
             let _ = bq.set_cell_balancing(0).await;
             active_balancing_cell = None;
             last_cellbal_bits = 0;
@@ -948,23 +943,21 @@ pub async fn bq76920_task(args: Bq76920TaskArgs) {
         // Publish the coupling signal each tick
         // Severe imbalance flag (Δ>=100 mV)
         let mut severe_imbalance_flag = delta_mv.map(|d| d >= 100).unwrap_or(false);
-        if !severe_imbalance_flag {
-            if let Some(meas) = latest_core_measurements.as_ref() {
-                let mut min_v = i32::MAX;
-                let mut max_v = i32::MIN;
-                for &v in meas.cell_voltages.voltages.iter() {
-                    if v > 0 {
-                        if v < min_v {
-                            min_v = v;
-                        }
-                        if v > max_v {
-                            max_v = v;
-                        }
+        if !severe_imbalance_flag && let Some(meas) = latest_core_measurements.as_ref() {
+            let mut min_v = i32::MAX;
+            let mut max_v = i32::MIN;
+            for &v in meas.cell_voltages.voltages.iter() {
+                if v > 0 {
+                    if v < min_v {
+                        min_v = v;
+                    }
+                    if v > max_v {
+                        max_v = v;
                     }
                 }
-                if max_v != i32::MIN && min_v != i32::MAX {
-                    severe_imbalance_flag = (max_v - min_v) >= 100;
-                }
+            }
+            if max_v != i32::MIN && min_v != i32::MAX {
+                severe_imbalance_flag = (max_v - min_v) >= 100;
             }
         }
 
@@ -972,7 +965,9 @@ pub async fn bq76920_task(args: Bq76920TaskArgs) {
             require_cv,
             overlay: overlay_led,
             severe_imbalance: severe_imbalance_flag,
-            temp_pause: temp_pause_active,
+            // Request SC-side temperature pause whenever charge is thermally
+            // disallowed by the unified policy.
+            temp_pause: !temp_policy_output.allow_charge,
             delta_mv,
             delta_pct,
         });

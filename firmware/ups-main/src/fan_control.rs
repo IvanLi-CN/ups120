@@ -21,11 +21,17 @@ const FILTER_WINDOW: usize = 3;
 pub struct SmartBatteryTemps {
     pub pack_c: Option<f32>,
     pub charger_c: Option<f32>,
+    /// Per-pack NTC temperatures (0..3), if available.
+    pub ntc_c: [Option<f32>; 4],
 }
 
 impl SmartBatteryTemps {
-    pub fn new(pack_c: Option<f32>, charger_c: Option<f32>) -> Self {
-        Self { pack_c, charger_c }
+    pub fn new(pack_c: Option<f32>, charger_c: Option<f32>, ntc_c: [Option<f32>; 4]) -> Self {
+        Self {
+            pack_c,
+            charger_c,
+            ntc_c,
+        }
     }
 
     pub fn highest(&self) -> Option<f32> {

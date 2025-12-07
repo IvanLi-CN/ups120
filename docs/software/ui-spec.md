@@ -228,21 +228,19 @@
 
 ## 7. 智能电池详情页（方向键向下）
 
-用途：在仪表盘下按一次“方向键 ↓”进入，快速查看智能电池充/放状态、分节电压与均衡。背景、字体、调色板沿用前述规范。
+用途：在仪表盘下按一次“方向键 ↓”进入，查看智能电池充/放状态、分节电压与分节温度，并在最后一行为电池相关告警预留空间。背景、字体与调色板沿用前述规范。
 
-布局（4 行，基线 `y = 1 + n×12`）：
-- 行1：`BAT <CHG|DSG|IDLE> <VV.VV>V <II.I>A`；`BAT`/状态 `CYAN`，电压 `ORANGE`，电流 `RED`。
-- 行2：电芯 1–3，格式 `<n>:<mV>`，编号 `CYAN`，电压 `ORANGE`，电芯间半格（4px）间距。
-- 行3：电芯 4–5 + `BAL<n>`（`YELLOW`），同样半格分隔。
-- 行4：温度占位 `TEMP--°C--°C--°C--°C`，灰色；后续填实时值时遵循温度着色规则。
+布局（摘要，完整细节见 `docs/software/batt-detail-design.md` 与第 11 节）：
+- 行1：`BAT <CHG|DSG|IDLE> <VV.VV>V <II.I>A`，与仪表盘风格一致；
+- 行2–3：电芯区，以 2 秒节奏在“电压帧 / 温度帧”之间轮播：
+  - 电压帧：显示 1–5 号电芯电压，均衡中的电芯以 `YELLOW` 高亮（仅在电压帧中高亮，不再闪烁），其他为 `ORANGE`；
+  - 温度帧：在相同几何位置显示 1–5 号电芯表面温度（由 4 NTC 推算），使用统一的度点 + `C` 字形，颜色始终为 `WHITE`；
+- 行4：`WARN <code>` 告警行，仅显示 1 条优先级最高的短告警代码（如 `DSG HI` / `CHG HI` / `TEMP LO` 等），无告警时为 `WARN --`。
 
-均衡闪烁：
-- 被均衡单节亮帧为 `ORANGE`，暗帧降为 `GRAY`（数字与冒号保留）；推荐 2 Hz、50% 占空。
+示例像素稿（160×50 点阵，放大 4× 展示）由 `docs/software/assets/gen_mockups.py` 生成：
 
-示例（160×50 点阵，实机配色）：
-
-![Battery detail on](./assets/dashboard_batt_detail_on.png)
-![Battery detail off](./assets/dashboard_batt_detail_off.png)
+![Battery detail – voltage frame](./assets/dashboard_batt_detail_volt.png)
+![Battery detail – temperature frame](./assets/dashboard_batt_detail_temp.png)
 
 交互：再按“方向键 ↑”返回仪表盘；其他按键行为遵循主界面定义。
 
@@ -308,20 +306,35 @@
 
 ## 11. 智能电池详情页（方向键向下）
 
-用途：从仪表盘按一次“方向键 ↓”进入，快速查看智能电池充/放状态、分节电压与均衡标识。背景、字体、调色板沿用前述规范。
+用途：从仪表盘按一次“方向键 ↓”进入，快速查看智能电池充/放状态、分节电压、分节温度与告警。背景、字体、调色板沿用前述规范。
 
 布局（4 行，基线 `y = 1 + n×12`）：
 - 行1：`BAT <CHG|DSG|IDLE> <VV.VV>V <II.I>A`（`BAT`/状态 `CYAN`，电压 `ORANGE`，电流 `RED`）。
-- 行2：电芯 1–3，格式 `<n>:<mV>`，编号 `CYAN`，电压 `ORANGE`，电芯间半格（4px）间距。
-- 行3：电芯 4–5 + `BAL<n>`（`YELLOW`），同样半格分隔。
-- 行4：温度占位 `TEMP--°C--°C--°C--°C`，灰色；未来填实值时遵循温度着色规则。
+- 行2–3：电芯区，2 秒轮播“电压帧 / 温度帧”，列宽固定不越界：
+  - 列布局：列起点为字符格 `0 / 6 / 12`，每个电芯占 `6` 格：`<n>:`（2 格）+ 数值（最多 4 格）。
+  - 电压帧：
+    - 行2：电芯 1–3，示例：`1:3240 2:3217 3:3283`；
+    - 行3：电芯 4–5，示例：`4:3295 5:3319`（第 3 槽留空）；
+    - 数值存在时着色为 `ORANGE`，缺失时显示 `--`/`GRAY`；
+    - 均衡中的电芯（`balancing_index` 命中）数值固定着色为 `YELLOW`，不再闪烁。
+  - 温度帧：
+    - 行2、3 的几何布局与电压帧完全一致，对应电芯仍为 1–3、4–5；
+    - 数值格式：`<n>:<TT>C`，例如 `1:26C 2:27C 3:27C`；
+    - 温度取值范围 `-99`～`199`，使用统一的 2×2 度点 + `C` 字形；缺失时显示 `--`/`GRAY`；
+    - 温度来源：上层根据 4 个 NTC（每两个电芯间布置）推算出 5 节电芯表面温度后传入 UI。
+  - 帧切换：UI 每 `2 s` 在“电压帧 / 温度帧”之间切换一次，仅替换数字与颜色，不改变起始列，避免水平抖动。
+- 行4：告警行 `WARN <code>`：
+  - 左侧标签 `WARN` 使用 `CYAN`，占 4 格（含冒号可选）；自第 5 格起显示 1 个短告警代码；
+  - 当前建议代码：`TEMP LO` / `CHG HI` / `DSG HI` / `OVP` / `UVP` 等，由实现按优先级选择 1 个显示（例如 `DSG HI > CHG HI > TEMP LO`）；
+  - 预警类告警使用 `YELLOW`，严重故障使用 `RED`；无告警时显示 `--`（`GRAY`）。
 
-均衡闪烁：
-- 被均衡单节亮帧为 `ORANGE`，暗帧降为 `GRAY`（数字与冒号保留）；推荐 2 Hz、50% 占空。
+均衡显示：
+- 电芯均衡时不再闪烁：仅在电压帧中将命中的电芯电压数值着色为 `YELLOW`，温度帧保持 `WHITE` 不变；
+- 当 `balancing_index` 为 `None` 或对应电芯读数缺失时，不额外高亮。
 
 示例资源（160×50 实际点阵）：
-- 亮帧：`docs/software/assets/dashboard_batt_detail_on.png`
-- 暗帧：`docs/software/assets/dashboard_batt_detail_off.png`
+- 电压帧：`docs/software/assets/dashboard_batt_detail_volt.png`
+- 温度帧：`docs/software/assets/dashboard_batt_detail_temp.png`
 
 交互：再按“方向键 ↑”返回仪表盘；其他按键行为遵循主界面定义。
 
