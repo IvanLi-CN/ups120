@@ -1,4 +1,4 @@
-use defmt::{debug, info, warn, Debug2Format};
+use defmt::{Debug2Format, debug, info, warn};
 use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
 use embassy_sync::{blocking_mutex::raw::NoopRawMutex, mutex::Mutex};
 use embassy_time::{Duration, Timer};
@@ -7,13 +7,13 @@ use sc8815::registers::constants::DEFAULT_ADDRESS as SC8815_ADDR;
 use static_cell::StaticCell;
 
 use crate::{
-    fan_control, io_expander::Tca6408a, I2cBusMutex, SharedI2cDevice, AC_STABLE_MS,
-    CHARGE_START_VBAT_MV, CHARGE_STOP_VBAT_MV, DISCH_RESUME_VBAT_MV, DISCH_STOP_VBAT_MV,
-    SB_REG_CHG_CONFIG, SB_REG_CHG_PAUSE_CAUSE, SB_REG_STATE_FLAGS, SB_STATE_FLAG_AC_PRESENT,
-    SB_STATE_FLAG_FAULT_BQ, SB_STATE_FLAG_FAULT_SC, SB_STATE_POLL_INTERVAL_MS, UPS_DISCH_RESUME_C,
-    UPS_DISCH_STOP_C, UPS_SC_IBAT_LIMIT_MA, UPS_SC_IBUS_LIMIT_MA, UPS_SC_RS1_MOHM,
-    UPS_SC_RS2_MOHM, UPS_VBUS_AC_OFFLINE_MV, UPS_VBUS_AC_ONLINE_MV, UPS_VBUS_MAX_MV,
-    UPS_VBUS_MIN_MV,
+    AC_STABLE_MS, CHARGE_START_VBAT_MV, CHARGE_STOP_VBAT_MV, DISCH_RESUME_VBAT_MV,
+    DISCH_STOP_VBAT_MV, I2cBusMutex, SB_REG_CHG_CONFIG, SB_REG_CHG_PAUSE_CAUSE, SB_REG_STATE_FLAGS,
+    SB_STATE_FLAG_AC_PRESENT, SB_STATE_FLAG_FAULT_BQ, SB_STATE_FLAG_FAULT_SC,
+    SB_STATE_POLL_INTERVAL_MS, SharedI2cDevice, UPS_DISCH_RESUME_C, UPS_DISCH_STOP_C,
+    UPS_SC_IBAT_LIMIT_MA, UPS_SC_IBUS_LIMIT_MA, UPS_SC_RS1_MOHM, UPS_SC_RS2_MOHM,
+    UPS_VBUS_AC_OFFLINE_MV, UPS_VBUS_AC_ONLINE_MV, UPS_VBUS_MAX_MV, UPS_VBUS_MIN_MV, fan_control,
+    io_expander::Tca6408a,
 };
 
 /// Charging mode exposed to other tasks.
@@ -645,7 +645,9 @@ pub async fn power_task(
                         })
                         .await;
                 }
-                info!("discharge: VBUS_SHORT reported, relying on SC8815 foldback/hiccup (OUT kept enabled)");
+                info!(
+                    "discharge: VBUS_SHORT reported, relying on SC8815 foldback/hiccup (OUT kept enabled)"
+                );
             }
         }
 
@@ -768,10 +770,7 @@ pub async fn power_task(
                     }
 
                     // Periodic SC8815 both-side measurement log (VBUS/VBAT + IBUS/IBAT).
-                    if now_millis
-                        .saturating_sub(last_sc_meas_log_ms)
-                        >= 1_000
-                    {
+                    if now_millis.saturating_sub(last_sc_meas_log_ms) >= 1_000 {
                         last_sc_meas_log_ms = now_millis;
                         info!(
                             "discharge: meas vbus={=u16}mV ibus={=u16}mA vbat={=u16}mV ibat={=u16}mA",

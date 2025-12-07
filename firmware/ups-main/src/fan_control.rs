@@ -2,8 +2,8 @@ use defmt::{debug, error, warn};
 use esp_hal::{
     gpio::Output,
     ledc::{
-        channel::{self, ChannelIFace},
         LowSpeed,
+        channel::{self, ChannelIFace},
     },
 };
 
@@ -470,9 +470,5 @@ fn mode_str(mode: Mode) -> &'static str {
 fn estimate_vout(duty: u8) -> f32 {
     let duty_fraction = duty as f32 / 100.0;
     let vout = VOUT_BASE - VOUT_GAIN * duty_fraction;
-    if vout < 0.0 {
-        0.0
-    } else {
-        vout
-    }
+    if vout < 0.0 { 0.0 } else { vout }
 }

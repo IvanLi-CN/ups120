@@ -26,21 +26,21 @@ use embedded_hal::delay::DelayNs;
 use embedded_hal_async::i2c::I2c as AsyncI2c;
 use esp_backtrace as _; // panic handler + backtrace/println
 use esp_hal::{
+    Async,
     delay::Delay,
     dma::{DmaRxBuf, DmaTxBuf},
     dma_buffers,
     gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull},
     i2c::master::{Config as I2cConfig, I2c},
     ledc::{
-        channel, channel::ChannelIFace, timer, timer::TimerIFace, LSGlobalClkSource, Ledc, LowSpeed,
+        LSGlobalClkSource, Ledc, LowSpeed, channel, channel::ChannelIFace, timer, timer::TimerIFace,
     },
     spi::{
-        master::{Config as SpiConfig, Spi, SpiDmaBus},
         Mode,
+        master::{Config as SpiConfig, Spi, SpiDmaBus},
     },
     time::Rate,
     timer::timg::TimerGroup,
-    Async,
 };
 use esp_println as _; // install UART logger + defmt bridge
 use io_expander::Tca6408a;

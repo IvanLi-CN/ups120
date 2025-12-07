@@ -3,7 +3,7 @@ use embedded_hal::delay::DelayNs;
 use esp_hal::{delay::Delay, efuse::Efuse, peripherals};
 
 #[allow(improper_ctypes)]
-extern "C" {
+unsafe extern "C" {
     fn esp_rom_regi2c_read(block: u8, block_hostid: u8, reg_add: u8) -> u8;
     fn rom_i2c_writeReg(block: u8, block_hostid: u8, reg_add: u8, indata: u8);
 }
