@@ -26,21 +26,21 @@ use embedded_hal::delay::DelayNs;
 use embedded_hal_async::i2c::I2c as AsyncI2c;
 use esp_backtrace as _; // panic handler + backtrace/println
 use esp_hal::{
+    Async,
     delay::Delay,
     dma::{DmaRxBuf, DmaTxBuf},
     dma_buffers,
     gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull},
     i2c::master::{Config as I2cConfig, I2c},
     ledc::{
-        channel, channel::ChannelIFace, timer, timer::TimerIFace, LSGlobalClkSource, Ledc, LowSpeed,
+        LSGlobalClkSource, Ledc, LowSpeed, channel, channel::ChannelIFace, timer, timer::TimerIFace,
     },
     spi::{
-        master::{Config as SpiConfig, Spi, SpiDmaBus},
         Mode,
+        master::{Config as SpiConfig, Spi, SpiDmaBus},
     },
     time::Rate,
     timer::timg::TimerGroup,
-    Async,
 };
 use esp_println as _; // install UART logger + defmt bridge
 use io_expander::Tca6408a;
@@ -770,13 +770,8 @@ where
     //   [0]=pack, [1]=charger, [2..5]=NTC0..3, [6]=BQ_INT, [7]=MCU.
     match read_smart_battery_temp_window(i2c).await {
         Ok([pack_i8, chg_i8, n0, n1, n2, n3, bq_int_i8, mcu_i8]) => {
-            let to_opt = |v: i8| -> Option<f32> {
-                if v == i8::MIN {
-                    None
-                } else {
-                    Some(v as f32)
-                }
-            };
+            let to_opt =
+                |v: i8| -> Option<f32> { if v == i8::MIN { None } else { Some(v as f32) } };
 
             let pack_c = to_opt(pack_i8);
             let charger_c = to_opt(chg_i8);

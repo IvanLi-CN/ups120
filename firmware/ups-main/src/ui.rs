@@ -4,11 +4,11 @@ use embedded_hal::{delay::DelayNs, digital::OutputPin, spi::SpiBus};
 use embedded_hal_async::spi::SpiBus as AsyncSpiBus;
 
 use crate::{
-    display::{
-        clear_framebuffer, fill_rect_buffer, flush_framebuffer, flush_framebuffer_async,
-        put_pixel_buffer, with_framebuffer, FrameBuffer, Rgb565, LOGICAL_HEIGHT, LOGICAL_WIDTH,
-    },
     TempFaultFlags,
+    display::{
+        FrameBuffer, LOGICAL_HEIGHT, LOGICAL_WIDTH, Rgb565, clear_framebuffer, fill_rect_buffer,
+        flush_framebuffer, flush_framebuffer_async, put_pixel_buffer, with_framebuffer,
+    },
 };
 
 // Palette (RGB565)

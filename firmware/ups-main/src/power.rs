@@ -1,4 +1,4 @@
-use defmt::{debug, info, warn, Debug2Format};
+use defmt::{Debug2Format, debug, info, warn};
 use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
 use embassy_sync::{blocking_mutex::raw::NoopRawMutex, mutex::Mutex};
 use embassy_time::{Duration, Timer};
@@ -7,13 +7,13 @@ use sc8815::registers::constants::DEFAULT_ADDRESS as SC8815_ADDR;
 use static_cell::StaticCell;
 
 use crate::{
-    fan_control, io_expander::Tca6408a, I2cBusMutex, SharedI2cDevice, AC_STABLE_MS,
-    CHARGE_START_VBAT_MV, CHARGE_STOP_VBAT_MV, DISCH_RESUME_VBAT_MV, DISCH_STOP_VBAT_MV,
-    SB_REG_CHG_CONFIG, SB_REG_CHG_PAUSE_CAUSE, SB_REG_STATE_FLAGS, SB_REG_TEMP_STATUS,
-    SB_STATE_FLAG_AC_PRESENT, SB_STATE_FLAG_FAULT_BQ, SB_STATE_FLAG_FAULT_SC,
-    SB_STATE_POLL_INTERVAL_MS, UPS_DISCH_RESUME_C, UPS_DISCH_STOP_C, UPS_SC_IBAT_LIMIT_MA,
-    UPS_SC_IBUS_LIMIT_MA, UPS_SC_RS1_MOHM, UPS_SC_RS2_MOHM, UPS_VBUS_AC_OFFLINE_MV,
-    UPS_VBUS_AC_ONLINE_MV, UPS_VBUS_MAX_MV, UPS_VBUS_MIN_MV,
+    AC_STABLE_MS, CHARGE_START_VBAT_MV, CHARGE_STOP_VBAT_MV, DISCH_RESUME_VBAT_MV,
+    DISCH_STOP_VBAT_MV, I2cBusMutex, SB_REG_CHG_CONFIG, SB_REG_CHG_PAUSE_CAUSE, SB_REG_STATE_FLAGS,
+    SB_REG_TEMP_STATUS, SB_STATE_FLAG_AC_PRESENT, SB_STATE_FLAG_FAULT_BQ, SB_STATE_FLAG_FAULT_SC,
+    SB_STATE_POLL_INTERVAL_MS, SharedI2cDevice, UPS_DISCH_RESUME_C, UPS_DISCH_STOP_C,
+    UPS_SC_IBAT_LIMIT_MA, UPS_SC_IBUS_LIMIT_MA, UPS_SC_RS1_MOHM, UPS_SC_RS2_MOHM,
+    UPS_VBUS_AC_OFFLINE_MV, UPS_VBUS_AC_ONLINE_MV, UPS_VBUS_MAX_MV, UPS_VBUS_MIN_MV, fan_control,
+    io_expander::Tca6408a,
 };
 
 /// Charging mode exposed to other tasks.
@@ -411,11 +411,7 @@ pub async fn power_task(
                             let flags = crate::decode_temp_status(v);
                             info!(
                                 "stm32: TEMP_STATUS changed 0x{:02X}->0x{:02X} low={} high_chg={} high_dsg={}",
-                                prev,
-                                v,
-                                flags.temp_low,
-                                flags.temp_high_chg,
-                                flags.temp_high_dsg,
+                                prev, v, flags.temp_low, flags.temp_high_chg, flags.temp_high_dsg,
                             );
                         }
                     } else {
@@ -716,7 +712,9 @@ pub async fn power_task(
                         })
                         .await;
                 }
-                info!("discharge: VBUS_SHORT reported, relying on SC8815 foldback/hiccup (OUT kept enabled)");
+                info!(
+                    "discharge: VBUS_SHORT reported, relying on SC8815 foldback/hiccup (OUT kept enabled)"
+                );
             }
         }
 
