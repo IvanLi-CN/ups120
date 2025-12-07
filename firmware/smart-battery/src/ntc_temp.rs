@@ -8,7 +8,7 @@
 
 use core::ptr;
 
-use defmt::debug;
+use defmt::info;
 use embassy_executor::task;
 use embassy_stm32::Peri;
 use embassy_stm32::adc;
@@ -193,11 +193,11 @@ pub async fn ntc_temp_task(args: NtcTempTaskArgs) {
         ntc_vcc,
     } = args;
 
-    // For the first staged rollout, only TS45 (PA0) is used as an NTC input.
-    // The remaining NTC channels stay disconnected so we can validate a single
-    // ladder without increasing the surface area.
+    // Four NTC channels mapped to ADC1 IN0..IN3 (PA0..PA3).
     let mut ch_ntc0 = ts45;
-    let _ = (ts34, ts23, ts12);
+    let mut ch_ntc1 = ts34;
+    let mut ch_ntc2 = ts23;
+    let mut ch_ntc3 = ts12;
 
     let mut ntc_vcc = Output::new(ntc_vcc, Level::Low, Speed::Low);
     ntc_vcc.set_low();
@@ -219,27 +219,37 @@ pub async fn ntc_temp_task(args: NtcTempTaskArgs) {
         let mcu_sample = adc.read(&mut ts_channel).await;
         let t_mcu_0_01c = adc_sample_to_mcu_temp_0_01c(mcu_sample, ts_cal1, ts_cal2);
 
-        // 2) Single NTC ladder on TS45 (PA0). Power the pull-up, allow a short
-        // RC warm-up, then take one blocking sample and turn the ladder off.
+        // 2) Four NTC ladders on TS45/TS34/TS23/TS12 (PA0..PA3). Power the
+        // pull-up network once, allow RC warm-up, then take one sample per
+        // channel and turn the ladder off.
         ntc_vcc.set_high();
         Timer::after(Duration::from_millis(NTC_WARMUP_MS)).await;
         let ntc0_sample = adc.read(&mut ch_ntc0).await;
+        let ntc1_sample = adc.read(&mut ch_ntc1).await;
+        let ntc2_sample = adc.read(&mut ch_ntc2).await;
+        let ntc3_sample = adc.read(&mut ch_ntc3).await;
         ntc_vcc.set_low();
 
         let t_ntc0_0_01c = adc_sample_to_ntc_temp_0_01c(ntc0_sample);
-        let t_ntc_0_01c = [
-            t_ntc0_0_01c,
-            TEMP_INVALID_0_01C,
-            TEMP_INVALID_0_01C,
-            TEMP_INVALID_0_01C,
-        ];
+        let t_ntc1_0_01c = adc_sample_to_ntc_temp_0_01c(ntc1_sample);
+        let t_ntc2_0_01c = adc_sample_to_ntc_temp_0_01c(ntc2_sample);
+        let t_ntc3_0_01c = adc_sample_to_ntc_temp_0_01c(ntc3_sample);
+        let t_ntc_0_01c = [t_ntc0_0_01c, t_ntc1_0_01c, t_ntc2_0_01c, t_ntc3_0_01c];
 
         thermal::update_ntc_temps(&t_ntc_0_01c);
         thermal::update_mcu_temp(t_mcu_0_01c);
 
-        debug!(
-            "ntc:mcu+ntc0 raw_mcu={} raw_ntc0={} t_ntc={:?} mcu={}x0.01C",
-            mcu_sample, ntc0_sample, t_ntc_0_01c, t_mcu_0_01c
+        // Promote NTC/MCU raw sample logging to info level so hardware runs
+        // capture enough data for ADC / LUT diagnostics across all channels.
+        info!(
+            "ntc:mcu+ntc raw_mcu={} raw_ntc=[{}, {}, {}, {}] t_ntc={:?} mcu={}x0.01C",
+            mcu_sample,
+            ntc0_sample,
+            ntc1_sample,
+            ntc2_sample,
+            ntc3_sample,
+            t_ntc_0_01c,
+            t_mcu_0_01c
         );
 
         Timer::after(Duration::from_millis(NTC_SAMPLE_PERIOD_MS)).await;
