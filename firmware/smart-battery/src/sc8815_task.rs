@@ -15,6 +15,7 @@ use crate::shared::{
     BalancingCvRequestSubscriber, Bq76920MeasurementsSubscriber, Sc8815AlertsPublisher,
     Sc8815MeasurementsPublisher,
 };
+use crate::thermal::{self, TEMP_INVALID_0_01C};
 use crate::tmp75::{TMP75_DEFAULT_ADDR, Tmp75};
 use crate::{
     charger_control::{self, ChargeSpeedSetting, limits_for},
@@ -78,7 +79,7 @@ fn log_adapter_event(tag: char, hold_secs: u8, ac_present: bool, manual_override
 
 #[inline(always)]
 fn pack_status_bits(status: &SC8815Status) -> u8 {
-    ((status.ac_adapter_connected as u8) << 0)
+    (status.ac_adapter_connected as u8)
         | ((status.usb_load_detected as u8) << 1)
         | ((status.eoc as u8) << 2)
         | ((status.otp_fault as u8) << 3)
@@ -480,7 +481,8 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
     let mut latest_adc_snapshot: Option<ScAdcMeasurements> = None;
     let mut last_gate_report: Option<GateReport> = None;
     let mut last_gate_log_ms: u32 = 0;
-    let mut pause_cause_bits: u8 = 0;
+    // Accumulates pause cause bitfield for the current loop iteration.
+    let mut pause_cause_bits: u8;
     // 会话启动后的“AC确认宽限期”：在该窗口内，忽略 STATUS.ac_adapter_connected=false，
     // 仅拦截硬故障，避免热插瞬间或迟滞导致的误判使会话立即被停止。
     let mut ac_confirm_deadline_ms: u16 = 0;
@@ -509,7 +511,24 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
             }
             Err(_e) => warn!("tmp75:window_read_fail"),
         }
-        tmp75_online = true;
+
+        // Seed thermal aggregation with an initial TMP75 reading so that the
+        // first thermal snapshot already has a valid charger temperature.
+        match tmp75.read_temperature_c().await {
+            Ok(t_c) => {
+                last_tmp75_temp_c = t_c;
+                defmt::info!("tmp75:init T={}C", t_c);
+                let temp_0_01c =
+                    (i32::from(t_c) * 100).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+                crate::thermal::update_tmp75_temp(temp_0_01c);
+                tmp75_online = true;
+            }
+            Err(_e) => {
+                warn!("tmp75:init_read_fail");
+                crate::thermal::update_tmp75_temp(TEMP_INVALID_0_01C);
+                tmp75_online = false;
+            }
+        }
     }
 
     // quiesce INT mode: no probe state needed
@@ -627,10 +646,10 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
 
         if control_snapshot.speed != applied_speed {
             applied_speed = control_snapshot.speed;
-            if let Some(sess) = sc8815_session.as_mut() {
-                if sess.apply_speed(applied_speed).await.is_err() {
-                    warn!("sc:speed_apply_fail");
-                }
+            if let Some(sess) = sc8815_session.as_mut()
+                && sess.apply_speed(applied_speed).await.is_err()
+            {
+                warn!("sc:speed_apply_fail");
             }
         }
 
@@ -739,8 +758,7 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
             } else {
                 // Imbalance recovery loop: prefer BQ-provided spread (ΔV/ΔV%) and fall back to raw cell scan
                 let mut spread_opt: Option<i32> = latest_bal_req.delta_mv;
-                let mut spread_pct_opt: Option<i32> =
-                    latest_bal_req.delta_pct.map(|p| i32::from(p));
+                let mut spread_pct_opt: Option<i32> = latest_bal_req.delta_pct.map(i32::from);
                 let mut min_v_opt: Option<i32> = None;
                 let mut max_v_opt: Option<i32> = None;
 
@@ -1391,8 +1409,10 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
                             cold_hits = 0;
                             cool_hits = 0;
                             cold_latch_active = false;
+                            // Reflect sensor offline status into thermal aggregation.
+                            thermal::update_tmp75_temp(TEMP_INVALID_0_01C);
                         } else {
-                            // Read latest temperature (°C); on error, mark sensor offline
+                            // Read latest temperature (°C); on error, mark sensor offline.
                             match tmp75.read_temperature_c().await {
                                 Ok(t_c) => {
                                     last_tmp75_temp_c = t_c;
@@ -1407,6 +1427,11 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
 
                             if tmp75_online {
                                 let temp_c = last_tmp75_temp_c;
+                                // Update aggregated board/charger temperature (0.01 °C).
+                                let temp_0_01c = (i32::from(temp_c) * 100)
+                                    .clamp(i16::MIN as i32, i16::MAX as i32)
+                                    as i16;
+                                thermal::update_tmp75_temp(temp_0_01c);
 
                                 if charger_active {
                                     // Running: check for HOT soft-stop (≥50°C).
@@ -1704,17 +1729,18 @@ pub async fn sc8815_task(args: Sc8815TaskArgs) {
         }
         // Periodic SC8815 ADC snapshot for runtime correlation while charging.
         // Gated to active/confirmed charging to avoid flooding logs when idle or AC-only.
-        if snapshot_due && (charger_active || charge_confirmed) {
-            if let Some(meas) = latest_adc_snapshot {
-                defmt::info!(
-                    "sc:snap vb={}mV vbus={}mV ibus={}mA ibat={}mA status=0x{:02X}",
-                    meas.vbat_mv,
-                    meas.vbus_mv,
-                    meas.ibus_ma,
-                    meas.ibat_ma,
-                    status_bits_snapshot
-                );
-            }
+        if snapshot_due
+            && (charger_active || charge_confirmed)
+            && let Some(meas) = latest_adc_snapshot
+        {
+            defmt::info!(
+                "sc:snap vb={}mV vbus={}mV ibus={}mA ibat={}mA status=0x{:02X}",
+                meas.vbat_mv,
+                meas.vbus_mv,
+                meas.ibus_ma,
+                meas.ibat_ma,
+                status_bits_snapshot
+            );
         }
         // One-shot 10 s dwell window after any run→stop edge (no stacking)
         if charger_active_prev && !charger_active {

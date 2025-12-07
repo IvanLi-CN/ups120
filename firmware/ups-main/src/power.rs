@@ -9,11 +9,11 @@ use static_cell::StaticCell;
 use crate::{
     fan_control, io_expander::Tca6408a, I2cBusMutex, SharedI2cDevice, AC_STABLE_MS,
     CHARGE_START_VBAT_MV, CHARGE_STOP_VBAT_MV, DISCH_RESUME_VBAT_MV, DISCH_STOP_VBAT_MV,
-    SB_REG_CHG_CONFIG, SB_REG_CHG_PAUSE_CAUSE, SB_REG_STATE_FLAGS, SB_STATE_FLAG_AC_PRESENT,
-    SB_STATE_FLAG_FAULT_BQ, SB_STATE_FLAG_FAULT_SC, SB_STATE_POLL_INTERVAL_MS, UPS_DISCH_RESUME_C,
-    UPS_DISCH_STOP_C, UPS_SC_IBAT_LIMIT_MA, UPS_SC_IBUS_LIMIT_MA, UPS_SC_RS1_MOHM,
-    UPS_SC_RS2_MOHM, UPS_VBUS_AC_OFFLINE_MV, UPS_VBUS_AC_ONLINE_MV, UPS_VBUS_MAX_MV,
-    UPS_VBUS_MIN_MV,
+    SB_REG_CHG_CONFIG, SB_REG_CHG_PAUSE_CAUSE, SB_REG_STATE_FLAGS, SB_REG_TEMP_STATUS,
+    SB_STATE_FLAG_AC_PRESENT, SB_STATE_FLAG_FAULT_BQ, SB_STATE_FLAG_FAULT_SC,
+    SB_STATE_POLL_INTERVAL_MS, UPS_DISCH_RESUME_C, UPS_DISCH_STOP_C, UPS_SC_IBAT_LIMIT_MA,
+    UPS_SC_IBUS_LIMIT_MA, UPS_SC_RS1_MOHM, UPS_SC_RS2_MOHM, UPS_VBUS_AC_OFFLINE_MV,
+    UPS_VBUS_AC_ONLINE_MV, UPS_VBUS_MAX_MV, UPS_VBUS_MIN_MV,
 };
 
 /// Charging mode exposed to other tasks.
@@ -46,6 +46,8 @@ pub struct PowerState {
     pub cells_mv: [Option<u16>; 5],
     /// Cached STATE_FLAGS from the periodic 10s snapshot.
     pub state_flags: Option<u16>,
+    /// Latest smart-battery TEMP_STATUS bitmap (if available).
+    pub sb_temp_status: Option<u8>,
     /// Latest smart-battery temperature set (pack + charger).
     pub smart_batt_temps: Option<fan_control::SmartBatteryTemps>,
     /// Latest SC8815 ADIN-derived UPS temperature in °C.
@@ -75,6 +77,7 @@ impl core::fmt::Debug for PowerState {
             .field("ibat_ma", &self.ibat_ma)
             .field("cells_mv", &self.cells_mv)
             .field("state_flags", &self.state_flags)
+            .field("sb_temp_status", &self.sb_temp_status)
             .field("smart_batt_temps", &Debug2Format(&self.smart_batt_temps))
             .field("adin_temp_c", &self.adin_temp_c)
             .field("temp_pause_active", &self.temp_pause_active)
@@ -98,6 +101,7 @@ impl Default for PowerState {
             ibat_ma: None,
             cells_mv: [None; 5],
             state_flags: None,
+            sb_temp_status: None,
             smart_batt_temps: None,
             adin_temp_c: None,
             temp_pause_active: false,
@@ -175,7 +179,9 @@ async fn sc8815_init_otg(
         // OUT path are set purely by external resistor networks
         // (use_internal_setting=false), see SC8815_External_Resistor_Configuration.md.
         let mut config = sc8815::DeviceConfiguration::default();
-        config.battery.use_internal_setting = false;
+        config.battery.cell_count = sc8815::CellCount::Cells4S;
+        config.battery.voltage_per_cell = sc8815::VoltagePerCell::Mv4200;
+        config.battery.use_internal_setting = true;
         // Current-limit configuration per UPS power board shunts:
         // RS1 / RS2 are both 5mΩ (R47/R26, HoLLR1206-1W-5mR-1%), and we start
         // with a conservative 7A OTG limit on both sides to match the DC jack
@@ -184,9 +190,11 @@ async fn sc8815_init_otg(
         config.current_limits.rs2_mohm = UPS_SC_RS2_MOHM;
         config.current_limits.ibus_limit_ma = UPS_SC_IBUS_LIMIT_MA;
         config.current_limits.ibat_limit_ma = UPS_SC_IBAT_LIMIT_MA;
+        config.current_limits.ibus_ratio = sc8815::IbusRatio::Ratio6x;
         config.power.operating_mode = sc8815::OperatingMode::OTG;
         config.power.switching_frequency = sc8815::SwitchingFrequency::Freq450kHz;
         config.power.dead_time = sc8815::DeadTime::Ns80;
+        config.power.pfm_mode = true;
         config.trickle_charging = false;
         config.charging_termination = false;
         config.use_ibus_for_charging = false;
@@ -197,7 +205,7 @@ async fn sc8815_init_otg(
                 // for this UPS application; SC8815 shall not autonomously
                 // reduce IBUS/IBAT on VBUS_SHORT, we rely on our own gating
                 // and current limits instead.
-                let _ = drv.set_short_foldback_disable(true).await;
+                // let _ = drv.set_short_foldback_disable(true).await;
                 // Optional: select 12.5x VBAT monitor ratio so the 12–18.5 V
                 // operating range has headroom and does not saturate a 5x span.
                 let _ = drv.set_vbat_monitor_ratio(0).await;
@@ -342,6 +350,8 @@ pub async fn power_task(
     }
 
     // Global single-instance SC8815 driver on the shared I2C bus.
+    // Disable SC8815 OTG/OUT regulation on ESP32 side for now to avoid it
+    // influencing STM32 bring-up and temperature/I2C testing.
     let mut sc: Option<sc8815::SC8815<SharedI2cDevice<'static>>> = None;
     let mut sc_init_done: bool = false;
     let mut last_adin_temp_c: Option<f32> = None;
@@ -354,6 +364,11 @@ pub async fn power_task(
     let mut last_vbus_ac_mode: Option<bool> = None;
     // Throttling for SC8815 ADC debug logs.
     let mut last_sc_meas_log_ms: u64 = 0;
+    // Latest smart-battery TEMP_STATUS value and error logging state.
+    let mut sb_last_temp_status: Option<u8> = None;
+    let mut sb_temp_status_error_logged: bool = false;
+    // One-shot diagnostic flag for the extended temperature window (0x40..0x47).
+    let mut sb_temp_window_logged: bool = false;
 
     // Periodic loop matching the original 500 ms cadence for power sampling and
     // charger control.
@@ -371,6 +386,54 @@ pub async fn power_task(
             crate::read_smart_battery_temperatures(&mut sb_i2c).await
         };
 
+        // Optional diagnostic: read the extended compact temperature window
+        // (0x40..0x47, int8 °C) once after boot and log it for correlation
+        // with the STM32-side `therm:` output.
+        if !sb_temp_window_logged {
+            let mut sb_i2c = I2cDevice::new(i2c_bus);
+            if let Ok(win) = crate::read_smart_battery_temp_window(&mut sb_i2c).await {
+                let [pack, chg, ntc0, ntc1, ntc2, ntc3, bq_int, mcu] = win;
+                info!(
+                    "stm32: temp-window pack={}C chg={}C ntc=[{}, {}, {}, {}] bq_int={}C mcu={}C",
+                    pack, chg, ntc0, ntc1, ntc2, ntc3, bq_int, mcu
+                );
+                sb_temp_window_logged = true;
+            }
+        }
+
+        // Smart-battery TEMP_STATUS (thermal fault flags) snapshot.
+        {
+            let mut sb_i2c = I2cDevice::new(i2c_bus);
+            match crate::read_smart_battery_reg(&mut sb_i2c, SB_REG_TEMP_STATUS).await {
+                Ok(v) => {
+                    if let Some(prev) = sb_last_temp_status {
+                        if prev != v {
+                            let flags = crate::decode_temp_status(v);
+                            info!(
+                                "stm32: TEMP_STATUS changed 0x{:02X}->0x{:02X} low={} high_chg={} high_dsg={}",
+                                prev,
+                                v,
+                                flags.temp_low,
+                                flags.temp_high_chg,
+                                flags.temp_high_dsg,
+                            );
+                        }
+                    } else {
+                        debug!("stm32: TEMP_STATUS=0x{:02X}", v);
+                    }
+                    sb_last_temp_status = Some(v);
+                    sb_temp_status_error_logged = false;
+                }
+                Err(_) => {
+                    if !sb_temp_status_error_logged {
+                        warn!("stm32: TEMP_STATUS read failed");
+                        sb_temp_status_error_logged = true;
+                    }
+                }
+            }
+        }
+
+        let sb_temp_status = sb_last_temp_status;
         let pack_temp_c = sb_temps.and_then(|t| t.pack_c);
 
         // Pack voltage and current.
@@ -589,6 +652,14 @@ pub async fn power_task(
             }
         }
 
+        // Decode smart-battery TEMP_STATUS into high-level fault flags so both
+        // discharge and charge logic can apply additional safety gating.
+        let sb_temp_fault = sb_temp_status.map(crate::decode_temp_status);
+        let temp_fault_blocks_disch =
+            matches!(sb_temp_fault, Some(flags) if flags.temp_low || flags.temp_high_dsg);
+        let temp_fault_blocks_charge =
+            matches!(sb_temp_fault, Some(flags) if flags.temp_low || flags.temp_high_chg);
+
         // UPS temperature-based stop / resume (SC8815 ADIN; discharge_policy.md §4.2).
         if let Some(temp) = last_adin_temp_c {
             if ups_temp_pause_active {
@@ -680,6 +751,23 @@ pub async fn power_task(
             }
         }
 
+        // Smart-battery TEMP_STATUS gating: never drive OUT when pack is in a
+        // low-temperature or high-discharge thermal fault.
+        if out_enabled && temp_fault_blocks_disch {
+            if let Some(t) = tca.as_mut() {
+                sc8815_set_power_stage(t, &mut sc, false).await;
+            }
+            out_enabled = false;
+            if let Some(flags) = sb_temp_fault {
+                info!(
+                    "discharge: disabled due to TEMP_STATUS low={} high_chg={} high_dsg={}",
+                    flags.temp_low, flags.temp_high_chg, flags.temp_high_dsg
+                );
+            } else {
+                info!("discharge: disabled due to TEMP_STATUS fault");
+            }
+        }
+
         // Allow conditions: OUT_DISABLED → OUT_ENABLED (discharge_policy.md §5).
         let mut can_enable_out = false;
         if !out_enabled {
@@ -691,15 +779,16 @@ pub async fn power_task(
                     .map(|t| t < UPS_DISCH_STOP_C)
                     .unwrap_or(true);
             let no_faults = !pack_critical_fault && !sc_fault_latched;
+            let temp_status_ok = !temp_fault_blocks_disch;
             // TODO: align UPS feature enable with UI/mode machine (discharge_policy.md §5.4).
             let ups_feature_enabled = true;
 
-            if safe_vbat && safe_temp && no_faults && ups_feature_enabled {
+            if safe_vbat && safe_temp && no_faults && temp_status_ok && ups_feature_enabled {
                 can_enable_out = true;
             }
         }
 
-        if can_enable_out {
+        if false && can_enable_out {
             if let Some(t) = tca.as_mut() {
                 // Step 1: initialise / configure SC8815 for OTG + external FB.
                 if sc8815_init_otg(
@@ -738,7 +827,7 @@ pub async fn power_task(
         }
 
         // When OUT is enabled, sample the SC8815 ADC for OUT trio and ADIN/UPS temperature.
-        if out_enabled {
+        if false && out_enabled {
             // AC presence flips between online/offline 时，重新根据 12V 策略
             // 更新外部 VBUS 目标电压。
             if sc_otg_configured {
@@ -768,10 +857,7 @@ pub async fn power_task(
                     }
 
                     // Periodic SC8815 both-side measurement log (VBUS/VBAT + IBUS/IBAT).
-                    if now_millis
-                        .saturating_sub(last_sc_meas_log_ms)
-                        >= 1_000
-                    {
+                    if now_millis.saturating_sub(last_sc_meas_log_ms) >= 1_000 {
                         last_sc_meas_log_ms = now_millis;
                         info!(
                             "discharge: meas vbus={=u16}mV ibus={=u16}mA vbat={=u16}mV ibat={=u16}mA",
@@ -784,9 +870,12 @@ pub async fn power_task(
             }
         }
 
-        // Temperature-based pause: force manual charging off while the
-        // high-temperature condition is active.
-        if sb_temp_pause_active {
+        let temp_pause_effective = sb_temp_pause_active || temp_fault_blocks_charge;
+
+        // Temperature-based pause: force manual charging off while any
+        // high-temperature condition is active (local pack temp or
+        // smart-battery TEMP_STATUS).
+        if temp_pause_effective {
             if sb_manual_enable {
                 let desired_config =
                     crate::compose_sb_charge_config(SB_AUTO_ENABLED, false, sb_speed_tier);
@@ -814,7 +903,7 @@ pub async fn power_task(
                 vin_present && now_millis.saturating_sub(vin_state_last_change_ms) >= AC_STABLE_MS;
             info!(
                 "charge: decision vin_present={} vin_ok_for_charge={} vbat={}mV manual={} temp_pause={}",
-                vin_present, vin_ok_for_charge, vbat, sb_manual_enable, sb_temp_pause_active
+                vin_present, vin_ok_for_charge, vbat, sb_manual_enable, temp_pause_effective
             );
             if !vin_present {
                 if sb_manual_enable {
@@ -914,9 +1003,10 @@ pub async fn power_task(
             ibat_ma,
             cells_mv: last_cells_mv,
             state_flags: last_state_flags,
+            sb_temp_status,
             smart_batt_temps: sb_temps,
             adin_temp_c: last_adin_temp_c,
-            temp_pause_active: sb_temp_pause_active,
+            temp_pause_active: temp_pause_effective,
             out_enabled,
             out_v_mv,
             out_a_ma,

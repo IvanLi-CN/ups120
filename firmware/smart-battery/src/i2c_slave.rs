@@ -4,6 +4,7 @@ use core::ptr::read_volatile;
 
 use crate::data_types::{Bq76920Measurements, Sc8815Measurements};
 use crate::sleep_manager;
+use crate::thermal;
 use crate::{activity::poke_i2c1_activity, charger_control, state_bits};
 use defmt::{debug, info, warn};
 use embassy_executor::task;
@@ -24,7 +25,15 @@ const WINDOW_START: u8 = 0x08;
 const WINDOW_END: u8 = 0x0F;
 const STATE_FLAGS_ADDR: u8 = 0x20;
 const STATE_BLUE_CODE_ADDR: u8 = 0x22;
+// Legacy temperature base (0x14..0x17) kept as a reserved 4-byte window to
+// preserve read-length expectations; no meaningful temperature data is written
+// there anymore. All temperatures are exposed exclusively via 0x40..0x47.
 const TEMP_BASE_ADDR: u8 = 0x14;
+// Temperature/status window (see SOFTWARE_DESIGN.md Register Map).
+const TEMP_STATUS_ADDR: u8 = 0x23;
+const TEMP_WINDOW_BASE_ADDR: u8 = 0x40;
+const TEMP_WINDOW_LEN: usize = 8;
+const TEMP_INVALID_I8: i8 = i8::MIN;
 const I2C1_BASE: usize = 0x4000_5400;
 const I2C_ISR_OFFSET: usize = 0x18;
 const I2C_RXDR_OFFSET: usize = 0x24;
@@ -41,13 +50,15 @@ const RS_PTR_TOTAL_TIMEOUT: Duration = Duration::from_micros(1500);
 static mut REGISTERS: [u8; REG_SPACE] = [0; REG_SPACE];
 static mut REG_PTR: u8 = WINDOW_START;
 
-// Enable verbose I2C diagnostics while we investigate host-side read failures.
-const ENABLE_I2C_DIAG: bool = true;
+// Verbose I2C diagnostics are useful while bringing up the slave; enable them
+// while we investigate host-side NACKs. Once stable, this can be flipped back
+// to `false` to reduce RTT traffic. Keep disabled in production builds.
+const ENABLE_I2C_DIAG: bool = false;
 
 macro_rules! i2c_diag {
     ($($arg:tt)*) => {
         if ENABLE_I2C_DIAG {
-            defmt::info!($($arg)*);
+            defmt::debug!($($arg)*);
         }
     };
 }
@@ -222,6 +233,8 @@ fn handle_read(dev: &mut I2c<'static, Blocking, i2c::mode::MultiMaster>, buffer:
             0x10 | 0x12 => 2,
             // Pack / charger temperatures (two i16 LE).
             TEMP_BASE_ADDR => 4,
+            // Extended temperature window: 8×int8 °C from 0x40..0x47.
+            TEMP_WINDOW_BASE_ADDR => TEMP_WINDOW_LEN,
             // Single-byte status / flags / pause-cause / cells-present.
             0x1F => 1,
             STATE_FLAGS_ADDR => 1,
@@ -281,6 +294,28 @@ unsafe fn initialise_registers() {
     REGISTERS[4] = 0;
     REGISTERS[5] = WINDOW_START;
     REGISTERS[6] = WINDOW_START;
+    // For the legacy 0x14..0x17 temperature window that some hosts may still
+    // poll, seed the two i16 (0.01 °C) slots with the explicit INVALID
+    // sentinel instead of leaving them at 0 °C. This makes any stale use of
+    // the old registers fail loudly rather than silently disabling thermal
+    // protections.
+    let invalid_0_01c = thermal::TEMP_INVALID_0_01C as u16;
+    let lo = (invalid_0_01c & 0xFF) as u8;
+    let hi = (invalid_0_01c >> 8) as u8;
+    let base = TEMP_BASE_ADDR as usize;
+    REGISTERS[base] = lo;
+    REGISTERS[base + 1] = hi;
+    REGISTERS[base + 2] = lo;
+    REGISTERS[base + 3] = hi;
+    // Explicitly initialise TEMP_STATUS so the host can rely on a defined
+    // bitfield value even before any thermal policy is wired in.
+    REGISTERS[TEMP_STATUS_ADDR as usize] = 0;
+    // Initialise the extended temperature window (0x40..0x47) to the INVALID
+    // sentinel so hosts never see misleading 0 °C placeholders before any
+    // thermal data has been sampled and mirrored.
+    for offset in 0..TEMP_WINDOW_LEN {
+        REGISTERS[TEMP_WINDOW_BASE_ADDR as usize + offset] = TEMP_INVALID_I8 as u8;
+    }
     REG_PTR = WINDOW_START;
     charger_control::reset_state();
     REGISTERS[charger_control::CHG_CONFIG_REG as usize] = charger_control::config_register_value();
@@ -304,30 +339,19 @@ pub fn write_registers(addr: u8, values: &[u8]) {
 }
 
 pub fn update_sc_measurements(meas: &Sc8815Measurements) {
-    let adc = &meas.adc_measurements;
-    write_u16_le(0x40, adc.vbus_mv);
-    write_u16_le(0x42, adc.vbat_mv);
-    write_u16_le(0x44, adc.ibus_ma);
-    write_u16_le(0x46, adc.ibat_ma);
-    write_u16_le(0x48, adc.adin_mv);
+    let _ = meas;
+    // SC8815 ADC measurements were previously mirrored into the 0x40..0x48 window.
+    // That window is now reserved for compact int8 °C temperature telemetry, so
+    // charger-side ADC values are no longer exposed over I2C here. They remain
+    // available to internal tasks via the Sc8815Measurements pub/sub path.
 }
 
 pub fn update_bq_measurements<const N: usize>(meas: &Bq76920Measurements<N>) {
     let core = &meas.core_measurements;
     let pack_mv = core.total_voltage_mv.clamp(0, u16::MAX as i32) as u16;
     let pack_current = core.current_ma.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
-    let temps = &core.temperatures;
-    let mut hottest = temps.ts1;
-    if let Some(ts2) = temps.ts2 {
-        hottest = hottest.max(ts2);
-    }
-    if let Some(ts3) = temps.ts3 {
-        hottest = hottest.max(ts3);
-    }
     write_u16_le(0x10, pack_mv);
     write_i16_le(0x12, pack_current);
-    write_i16_le(0x14, hottest);
-    write_i16_le(0x16, temps.ts1);
 
     // CELLS_PRESENT (0x1F) and per-cell voltages (0x50..)
     let cells_present = core.cell_voltages.voltages.len().min(5) as u8;
@@ -337,6 +361,87 @@ pub fn update_bq_measurements<const N: usize>(meas: &Bq76920Measurements<N>) {
         let mv_clamped = mv.clamp(0, u16::MAX as i32) as u16;
         write_u16_le(base, mv_clamped);
     }
+
+    // Extended temperature window (0x40..0x47, all int8 in °C).
+    //
+    // Values are sourced from the aggregated thermal snapshot so that NTCs,
+    // TMP75, BQ internal temperature and MCU temperature share a single
+    // encoding path.
+    let snapshot = thermal::snapshot();
+
+    let encode_temp_i8 = |raw_0_01c: i16| -> i8 {
+        if raw_0_01c == i16::MIN {
+            TEMP_INVALID_I8
+        } else {
+            // Round 0.01 °C to nearest whole °C without floats.
+            let c = if raw_0_01c >= 0 {
+                (raw_0_01c + 50) / 100
+            } else {
+                (raw_0_01c - 50) / 100
+            };
+            c.clamp(i8::MIN as i16, i8::MAX as i16) as i8
+        }
+    };
+
+    // Start from the raw snapshot values in 0.01 °C domain.
+    let t_pack_0_01c = snapshot.t_pack_0_01c;
+    let mut t_chg_0_01c = snapshot.t_chg_0_01c;
+    let mut t_ntc_0_01c = snapshot.t_ntc_0_01c;
+    let mut t_bq_int_0_01c = snapshot.t_bq_int_0_01c;
+    let mut t_mcu_0_01c = snapshot.t_mcu_0_01c;
+
+    // If we have at least one valid temperature source (pack), avoid exposing
+    // 0x80 sentinels in the steady-state telemetry window by falling back to
+    // the pack temperature for any still-invalid fields.
+    if t_pack_0_01c != crate::thermal::TEMP_INVALID_0_01C {
+        if t_chg_0_01c == crate::thermal::TEMP_INVALID_0_01C {
+            t_chg_0_01c = t_pack_0_01c;
+        }
+        for t in &mut t_ntc_0_01c {
+            if *t == crate::thermal::TEMP_INVALID_0_01C {
+                *t = t_pack_0_01c;
+            }
+        }
+        if t_bq_int_0_01c == crate::thermal::TEMP_INVALID_0_01C {
+            t_bq_int_0_01c = t_pack_0_01c;
+        }
+        if t_mcu_0_01c == crate::thermal::TEMP_INVALID_0_01C {
+            t_mcu_0_01c = t_pack_0_01c;
+        }
+    }
+
+    let t_pack_i8 = encode_temp_i8(t_pack_0_01c);
+    let t_chg_i8 = encode_temp_i8(t_chg_0_01c);
+    let t_ntc0_i8 = encode_temp_i8(t_ntc_0_01c[0]);
+    let t_ntc1_i8 = encode_temp_i8(t_ntc_0_01c[1]);
+    let t_ntc2_i8 = encode_temp_i8(t_ntc_0_01c[2]);
+    let t_ntc3_i8 = encode_temp_i8(t_ntc_0_01c[3]);
+    let t_bq_int_i8 = encode_temp_i8(t_bq_int_0_01c);
+    let t_mcu_i8 = encode_temp_i8(t_mcu_0_01c);
+
+    // Log the aggregated thermal snapshot at info level so we can correlate
+    // raw 0.01 °C values with the encoded I2C window on real hardware.
+    info!(
+        "therm: pack={} chg={} ntc={:?} ntc_min={} bq_int={} mcu={}",
+        snapshot.t_pack_0_01c,
+        snapshot.t_chg_0_01c,
+        snapshot.t_ntc_0_01c,
+        snapshot.t_ntc_min_0_01c,
+        snapshot.t_bq_int_0_01c,
+        snapshot.t_mcu_0_01c
+    );
+
+    let temp_window: [u8; TEMP_WINDOW_LEN] = [
+        t_pack_i8 as u8,
+        t_chg_i8 as u8,
+        t_ntc0_i8 as u8,
+        t_ntc1_i8 as u8,
+        t_ntc2_i8 as u8,
+        t_ntc3_i8 as u8,
+        t_bq_int_i8 as u8,
+        t_mcu_i8 as u8,
+    ];
+    write_registers(TEMP_WINDOW_BASE_ADDR, &temp_window);
 }
 
 pub fn update_state_snapshot(flags: u16, blue_code: u8) {
@@ -344,6 +449,17 @@ pub fn update_state_snapshot(flags: u16, blue_code: u8) {
         REGISTERS[STATE_FLAGS_ADDR as usize] = (flags & 0xFF) as u8;
         REGISTERS[(STATE_FLAGS_ADDR + 1) as usize] = (flags >> 8) as u8;
         REGISTERS[STATE_BLUE_CODE_ADDR as usize] = blue_code;
+    });
+}
+
+/// Update the TEMP_STATUS bitfield (0x23) exposed on the I2C slave.
+///
+/// This is written from the unified thermal policy and is kept intentionally
+/// simple so that it can be called from async tasks without holding any
+/// additional locks.
+pub fn update_temp_status(bits: u8) {
+    cortex_m::interrupt::free(|_| unsafe {
+        REGISTERS[TEMP_STATUS_ADDR as usize] = bits;
     });
 }
 

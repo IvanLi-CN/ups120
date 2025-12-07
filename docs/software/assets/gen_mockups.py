@@ -7,6 +7,9 @@ Outputs (scaled 4x, nearest neighbor):
   - dashboard-discharge.png
   - dashboard-charge.png
   - dashboard-standby.png
+  - dashboard_batt_detail_volt.png
+  - dashboard_batt_detail_temp.png
+  - dashboard_batt_detail_balancing.png
 
 Requires: Pillow (pip install pillow)
 
@@ -19,7 +22,11 @@ Design rules implemented per docs/software/ui-spec.md:
 
 NOTE: This is a host-side renderer to verify layout; not firmware code.
 """
+from pathlib import Path
+
 from PIL import Image, ImageDraw
+
+ASSETS_DIR = Path(__file__).parent
 
 W, H = 160, 50
 LM, RM, TM, BM = 4, 4, 1, 1  # margins
@@ -77,7 +84,7 @@ def new_canvas():
 
 def save_scaled(img: Image.Image, path: str, scale: int = 4) -> None:
     out = img.resize((img.width * scale, img.height * scale), resample=Image.NEAREST)
-    out.save(path)
+    out.save(ASSETS_DIR / path)
 
 
 def text_width(text: str) -> int:
@@ -483,6 +490,79 @@ def draw_dashboard(mode: str, temp_slot: str) -> Image.Image:
     return img
 
 
+def draw_batt_detail(view: str, balancing: bool) -> Image.Image:
+    """Battery detail mock (4-row layout, lines 2–3 alternate between voltage / temperature).
+
+    view:
+      - 'volt' -> per-cell voltages on rows 2–3
+      - 'temp' -> per-cell temperatures on rows 2–3
+    balancing:
+      - True  -> one cell highlighted in YELLOW on the voltage frame only
+      - False -> no balancing highlight
+    """
+    assert view in ('volt', 'temp')
+    img, draw, pixels = new_canvas()
+
+    # Row baselines
+    row_y = [TM + i * LINE_H for i in range(4)]
+
+    # --- Row 1: BAT <MODE> <V> <I> ---
+    x = LM
+    x = draw_text(pixels, x, row_y[0], 'BAT', CYAN)
+    x = draw_text(pixels, x + CELL_W, row_y[0], 'IDLE', CYAN)
+    x = draw_text(pixels, x + CELL_W, row_y[0], fmt_voltage(16_600), ORANGE)
+    _ = draw_text(pixels, x + CELL_W, row_y[0], fmt_current(100), RED)
+
+    # Example per-cell data
+    cells_mv = [3282, 3217, 3283, 3295, 3319]
+    cells_temp = [26, 27, 27, 26, 26]
+    balancing_index = 3 if balancing else None  # highlight cell 3 when enabled
+    # Three logical columns, each 6 cells wide, with a half-cell (4px) gap between columns.
+    col_width_px = 6 * CELL_W
+    half_cell_px = CELL_W // 2
+    col_x = [
+        LM,
+        LM + col_width_px + half_cell_px,
+        LM + 2 * col_width_px + 2 * half_cell_px,
+    ]
+
+    def draw_cells_row(y: int, indices) -> None:
+        for slot, cell_index in enumerate(indices):
+            idx = cell_index - 1
+            label = f'{cell_index}:'
+            x_label = col_x[slot]
+            draw_text(pixels, x_label, y, label, CYAN)
+
+            if view == 'volt':
+                value_mv = cells_mv[idx]
+                text = f'{value_mv}'
+                color = (
+                    YELLOW
+                    if balancing_index is not None and cell_index == balancing_index
+                    else ORANGE
+                )
+                # value starts 2 cells (16px) to the right of the label start
+                x_val = x_label + 2 * CELL_W
+                draw_text(pixels, x_val, y, text, color)
+            else:
+                temp_c = cells_temp[idx]
+                digits = fmt_temp_digits(temp_c)
+                # 温度帧在均衡时颜色保持不变（始终 WHITE），仅电压帧高亮。
+                color = WHITE
+                x_val = x_label + 2 * CELL_W
+                draw_celsius(pixels, x_val, y, digits, color)
+
+    # Rows 2–3: cells 1–3, 4–5
+    draw_cells_row(row_y[1], (1, 2, 3))
+    draw_cells_row(row_y[2], (4, 5))
+
+    # --- Row 4: WARN line ---
+    draw_text(pixels, cell_to_x(0), row_y[3], 'WARN', CYAN)
+    draw_text(pixels, cell_to_x(5), row_y[3], 'DSG HI', YELLOW)
+
+    return img
+
+
 def main():
     # Boot
     boot_img = draw_boot()
@@ -497,7 +577,20 @@ def main():
         img = draw_dashboard(mode, temp_slot)
         save_scaled(img, name)
 
-    print('Generated: boot.png, dashboard-*.png')
+    # Battery detail (new spec: voltage / temperature frames on rows 2–3)
+    # 1) Normal voltage frame（无均衡高亮）
+    volt_img = draw_batt_detail('volt', balancing=False)
+    save_scaled(volt_img, 'dashboard_batt_detail_volt.png')
+
+    # 2) Normal temperature frame（无均衡高亮）
+    temp_img = draw_batt_detail('temp', balancing=False)
+    save_scaled(temp_img, 'dashboard_batt_detail_temp.png')
+
+    # 3) Voltage frame with balancing highlight（仅电压为 YELLOW）
+    volt_bal_img = draw_batt_detail('volt', balancing=True)
+    save_scaled(volt_bal_img, 'dashboard_batt_detail_balancing.png')
+
+    print('Generated: boot.png, dashboard-*.png, dashboard_batt_detail_*.png')
 
 
 if __name__ == '__main__':

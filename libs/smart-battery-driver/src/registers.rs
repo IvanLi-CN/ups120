@@ -14,8 +14,8 @@ pub const SYS_STATUS: u8 = 0x07;
 // Measurements
 pub const VBAT_L: u8 = 0x10; // u16 LE
 pub const IBAT_L: u8 = 0x12; // i16 LE
-pub const TPACK_L: u8 = 0x14; // i16 LE (c°C)
-pub const TMOS_L: u8 = 0x16; // i16 LE (c°C)
+// 0x14..0x17 reserved in current protocol; all temperatures are exposed via
+// the compact int8 °C window starting at 0x40.
 pub const VCELL_MAX_L: u8 = 0x18; // u16 LE
 pub const VCELL_MIN_L: u8 = 0x1A; // u16 LE
 pub const DELTA_CELL_L: u8 = 0x1C; // u16 LE
@@ -30,6 +30,13 @@ pub const SYSTEM_FAULTS: u8 = 0x22;
 // Charging control
 pub const CHG_STATUS: u8 = 0x30;
 pub const CHG_CONTROL: u8 = 0x31; // bit0: auto, bit1: manual enable, bits[3:2]: speed tier
+
+// Temperature/status window (read-only, int8 in °C):
+//   0x40 T_PACK_C, 0x41 T_CHG_C, 0x42..0x45 T_NTC0..3_C, 0x46 T_BQ_INT_C, 0x47 T_MCU_C.
+pub const TEMP_WINDOW_BASE: u8 = 0x40;
+pub const TEMP_WINDOW_LEN: usize = 8;
+// Smart-battery TEMP_STATUS bitfield (0x23) – see firmware docs for bit layout.
+pub const TEMP_STATUS: u8 = 0x23;
 
 // Cells (0x50..)
 pub const CELL1_L: u8 = 0x50;

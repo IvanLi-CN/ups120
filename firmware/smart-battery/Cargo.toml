@@ -34,6 +34,7 @@ defmt-rtt = { version = "1.0.0", features = ["disable-blocking-mode"] }
 embassy-embedded-hal = { path = "../../embassy/embassy-embedded-hal" }
 embassy-futures = { path = "../../embassy/embassy-futures" }
 bq769x0-async-rs = { path = "../../bq76920", features = ["async", "defmt"] }
+sb_temp_policy = { path = "../../libs/sb_temp_policy", default-features = false }
 static_cell = "2.1.0"
 portable-atomic = { version = "1.11.0", features = ["critical-section"] }
 heapless = { version = "0.9.1", default-features = false }
@@ -55,7 +56,8 @@ test = false
 
 [profile.dev]
 codegen-units = 1
-debug = false
+# Enable line information so probe-rs can show where Exceptions occur.
+debug = 2
 debug-assertions = false
 incremental = false
 lto = 'fat'
@@ -65,7 +67,8 @@ panic = 'abort'
 
 [profile.release]
 codegen-units = 1
-debug = false
+# Keep size-optimised but still emit DWARF so we can unwind faults.
+debug = 2
 debug-assertions = false
 incremental = false
 lto = 'fat'

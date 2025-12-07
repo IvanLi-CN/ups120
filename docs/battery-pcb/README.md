@@ -19,7 +19,7 @@ The smart battery board manages a 5-series stack of 26650 cells for the UPS120 p
 ## Functional Blocks
 
 - **Protection and switching** - A TI **BQ76200** high-side driver coordinates the charge, discharge, and pre-charge MOSFET banks. The low-value current-sense shunt between `BGND` and `GND` captures pack current, while a resettable fuse protects the housekeeping supply input.
-- **Temperature sensing** - A 10 kOhm MF52 NTC thermistor on TS1 feeds the BQ7692003, backed by a bias network and surge clamp so the monitor reads accurate pack temperatures.
+- **Temperature sensing** - The PCB includes an optional 10 kΩ NTC footprint on the BQ7692003 TS1 pin, but **current production hardware does not populate this device**. BQ7692003 is configured to use its internal temperature sensor only; pack temperatures come from the 4× external NTC network into the STM32 ADC plus the TMP75 near the charger.
 - **Housekeeping power** - A **TPS62933** buck converter drops the pack voltage to the `3V3_OUT` rail through a shielded inductor and bulk storage capacitor. An **LM66100** ideal diode isolates the regulated `3V3` rail, allowing external 3.3 V injection via the VBUS header without back-feeding the buck. Distributed 1 uF and 100 nF capacitors decouple the MCU and analog front ends.
 - **System controller** - An **STM32L051C8** MCU supervises the AFE through an internal I2C bus and bridges to the host-facing bus. A resistor network provides 3.3 V pull-ups, and dedicated alert and interrupt lines land on the MCU for fault handling.
 - **External interfaces** -

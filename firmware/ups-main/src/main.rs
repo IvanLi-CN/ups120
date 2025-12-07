@@ -51,20 +51,44 @@ pub const STM32_ADDR: u8 = 0x35;
 pub const SB_SIG: [u8; 2] = [b'S', b'B'];
 pub const SB_WINDOW_START: u8 = 0x08;
 pub const SB_WINDOW_END: u8 = 0x0F;
-pub const SB_TEMP_BASE: u8 = 0x14;
-pub const SB_TEMP_DATA_BYTES: usize = 4;
-pub const SB_TEMP_FRAME_BYTES: usize = SB_TEMP_DATA_BYTES * 2;
+// Compact temperature telemetry window (0x40..0x47, all int8 in °C) sourced
+// from the STM32 smart-battery thermal aggregation and used as the sole
+// temperature source on the ESP32 side:
+//   [0]=pack, [1]=charger, [2..5]=NTC0..3, [6]=BQ_INT, [7]=MCU.
+pub const SB_TEMP_WINDOW_BASE: u8 = 0x40;
+pub const SB_TEMP_WINDOW_LEN: usize = 8;
 pub const TEST_A: u8 = 0x5A;
 pub const TEST_B: u8 = 0xA5;
 pub const SB_REG_CHG_CONFIG: u8 = 0x31;
 pub const SB_REG_CHG_PAUSE_CAUSE: u8 = 0x32;
 pub const SB_REG_STATE_FLAGS: u8 = 0x20;
+/// Smart-battery TEMP_STATUS register (single-byte thermal fault flags).
+/// See `TempFaultFlags` / `decode_temp_status` for the decoded view.
+pub const SB_REG_TEMP_STATUS: u8 = 0x23;
 pub const SB_STATE_FLAG_AC_PRESENT: u16 = 0x0001;
 // Mirror of STM32 smart-battery state_bits::BALANCING; used for UI overlay.
 pub const SB_STATE_FLAG_BALANCING: u16 = 1 << 5;
 // Mirrors of smart-battery state_bits::FAULT_BQ / FAULT_SC; used for UPS discharge gating.
 pub const SB_STATE_FLAG_FAULT_BQ: u16 = 1 << 6;
 pub const SB_STATE_FLAG_FAULT_SC: u16 = 1 << 7;
+
+/// Decoded view of the STM32 smart-battery TEMP_STATUS register (0x23).
+#[derive(Clone, Copy, Debug)]
+pub struct TempFaultFlags {
+    pub temp_low: bool,
+    pub temp_high_chg: bool,
+    pub temp_high_dsg: bool,
+}
+
+/// Decode TEMP_STATUS bits into a strongly-typed flag set.
+pub fn decode_temp_status(raw: u8) -> TempFaultFlags {
+    TempFaultFlags {
+        temp_low: (raw & 0x01) != 0,
+        temp_high_chg: (raw & 0x02) != 0,
+        temp_high_dsg: (raw & 0x04) != 0,
+    }
+}
+
 pub const SB_CHG_STATUS_BALANCING: u8 = 1 << 5;
 pub const SB_CFG_BIT_AUTO: u8 = 1 << 0;
 pub const SB_CFG_BIT_MANUAL: u8 = 1 << 1;
@@ -239,10 +263,8 @@ async fn ui_task(
     thermal_state: &'static thermal::ThermalStateMutex,
     boot_millis: u64,
 ) {
-    // UI navigation state: dashboard vs battery detail, plus blink phase.
+    // UI navigation state: dashboard vs battery detail.
     let mut ui_screen = UiScreen::Dashboard;
-    let mut blink_on = true;
-    let mut blink_elapsed_ms: u32 = 0;
 
     // UI: alternate SoC% and VBAT every ~2 seconds.
     let mut adin_elapsed_ms: u32 = 0;
@@ -252,6 +274,10 @@ async fn ui_task(
     // UI: rotate through available temperature sources every ~2 seconds.
     let mut temp_alt_counter: u8 = 0;
     let mut temp_cycle_index: usize = 0;
+
+    // UI: batt-detail cells frame (voltages vs temperatures) alternation (~2 seconds).
+    let mut cells_frame = ui::CellsFrame::Voltage;
+    let mut cells_alt_counter: u8 = 0;
 
     loop {
         // Process UI events produced by the button task.
@@ -272,15 +298,6 @@ async fn ui_task(
             }
         }
 
-        // Blink phase for the battery-detail balancing indicator.
-        // UI整体每 1000 ms 重绘一次，所以这里选择 200 ms 作为半周期，
-        // 确保每次重绘都能看到交替的 on/off 状态（1 Hz 可感知闪烁）。
-        blink_elapsed_ms = blink_elapsed_ms.saturating_add(fan_control::SAMPLE_PERIOD_MS);
-        if blink_elapsed_ms >= 200 {
-            blink_elapsed_ms -= 200;
-            blink_on = !blink_on;
-        }
-
         // UI/采样刷新节奏：约 2 Hz（500 ms 一次）
         adin_elapsed_ms = adin_elapsed_ms.saturating_add(fan_control::SAMPLE_PERIOD_MS);
         if adin_elapsed_ms >= 500 {
@@ -291,6 +308,16 @@ async fn ui_task(
             if soc_alt_counter >= 2 {
                 soc_alt_counter = 0;
                 soc_alt_voltage = !soc_alt_voltage;
+            }
+
+            // advance batt-detail cells frame alternation (~2-second cadence)
+            cells_alt_counter = cells_alt_counter.saturating_add(1);
+            if cells_alt_counter >= 4 {
+                cells_alt_counter = 0;
+                cells_frame = match cells_frame {
+                    ui::CellsFrame::Voltage => ui::CellsFrame::Temp,
+                    ui::CellsFrame::Temp => ui::CellsFrame::Voltage,
+                };
             }
 
             // Snapshot power and thermal readings from background tasks instead of
@@ -309,6 +336,7 @@ async fn ui_task(
             let pack_temp = convert_temp_to_i16(thermal_snapshot.sb_pack_temp_c);
             let charger_temp = convert_temp_to_i16(thermal_snapshot.sb_charger_temp_c);
             let ups_temp = convert_temp_to_i16(thermal_snapshot.ups_temp_c);
+            let cell_temps = estimate_cell_temps_i16(thermal_snapshot.sb_ntc_temps_c);
 
             let temp_sources = [
                 (ui::TempSlot::Battery, pack_temp),
@@ -453,9 +481,9 @@ async fn ui_task(
                 pack_v_mv: pack_v_detail,
                 pack_i_ma: pack_i_ma_abs,
                 cells_mv: last_cells_mv,
+                cells_temp_c: cell_temps,
                 balancing_index,
-                temps_c: [pack_temp, charger_temp, ups_temp, None],
-                blink_on,
+                temp_fault: power_snapshot.sb_temp_status.map(decode_temp_status),
             };
 
             match ui_screen {
@@ -464,9 +492,14 @@ async fn ui_task(
                         ui::render_dashboard_once_async(&mut spi, &mut cs, &mut dc, &model).await;
                 }
                 UiScreen::BattDetail => {
-                    let _ =
-                        ui::render_batt_detail_once_async(&mut spi, &mut cs, &mut dc, &batt_detail)
-                            .await;
+                    let _ = ui::render_batt_detail_once_async(
+                        &mut spi,
+                        &mut cs,
+                        &mut dc,
+                        &batt_detail,
+                        cells_frame,
+                    )
+                    .await;
                 }
             }
         }
@@ -733,19 +766,36 @@ where
     let now_ms = esp_hal::time::Instant::now()
         .duration_since_epoch()
         .as_millis() as u64;
-    // STM32 smart-battery slave currently exposes raw registers without CRC interleaving.
-    // Use pointer write then read 4 bytes: [TPACK_L, TPACK_H, TCHG_L, TCHG_H] (i16 LE, 0.01°C; i16::MIN = invalid).
-    let mut data = [0u8; 4];
-    match i2c.write_read(STM32_ADDR, &[SB_TEMP_BASE], &mut data).await {
-        Ok(()) => {
-            let pack = i16::from_le_bytes([data[0], data[1]]);
-            let charger = i16::from_le_bytes([data[2], data[3]]);
-            let pack_c = temp_from_centi(pack);
-            let charger_c = temp_from_centi(charger);
-            let temps = fan_control::SmartBatteryTemps::new(pack_c, charger_c);
-            // Keep detailed temperature reporting at debug level to avoid cluttering button logs.
+    // Compact temperature window (0x40..0x47, int8 °C). Layout:
+    //   [0]=pack, [1]=charger, [2..5]=NTC0..3, [6]=BQ_INT, [7]=MCU.
+    match read_smart_battery_temp_window(i2c).await {
+        Ok([pack_i8, chg_i8, n0, n1, n2, n3, bq_int_i8, mcu_i8]) => {
+            let to_opt = |v: i8| -> Option<f32> {
+                if v == i8::MIN {
+                    None
+                } else {
+                    Some(v as f32)
+                }
+            };
+
+            let pack_c = to_opt(pack_i8);
+            let charger_c = to_opt(chg_i8);
+            let mut ntc_c: [Option<f32>; 4] = [None; 4];
+            ntc_c[0] = to_opt(n0);
+            ntc_c[1] = to_opt(n1);
+            ntc_c[2] = to_opt(n2);
+            ntc_c[3] = to_opt(n3);
+
+            // Keep BQ/MCU temperatures available for potential future diagnostics.
             debug!(
-                "smart-battery temps => pack={=f32}°C charger={=f32}°C hottest={=f32}°C",
+                "stm32: temp-window raw pack={}C chg={}C ntc=[{}, {}, {}, {}] bq_int={}C mcu={}C",
+                pack_i8, chg_i8, n0, n1, n2, n3, bq_int_i8, mcu_i8
+            );
+
+            let temps = fan_control::SmartBatteryTemps::new(pack_c, charger_c, ntc_c);
+            // Keep detailed temperature reporting at debug level to avoid cluttering logs.
+            debug!(
+                "stm32: temps pack={=f32}°C chg={=f32}°C highest={=f32}°C",
                 pack_c.unwrap_or(f32::NAN),
                 charger_c.unwrap_or(f32::NAN),
                 temps.highest().unwrap_or(f32::NAN)
@@ -754,7 +804,10 @@ where
         }
         Err(e) => {
             let kind = i2c_error_kind_str(&e);
-            warn!("stm32: temp read failed: kind={} t_ms={}", kind, now_ms);
+            warn!(
+                "stm32: temp-window read failed: kind={} t_ms={}",
+                kind, now_ms
+            );
             None
         }
     }
@@ -828,6 +881,28 @@ where
             None
         }
     }
+}
+
+/// Diagnostic helper: read the STM32 smart-battery compact temperature window
+/// (0x40..0x47, all int8 in °C) and return the decoded values as signed
+/// degrees Celsius. Layout matches the STM32-side `therm:` log:
+///   [0]=pack, [1]=charger, [2..5]=NTC0..3, [6]=BQ_INT, [7]=MCU.
+pub(crate) async fn read_smart_battery_temp_window<I2C>(
+    i2c: &mut I2C,
+) -> Result<[i8; SB_TEMP_WINDOW_LEN], <I2C as embedded_hal::i2c::ErrorType>::Error>
+where
+    I2C: AsyncI2c,
+    <I2C as embedded_hal::i2c::ErrorType>::Error: embedded_hal::i2c::Error,
+{
+    let mut buf = [0u8; SB_TEMP_WINDOW_LEN];
+    i2c.write_read(STM32_ADDR, &[SB_TEMP_WINDOW_BASE], &mut buf)
+        .await?;
+
+    let mut out = [0i8; SB_TEMP_WINDOW_LEN];
+    for (i, b) in buf.iter().enumerate() {
+        out[i] = *b as i8;
+    }
+    Ok(out)
 }
 
 pub(crate) async fn read_smart_battery_reg<I2C>(i2c: &mut I2C, reg: u8) -> Result<u8, ()>
@@ -919,12 +994,56 @@ fn convert_temp_to_i16(temp: Option<f32>) -> Option<i16> {
     temp.filter(|t| t.is_finite()).map(|t| round_temp_to_i16(t))
 }
 
-fn temp_from_centi(raw: i16) -> Option<f32> {
-    if raw == i16::MIN {
-        None
-    } else {
-        Some(raw as f32 / 100.0)
+/// Estimate 5 cell-surface temperatures (degC) from 4 NTC probes using a simple
+/// positional model:
+/// - NTC0: between cells 1–2
+/// - NTC1: between cells 2–3
+/// - NTC2: between cells 3–4
+/// - NTC3: between cells 4–5
+///
+/// Mapping (in integer domain, after per-probe conversion):
+/// - T1 = NTC0
+/// - T2 = avg(NTC0, NTC1)
+/// - T3 = avg(NTC1, NTC2)
+/// - T4 = avg(NTC2, NTC3)
+/// - T5 = NTC3
+///
+/// avg(a, b):
+/// - both Some: rounded average
+/// - one Some: that value
+/// - both None: None
+fn estimate_cell_temps_i16(ntc_c: [Option<f32>; 4]) -> [Option<i16>; 5] {
+    fn avg_i16(a: Option<i16>, b: Option<i16>) -> Option<i16> {
+        match (a, b) {
+            (Some(x), Some(y)) => {
+                let sum = x as i32 + y as i32;
+                // Round to nearest, keeping behavior symmetric around zero.
+                let avg = if sum >= 0 {
+                    (sum + 1) / 2
+                } else {
+                    (sum - 1) / 2
+                };
+                Some(avg as i16)
+            }
+            (Some(x), None) | (None, Some(x)) => Some(x),
+            (None, None) => None,
+        }
     }
+
+    let ntc_i16: [Option<i16>; 4] = [
+        convert_temp_to_i16(ntc_c[0]),
+        convert_temp_to_i16(ntc_c[1]),
+        convert_temp_to_i16(ntc_c[2]),
+        convert_temp_to_i16(ntc_c[3]),
+    ];
+
+    let t1 = ntc_i16[0];
+    let t2 = avg_i16(ntc_i16[0], ntc_i16[1]);
+    let t3 = avg_i16(ntc_i16[1], ntc_i16[2]);
+    let t4 = avg_i16(ntc_i16[2], ntc_i16[3]);
+    let t5 = ntc_i16[3];
+
+    [t1, t2, t3, t4, t5]
 }
 
 // (reserved) SMBus CRC8 helper left here if smart-battery read switches to interleaved CRC in future

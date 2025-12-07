@@ -206,9 +206,11 @@ controls, and telemetry loops that underpin bring-up.
   The slave address is `0x35` (7‑bit). Supported bus rates: 100 kHz and 400 kHz.
   Clock stretching is permitted (≤ 150 µs) while copying a fresh telemetry
   snapshot into the I²C TX buffer. General‑call is disabled.
-- **SMBus Alert (PB5) & Alert GPIOs**: Reserved for future SMBus/alert handling;
-  interrupt lines `PB1` (BQ alert) and `PB2` (inner bus INT) are wired for EXTI
-  wakeups.
+- **SMBus Alert (PB5) & Alert GPIOs**: PB5/I2C1_SMBA is used for pack
+  temperature alerts. When `TEMP_STATUS.TEMP_HIGH_CHG` 或
+  `TEMP_STATUS.TEMP_HIGH_DSG` 置位时，固件通过 PB5 拉低向主机发出过温通知；
+  当这两位清零（仅可能在温度恢复到安全窗口后）时，PB5 释放为高电平。  
+  其他告警线：`PB1`（BQ alert）和 `PB2`（inner bus INT）仍用于 EXTI 唤醒。
 - **CE (PA10)**: Active-low charger enable. Held high during safety bring-up
   and whenever no SC8815 activity is required. The firmware asserts it low only
   when the charger must be configured, telemetry must be sampled from the
@@ -216,14 +218,18 @@ controls, and telemetry loops that underpin bring-up.
 - **PSTOP_MCU (PA9, firmware label `PSTOP_CTL`)**: MCU-side “stop request” for the SC8815 power stage. When `PSTOP_MCU = 1` and `TEMP_FAULT_N = 1`, hardware derives `PSTOP_CTL = 1` and, after board inversion, chip `PSTOP = Low` (power allowed). If either `PSTOP_MCU = 0` or `TEMP_FAULT_N = 0`, then `PSTOP_CTL = 0` and chip `PSTOP = High` (forced stop).
   until charger programming succeeds and stays an emergency kill path for any
   detected charger fault.
-- **EXIT_SHIPMODE (PA1)**: Push-pull GPIO used to wake the BQ76920 from ship
-  mode with a high pulse before configuration retries.
+- **EXIT_SHIPMODE (PH0)**: Push-pull GPIO (MCU pin PH0, net `$1N118667`) routed
+  via D3 clamp onto the BQ76920 `TS1` pin. Used to wake the BQ76920 from ship
+  mode with a high pulse before configuration retries. Note: the legacy
+  `smart-battery.ioc` file still labels `PA1` as EXIT_SHIPMODE; the PCB netlist
+  (`docs/battery-pcb/netlist_battery.enet`) is the authoritative mapping.
 
 ## Initialization Sequence
 
 1. Configure MCU clocks (LSE on) and instantiate CE/PSTOP outputs high to keep
-   the charger path disabled. Prepare the `PA1` wake GPIO so the BQ76920 can be
-   nudged out of ship mode if it fails to respond on the first attempt.
+   the charger path disabled. Prepare the `PH0` wake GPIO (EXIT_SHIPMODE → TS1)
+   so the BQ76920 can be nudged out of ship mode if it fails to respond on the
+   first attempt.
 2. Bring up I2C2 with DMA and register it inside a `StaticCell<Mutex<…>>`. This
    shared handle feeds lightweight `I2cDevice` wrappers for each peripheral at
    the moment they need bus access.
@@ -441,7 +447,7 @@ Full detection (parameters):
 
 ## Temperature Sensing & Protection (BQ76920 Internal Sensor)
 
-Goal: 使用 BQ76920 内部温度作为单一权威温度输入；在 BQ 激活/非激活两种采样节拍下分别进行平滑/抗毛刺；按如下分级保护并保持 5°C 迟滞。
+Goal: 使用 BQ76920 内部温度作为统一温度保护中的一个输入通道；在 BQ 激活/非激活两种采样节拍下分别进行平滑/抗毛刺；再将平滑后的 `T_BAL` 纳入系统级温度决策（详见“Multi‑Sensor Pack Temperature Architecture”节）。
 
 - 传感器来源：BQ76920 内部温度（TEMP_SEL=Internal），驱动返回 `temperatures.ts1`，单位 0.01°C。
 - 采样/滤波与节拍：
@@ -450,10 +456,11 @@ Goal: 使用 BQ76920 内部温度作为单一权威温度输入；在 BQ 激活/
   - 非激活态（≥60s）：快速连续三次求中位数；该中位数也用于重置 EMA。
   - 启动快速首样：初始化完成后强制一次“立即采样”，便于尽快暴露故障与温度异常。
 - 日志：每次决策打印一行 `bq:t= <used> (ema|med3) raw=<raw> (0.01C)`。
-- 保护与动作（带 5°C 迟滞）：
-  - 温度暂停：T > +50 或 T < 0 → BQ 通过 BalancingCvRequest.temp_pause=true 请求 SC8815 暂停充电；温度回到 ≤45 或 ≥+5 时清除请求。注意：此阶段不直接操作 CHG FET。
-  - CHG 抑制：T > +60 → 仅在 BQ 侧关闭 CHG FET；温度 ≤55 自动恢复。
-  - 输出切断：T > +70 或 T < −10 → 关闭 DSG FET；温度 ≤65 且 ≥−5 自动恢复。
+- 保护与动作（与统一策略对齐）：
+  - BQ 任务不再单独维护一套独立的 50/60/70 °C 阈值，而是：
+    - 将滤波后的内部温度作为 `T_BAL` 提交给统一温度策略；
+    - 在统一策略判定需要禁止充电/放电或切断输入输出时，按系统级决策执行 CHG/DSG FET 控制。
+  - 在 NTC/TMP75/MCU 传感器异常或缺失时，允许将 `T_BAL` 作为兜底的温度来源参与系统级比较（即 `T_MAX/T_MIN` 计算仍然有效）。
 - 灯语：本次改动不直接影响黄灯；黄灯仍由 SC8815 自身告警/会话状态决定。红灯会因 FET 组合状态变化（非两侧同时 ON）表现为更高脉冲码；蓝灯是否显示“暂停”仍取决于现有 CHG_PAUSED 标志（由 SC 侧暂停行为产生）。
 
 Notes:
@@ -524,10 +531,14 @@ communicate with an external host. Summary (Chinese): 智能电池通过 I2C 从
 
 - Memory‑mapped register bank with auto‑increment.
 - Transactions use a 1‑byte register pointer written by the master, followed by
-  an optional repeated‑start read of N bytes.
-- Byte order: Little‑endian for all multi‑byte quantities.
-- Units: Voltage in millivolts (mV), current in milliamps (mA, signed;
-  discharge is negative), temperature in centi‑degrees Celsius (c°C, signed).
+  an optional repeated‑start read of N data bytes (each data byte followed by a
+  CRC byte，见下节 CRC Policy)。
+- Byte order: Little‑endian for all multi‑byte quantities（仅对电压、电流等 u16/i16 生效）。
+- Units:
+  - Voltage: millivolts (mV, u16)；
+  - Current: milliamps (mA, i16；放电为负)；
+  - Temperature over I2C: **whole degrees Celsius (°C, int8)**，每个传感器 1 字节；
+  - Temperature inside firmware: centi‑degrees Celsius (0.01 °C, i16)，仅作为内部计算单位，不直接暴露在 I2C 协议上。
 - Coherency: Telemetry is snapshotted into a TX buffer at 1 Hz; multi‑byte
   reads are internally consistent. 读取侧返回 CRC（与 TI 一致，主机可选择校验，但推荐校验）。
 
@@ -577,8 +588,10 @@ Pack measurements (read‑only):
 
 - 0x10 `VBAT_MV_LO`; 0x11 `VBAT_MV_HI` (u16)
 - 0x12 `IBAT_MA_LO`; 0x13 `IBAT_MA_HI` (i16; discharge negative)
-- 0x14 `T_PACK_Cc_LO`; 0x15 `T_PACK_Cc_HI` (i16)
-- 0x16 `T_MOS_Cc_LO`; 0x17 `T_MOS_Cc_HI` (i16)
+- 0x14 RESERVED
+- 0x15 RESERVED
+- 0x16 RESERVED
+- 0x17 RESERVED
 - 0x18 `V_CELL_MAX_MV_LO`; 0x19 `V_CELL_MAX_MV_HI` (u16)
 - 0x1A `V_CELL_MIN_MV_LO`; 0x1B `V_CELL_MIN_MV_HI` (u16)
 - 0x1C `DELTA_CELL_MV_LO`; 0x1D `DELTA_CELL_MV_HI` (u16)
@@ -592,6 +605,7 @@ Faults & status (read‑only unless noted):
 - 0x21 `CHARGER_FAULTS` bitfield: bit0=OTP, bit1=VIN_UV, bit2=VIN_OV,
   bit3=VBAT_OV, bit4=SHORT, bit5=THERM, bit6=COMM_ERR, bit7=RESERVED
 - 0x22 `SYSTEM_FAULTS` bitfield: internal safety interlocks; 0 means OK
+- 0x23 `TEMP_STATUS` bitfield (RO): bit0=TEMP_LOW, bit1=TEMP_HIGH_CHG, bit2=TEMP_HIGH_DSG, others reserved
 
 Charging control and status:
 
@@ -608,6 +622,18 @@ Per‑cell voltages (length depends on `CELLS_PRESENT`, RO):
 - 0x54/0x55 `CELL3_MV` (u16)
 - 0x56/0x57 `CELL4_MV` (u16)
 - 0x58/0x59 `CELL5_MV` (u16; present only on 5S)
+
+Extended temperature telemetry（read‑only, all int8 in °C，地址连续便于一次性读取）:
+
+- 0x40 `T_PACK_C`（pack temperature, °C；由内部逻辑聚合自 4×NTC/BQ/TMP75/MCU）
+- 0x41 `T_CHG_C`（charger/board temperature, °C；TMP75）
+- 0x42 `T_NTC0_C`（NTC0 temperature, °C）
+- 0x43 `T_NTC1_C`
+- 0x44 `T_NTC2_C`
+- 0x45 `T_NTC3_C`
+- 0x46 `T_BQ_INT_C`（BQ76920 internal temperature, °C）
+- 0x47 `T_MCU_C`（MCU on‑die temperature, °C）
+- 0x48–0x4F RESERVED
 
 Diagnostics & reserved:
 
@@ -626,9 +652,10 @@ Diagnostics & reserved:
 
 ### Example Transactions
 
-- Read pack voltage/current/temperature in one burst (8 data bytes → 16 bus bytes with CRC):
+- Read pack voltage/current/temperature in one burst（当前固件使用“纯寄存器窗口”，未来如启用 CRC 将按相同模式在每个数据字节后插入 CRC 字节）：
   - Master: `START → 0x6A(W) → 0x10 → REPEATED START → 0x6B(R)`
-  - Device returns: `VBAT_L, CRC(VBAT_L with 0x6B), VBAT_H, CRC(VBAT_H), IBAT_L, CRC(IBAT_L), IBAT_H, CRC(IBAT_H), TPACK_L, CRC(TPACK_L), TPACK_H, CRC(TPACK_H), TMOS_L, CRC(TMOS_L), TMOS_H, CRC(TMOS_H)`; master NACKs the last CRC then `STOP`.
+  - Device returns 4 字节电压/电流快照（`VBAT_L/H`, `IBAT_L/H`），以及在单独一次读取中返回 8 字节温度窗口 `0x40..0x47`（`T_PACK_C`, `T_CHG_C`, 4×`T_NTC*_C`, `T_BQ_INT_C`, `T_MCU_C`）。  
+    > 说明：早期设计中曾计划在 `0x14/0x16` 暴露 `TPACK_L/TMOS_L`（i16、0.01 °C）并对 `0x10..0x17` 做带 CRC 的长 burst；该路径已废弃，当前分支下 `0x14..0x17` 为保留位，唯一的温度入口是 `0x40..0x47` 的 int8 温度窗口。
 - Enable charging (with CRC per‑byte):
   - Master: `START → 0x6A(W) → 0x31 → 0x03 → CRC(0x6A,0x31,0x03) → STOP` (`AUTO=1, MANUAL=1, SPEED=0`).
 - Set current limit tier to ≈1.2 A (tier 2):
@@ -866,3 +893,214 @@ Scope and non‑goals
 - Future work (if needed) may:
   - Allow the host (via I2C1) to adjust THIGH/TLOW within a constrained range.
   - Incorporate TMP75 readings into higher‑level derating policies (e.g. pre‑emptive pause before 55 °C).
+
+## Multi‑Sensor Pack Temperature Architecture (BQ + TMP75 + 4×NTC)
+
+> 本节在系统层面定义“电池温度”的来源与保护策略，覆盖 BQ76920 内部温度、板载 TMP75 以及 4 路贴在电芯之间的 NTC。实现落地后，本节描述将取代“仅依赖 BQ 内部温度”的旧策略；旧节保留作为回退方案说明。
+
+### Sensors & Placement
+
+- **BQ76920 internal temperature (`T_BQ_INT`)**
+  - 来源：BQ76920 TEMP 寄存器，当前驱动暴露为 `temperatures.ts1`（单位 0.01 °C）。
+  - 语义：靠近 AFE 本体的“IC/板边环境温度”，偏向电路板热点监控，而非严格意义上的电芯壳温。
+  - 硬件说明：PCB 上虽然在 TS1 附近保留了外部 NTC 焊盘，但当前量产版本 **不焊接该 NTC**，TS1 仅用于芯片内部温度模式，**不再作为外部电芯温度输入**。
+
+- **TMP75A local board sensor (`T_TMP75`)**
+  - 位置：靠近 SC8815 / 功率区，用于反映充电路径附近的板温。
+  - 语义：充电硬件温度，主要服务于“充电路径过温保护”（见上一节 55 °C/45 °C 硬件窗口及 50 °C/40 °C 软窗口）。
+
+- **4× 外置 NTC between cells (`T_NTC[0..3]`)**
+  - 器件：NTC 10 kΩ β3380（R46/R48/R50/R52），每个 NTC 粘在两节电池中间区域，总共覆盖 5 节电芯的 4 个间隙。
+  - 网络：每路 NTC 一端接 `BGND`，一端接 `TS12/TS23/TS34/TS45`；对应节点通过 43 kΩ 上拉电阻（R47/R49/R51/R53）接至 `NTC_3V3`，并由 100 nF（C62..C65）到 `BGND` 滤波。
+  - MCU 连接：
+    - `TS45` → STM32 `PA0/ADC_IN0`
+    - `TS34` → STM32 `PA1/ADC_IN1`
+    - `TS23` → STM32 `PA2/ADC_IN2`
+    - `TS12` → STM32 `PA3/ADC_IN3`
+    - `NTC_3V3` → STM32 `PB12`（GPIO，作为可控上拉电源）
+  - 语义：**电芯表面/中间温度**，是“电池包过温保护”的主数据源。
+
+- **MCU on‑die temperature (`T_MCU`)**
+  - 来源：STM32L051 内部温度传感器通道，经 ADC 读取并换算到 0.01 °C。
+  - 语义：MCU 结温，用于检测控制器自身是否进入高温区域，也是“任何一点 >60 °C 必须切断输入/输出”的参与者之一。
+
+### Sampling & In‑Memory Representation
+
+目标：周期性（典型 1 Hz，在活动状态下）刷新以下温度到内存，统一挂入测量结构并对外暴露：
+
+- `T_BQ_INT`：由 BQ 任务按“Temperature Sensing & Protection (BQ76920 Internal Sensor)”节所述节拍采样并滤波。
+- `T_TMP75`：由 TMP75 驱动在 INNER 总线上周期性读取；单位统一为 0.01 °C（内部采用 Q4 映射）。
+- `T_NTC[i]`（i=0..3）：由 MCU ADC 周期性采样 4 路通道并换算温度：
+  - 采样过程（单次周期）：
+    1. 将 `PB12/NTC_3V3` 置为推挽高，给 4 路 43 k 上拉供电。
+    2. 延时 ≥ 温度网络稳态时间（设计上参考 `battery_temp_sensing.md` 中给出的 RC 常数，约 18 ms 量级）。
+    3. 依次触发 ADC1 `IN0..3` 单次转换，并可选做简单平均/中值滤波。
+    4. 关闭 `PB12`（输出低或高阻），避免长期静态电流消耗。
+  - 换算：采用与 `battery_temp_sensing.md`、`firmware/ups-main/src/adin_temp.rs` 一致的 10 k/B3380 + 43 k 上拉模型，将电压/码值转换为温度（°C），内部存储为 0.01 °C。
+
+聚合结构（逻辑概念，实际字段名由实现决定）：
+
+- `t_bq_int_0_01c` – BQ 内部温度。
+- `t_tmp75_0_01c` – TMP75 板温。
+- `t_ntc_0_01c[4]` – 4 路 NTC 温度。
+- `t_ntc_max_0_01c` / `t_ntc_min_0_01c` – NTC hottest/coldest。
+- `t_mcu_0_01c` – MCU 内部温度。
+- `t_pack_safety_0_01c` – 用于对外和保护决策的“单一代表值”，默认为 `max(T_BQ_INT, T_TMP75, t_ntc_max, T_MCU)`。
+
+这些字段将：
+
+- 汇入内部 `AllMeasurements` / `AllMeasurementsUsbPayload` 等测量结构；
+- 由 I2C1 从机任务在快照时复制到寄存器窗口（参见“External Communications (I2C1 Slave)”节）。
+
+### NTC‑Based Over‑Temperature Policy
+
+> 这部分策略以 4 路 NTC 为中心，TMP75 负责“充电路径保护”，BQ 内部温度负责 IC 自身保护。NTC 视为“电池包温度”的主裁判。
+
+记 `T_NTC_MAX = t_ntc_max_0_01c / 100`（°C，取 4 路 NTC 中最高值）。
+
+分三级：
+
+1. **预警级（Pack OT Warn）– 55 °C**
+
+   - 条件：`T_NTC_MAX ≥ 55 °C`，持续若干个采样周期（例如 2–3 次），避免单点毛刺。
+   - 动作：
+     - 在内部状态字中置位 `PACK_OT_WARN` 标志。
+     - 在 I2C1 从机寄存器中更新对应状态位（例如 `SYSTEM_FAULTS` 或新增温度状态寄存器中的 bit）。
+     - 触发对主机的**过温中断通知**：
+       - 首选：通过 I2C1 的 SMBus Alert 线（PB5/I2C1_SMBA）拉动，实现硬件级“attention”；
+       - 若 SMBus Alert 尚未实现，则在协议层约定主机周期轮询对应状态位。
+   - 不做强制断电，仅作为“即将达到硬保护”的预警。
+
+2. **硬切断级（Pack OT Trip） – 60 °C**
+
+   - 条件：`T_NTC_MAX ≥ 60 °C`（同样可带少量采样去抖）。
+   - 动作：
+     - 立刻通过 BQ 任务请求 **切断放电路径**：
+       - 关闭 BQ76920 `DSG` FET（必要时也关闭 `CHG`，形成双向断开），等价于“切断电池输出”。
+     - 在内部状态中置位 `PACK_OT_TRIP`，并保持**锁存**，直至温度回到安全窗口。
+     - 在 I2C1 状态寄存器中暴露该硬切断原因，便于主机区分“电压类故障 vs 温度类故障”。
+     - 可选：在 LED 状态机中映射到故障优先级（例如复用现有 Fault 模式，不新增花样）。
+
+3. **恢复级（Pack OT Recover） – 40 °C**
+
+   - 条件：上一周期处于 `PACK_OT_TRIP`，且 `T_NTC_MAX ≤ 40 °C` 持续若干采样周期（建议 ≥2 次）。
+   - 动作：
+     - 清除 `PACK_OT_TRIP` 锁存，允许 BQ 任务按常规规则重新打开 `DSG` / `CHG` FET（仍受 OV/UV/OCD/SCD 等保护限制）。
+     - 可保留 `PACK_OT_WARN` 位，直到温度继续下降到 <50 °C 以外（具体阈值可根据后续测试微调）。
+
+> 以上 55/60/40 °C 阈值可以视为默认项目策略：55 °C 启动主机预警，60 °C 强制断电保护，40 °C 明确回到安全区后恢复。与既有 BQ 内部温度/TMP75 50/40 °C 软窗口、55/45 °C 硬窗口保持大致一致但角色分工不同：  
+> - TMP75 负责“板级/充电路径”保护；  
+> - NTC 负责“电池包/电芯”保护；  
+> - BQ 内部温度作为 IC 自保护与兜底阈值（例如极端 70 °C/−10 °C 切断）。
+
+### I2C Register Exposure (Summary)
+
+本项目阶段性的共识如下：
+
+- **内部温度表示**：固件内部统一使用 `i16`、单位 0.01 °C（centi‑degree）存放 BQ/TMP75/NTC/MCU 温度，用于比较阈值（40/50/55/60 °C）、做滤波和滞环。
+- **I2C 温度表示**：对外通过 I2C 寄存器暴露的温度，一律使用 **`int8`、单位 1 °C**，每个传感器占用 1 字节。内部 centi‑degree 会在快照阶段通过 `round(T_internal/100)` 压缩成 1 °C 步进。
+
+温度相关寄存器（与上文 Register Map 保持一致，0x40–0x47 为唯一温度入口，0x14..0x17 不再承载温度数据）：
+
+- 温度窗口（均为 `int8`、单位 1 °C）：
+  - `0x40 T_PACK_C`：电池温度（°C，NTC hottest / 多源聚合后的 pack 温度）。
+  - `0x41 T_CHG_C`：充电器/板级温度（°C，来自 TMP75）。
+  - `0x42..0x45 T_NTC0_C..T_NTC3_C`：4 路 NTC 分别对应的温度（°C，按固定顺序映射 TS12/TS23/TS34/TS45）。
+  - `0x46 T_BQ_INT_C`：BQ76920 内部温度（°C）。
+  - `0x47 T_MCU_C`：MCU 内部温度（°C）。
+
+- 温度保护状态：
+  - `0x23 TEMP_STATUS`：
+    - bit0 `TEMP_LOW`：温度过低（导致充放电都不允许）。
+    - bit1 `TEMP_HIGH_CHG`：充电温度过高（不允许充电）。
+    - bit2 `TEMP_HIGH_DSG`：放电温度过高（不允许放电，通常已切断输入输出）。
+  - `CHG_PAUSE_CAUSE.PACK_TEMP`：仅表示“因温度暂停充电”，具体是哪一类温度保护由 `TEMP_STATUS` 三个位来细分。
+
+主机侧推荐策略：
+
+- 常规轮询时优先读取 `0x40..0x47`（温度窗口）和 `TEMP_STATUS`：
+  - `TEMP_LOW`=1 → 温度过低；
+  - `TEMP_HIGH_CHG`=1 → 当前禁止充电；
+  - `TEMP_HIGH_DSG`=1 → 当前禁止放电（以及可能已经切断 pack 输出）。
+- 由于 `0x40..0x47` 连续，主机可以通过一次 burst 读取拿到所有温度，再结合 `TEMP_STATUS` 做判定；必要时也可以只读取 `T_PACK_C` 作为 pack 温度概要。
+
+### Interaction With Existing Policies
+
+- BQ 内部温度节（“Temperature Sensing & Protection (BQ76920 Internal Sensor)”）继续生效，用于：
+  - 在 NTC 或 TMP75 故障情况下提供兜底保护；
+  - 在极端温度（例如 >70 °C 或 <−10 °C）下强制切断 FET。
+- TMP75 节继续负责：
+  - 对 SC8815 充电路径提供 55 °C/45 °C 硬件窗口；
+  - 在 50 °C/40 °C 附近对充电进行软暂停。
+- 新的 NTC 策略专注于“电芯温度”，其 60 °C/40 °C 窗口优先用于决定是否允许电池对外供电；当多个策略同时触发时，系统遵循“更保守（更安全）”的组合结果。
+
+实现时应确保：
+
+- 单一温度事件只在一个地方做**决策**，其结果通过已有 pub/sub 结构（如 `BalancingCvRequest`、`state_bits` 等）传播；
+- I2C 寄存器与内部状态位保持一一对应关系，便于主机调试和现场问题追踪。
+
+### Unified Thermal Protection Policy (System‑Level)
+
+> 本小节是**系统级规范**，覆盖四路温度：电池温度（4×NTC hottest）、充电器温度（TMP75）、均衡温度（BQ 内部）、MCU 温度。上文各小节的单独阈值说明在实现时都应服从这里的统一规则。
+
+记：
+
+- `T_PACK`：电池温度 = 4 路 NTC 中最高值；
+- `T_CHG`：充电器温度 = TMP75；
+- `T_BAL`：均衡温度 = BQ 内部；
+- `T_MCU`：MCU 结温；
+- `T_MAX = max(T_PACK, T_CHG, T_BAL, T_MCU)`；
+- `T_MIN = min(T_PACK, T_CHG, T_BAL, T_MCU)`。
+
+统一规则：
+
+- **放电允许温度窗口**：`-10 °C ≤ 所有传感器 ≤ 60 °C`  
+  - 任意一个温度 < −10 °C 或 > 60 °C → 禁止放电（`DSG` FET 关闭，视为断开电池输出）。
+
+- **充电允许温度窗口**：`-10 °C ≤ 所有传感器 ≤ 55 °C`  
+  - 任意一个温度 < −10 °C 或 > 55 °C → 禁止充电（`CHG` FET 关闭 / 充电器暂停）。
+
+- **充电期间的电池高温暂停**：
+  - 当处于“充电中”状态且 `T_PACK ≥ 55 °C`、`T_MAX < 60 °C` 时：
+    - 立即暂停充电（通过 `PSTOP_MCU` / `CHG` FET），但**保持放电路径导通**；
+    - 置位“充电温度过高”状态（见下节 I2C 状态位）。
+
+- **60 °C 硬切断**：
+  - 当 `T_MAX ≥ 60 °C`（任意一条温度 ≥60 °C）时：
+    - 立即切断电池组输入和输出：关闭 `CHG` 和 `DSG` FET，禁止 SC8815 再次拉电流；
+    - 置位“放电温度过高”状态并锁存，直到降温满足恢复条件。
+
+- **低温保护**：
+  - 当 `T_MIN < −10 °C` 时：
+    - 禁止充放电（`CHG`/`DSG` 关闭），记为“温度过低”状态；
+  - 当所有温度回到 `T_MIN ≥ −10 °C` 且满足下述 50 °C/40 °C 恢复条件后，才允许重新放电/充电。
+
+- **恢复阈值（全局）**：
+  - 放电恢复：只有当所有传感器满足 `T_MAX ≤ 50 °C` 且 `T_MIN ≥ −10 °C` 时，才允许重新打开放电路径；
+  - 充电恢复：只有当所有传感器满足 `T_MAX ≤ 40 °C` 且 `T_MIN ≥ −10 °C` 时，才允许再次进入充电状态。
+
+- **均衡约束**：
+  - 温度不在“充电允许窗口”（即任意传感器 < −10 °C 或 > 55 °C），或者任一温度保护状态（低温 / 高温充电 / 高温放电）为真时：
+    - 必须立即停止任何均衡行为，不得在温度保护期间继续均衡。
+
+### I2C Temperature Protection Status Bits
+
+I2C 从机温度保护状态对外暴露三类信息，用于主机快速判定当前温度限制类型（寄存器具体地址由实现时在“Register Map”节中补充或更新）：
+
+- `TEMP_LOW` – 温度过低（包含充电和放电）：
+  - 语义：任一温度 < −10 °C，或者因为低温导致当前充放电被禁止；
+  - 满足放电/充电恢复条件后自动清零。
+
+- `TEMP_HIGH_CHG` – 充电温度过高：
+  - 语义：当前不允许充电，但放电路径**有可能**仍允许：
+    - 电池温度 `T_PACK ≥ 55 °C` 触发的充电暂停；或
+    - `T_MAX ≥ 60 °C` 的硬切断场景（此时通常 `TEMP_HIGH_DSG` 也为 1）。
+
+- `TEMP_HIGH_DSG` – 放电温度过高：
+  - 语义：当前不允许放电，通常意味着 `T_MAX ≥ 60 °C` 导致已经切断电池输出；
+  - 与 `TEMP_HIGH_CHG` 并存时，表示“高温下输入输出均已被切断”。
+
+实现建议：
+
+- 这三个状态可以统一打包在一个系统级温度状态寄存器中（例如复用或扩展 `SYSTEM_FAULTS`），并在 `CHG_PAUSE_CAUSE.PACK_TEMP` 中仅表征“因温度暂停充电”的原因，而不再携带全部细节；  
+- 上层主机若需要细粒度诊断，应结合多源温度读数（`T_PACK/T_CHG/T_BAL/T_MCU`）与上述三个位进行推断。

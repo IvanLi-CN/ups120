@@ -73,6 +73,7 @@ impl Tmp75 {
         Self { i2c, addr }
     }
 
+    #[allow(dead_code)]
     /// Release the underlying I²C device.
     pub fn release(self) -> Tmp75I2cDev {
         self.i2c
