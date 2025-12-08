@@ -13,7 +13,7 @@ mod tsens;
 mod ui;
 
 use button_input::{ButtonConfig, ButtonState};
-use defmt::{debug, info, warn};
+use defmt::{Debug2Format, debug, info, warn};
 use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
 use embassy_executor::Spawner;
 use embassy_sync::{
@@ -496,12 +496,14 @@ async fn ui_task(
             // power snapshot, plus pack current magnitude for detail view.
             let pack_i_ma_abs = ibat_ma.map(|i| if i < 0 { (-i) as u32 } else { i as u32 });
             let (dashboard_mode, batt_mode) = compute_dashboard_modes(&power_snapshot);
+            let sb_fault = power::compute_sb_fault(&power_snapshot);
 
             if last_dashboard_mode != Some(dashboard_mode) {
                 info!(
-                    "ui: dashboard_mode={} batt_mode={}",
+                    "ui: dashboard_mode={} batt_mode={} sb_fault={:?}",
                     dashboard_mode_str(dashboard_mode),
                     batt_mode_str(batt_mode),
+                    Debug2Format(&sb_fault),
                 );
                 last_dashboard_mode = Some(dashboard_mode);
             }
@@ -567,6 +569,7 @@ async fn ui_task(
                 fan_pct: thermal_snapshot.fan.duty_pct,
                 uptime_secs,
                 temp_slot: display_slot,
+                sb_fault,
             };
 
             // Battery detail view model (reuses most of the same raw inputs).

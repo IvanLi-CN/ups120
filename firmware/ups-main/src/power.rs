@@ -23,6 +23,23 @@ pub enum ChargeMode {
     Manual,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub enum SbFaultCode {
+    CommErr,
+    StateNA,
+    ReqChgMismatch,
+    ReqStopMismatch,
+    TempLow,
+    TempHotChg,
+    TempHotDsg,
+    Imbalance,
+    OvUvOc,
+    AdapterMiss,
+    HoldOff,
+    FaultBq,
+    FaultSc,
+}
+
 /// Snapshot of the current power / smart-battery state.
 ///
 /// This is intentionally a plain, `Copy`-friendly structure so UI and
@@ -46,6 +63,8 @@ pub struct PowerState {
     pub cells_mv: [Option<u16>; 5],
     /// Cached STATE_FLAGS from the periodic 10s snapshot.
     pub state_flags: Option<u16>,
+    /// Cached CHG_PAUSE_CAUSE from the periodic 10s snapshot.
+    pub sb_chg_pause_cause: Option<u8>,
     /// Latest smart-battery TEMP_STATUS bitmap (if available).
     pub sb_temp_status: Option<u8>,
     /// Latest smart-battery temperature set (pack + charger).
@@ -62,6 +81,8 @@ pub struct PowerState {
     pub out_a_ma: Option<i32>,
     /// OUT power in mW, derived from voltage/current, if available.
     pub out_w_mw: Option<u32>,
+    /// Whether smart-battery I2C/state reads are currently considered faulty.
+    pub sb_comm_error: bool,
     /// Millisecond timestamp (since boot) of the last successful update.
     pub last_update_ms: u64,
 }
@@ -77,6 +98,7 @@ impl core::fmt::Debug for PowerState {
             .field("ibat_ma", &self.ibat_ma)
             .field("cells_mv", &self.cells_mv)
             .field("state_flags", &self.state_flags)
+            .field("sb_chg_pause_cause", &self.sb_chg_pause_cause)
             .field("sb_temp_status", &self.sb_temp_status)
             .field("smart_batt_temps", &Debug2Format(&self.smart_batt_temps))
             .field("adin_temp_c", &self.adin_temp_c)
@@ -85,6 +107,7 @@ impl core::fmt::Debug for PowerState {
             .field("out_v_mv", &self.out_v_mv)
             .field("out_a_ma", &self.out_a_ma)
             .field("out_w_mw", &self.out_w_mw)
+            .field("sb_comm_error", &self.sb_comm_error)
             .field("last_update_ms", &self.last_update_ms)
             .finish()
     }
@@ -101,6 +124,7 @@ impl Default for PowerState {
             ibat_ma: None,
             cells_mv: [None; 5],
             state_flags: None,
+            sb_chg_pause_cause: None,
             sb_temp_status: None,
             smart_batt_temps: None,
             adin_temp_c: None,
@@ -109,12 +133,132 @@ impl Default for PowerState {
             out_v_mv: None,
             out_a_ma: None,
             out_w_mw: None,
+            sb_comm_error: false,
             last_update_ms: 0,
         }
     }
 }
 
 pub type PowerStateMutex = Mutex<NoopRawMutex, PowerState>;
+
+pub fn compute_sb_fault(state: &PowerState) -> Option<SbFaultCode> {
+    // 1. Communication / state availability.
+    if state.sb_comm_error {
+        return Some(SbFaultCode::CommErr);
+    }
+
+    let flags = match state.state_flags {
+        Some(f) => f,
+        None => return Some(SbFaultCode::StateNA),
+    };
+
+    // Local mirrors of STM32 STATE_FLAGS bits used for fault derivation.
+    const SB_STATE_FLAG_CHARGING: u16 = 1 << 1;
+    const SB_STATE_FLAG_CHG_PAUSED: u16 = 1 << 2;
+    const SB_STATE_FLAG_FULL: u16 = 1 << 4;
+
+    // Local mirrors of CHG_PAUSE_CAUSE bits.
+    const SB_PAUSE_IMBALANCE: u8 = 1 << 0;
+    const SB_PAUSE_PACK_TEMP: u8 = 1 << 1;
+    const SB_PAUSE_CHG_TEMP: u8 = 1 << 2;
+    const SB_PAUSE_OVUV_OC: u8 = 1 << 3;
+    const SB_PAUSE_HOLD_OFF: u8 = 1 << 4;
+    const SB_PAUSE_ADAPTER_MISS: u8 = 1 << 5;
+    const SB_PAUSE_EOC_FULL: u8 = 1 << 6;
+
+    let charging_active = (flags & SB_STATE_FLAG_CHARGING) != 0;
+    let chg_paused = (flags & SB_STATE_FLAG_CHG_PAUSED) != 0;
+    let full_flag = (flags & SB_STATE_FLAG_FULL) != 0;
+
+    let pause = state.sb_chg_pause_cause.unwrap_or(0);
+    let pause_imbalance = (pause & SB_PAUSE_IMBALANCE) != 0;
+    let pause_ovuv_oc = (pause & SB_PAUSE_OVUV_OC) != 0;
+    let pause_hold_off = (pause & SB_PAUSE_HOLD_OFF) != 0;
+    let pause_adapter_miss = (pause & SB_PAUSE_ADAPTER_MISS) != 0;
+    let pause_eoc_full = (pause & SB_PAUSE_EOC_FULL) != 0;
+    let pause_temp_related = (pause & (SB_PAUSE_PACK_TEMP | SB_PAUSE_CHG_TEMP)) != 0;
+
+    // Decode TEMP_STATUS once for temperature-related codes and gating.
+    let temp_flags = state.sb_temp_status.map(crate::decode_temp_status);
+    let temp_low = matches!(temp_flags, Some(f) if f.temp_low);
+    let temp_hot_chg = matches!(temp_flags, Some(f) if f.temp_high_chg);
+    let temp_hot_dsg = matches!(temp_flags, Some(f) if f.temp_high_dsg);
+
+    // 2. Request/actual mismatch between ESP intent and STM32 CHARGING bit.
+    //
+    // Treat Manual mode with AC present as an explicit charge request. We also
+    // require VIN to be stable to avoid transient mismatches around adapter
+    // plug/unplug.
+    let charge_requested =
+        state.ac_present && state.ac_stable && matches!(state.charge_mode, ChargeMode::Manual);
+
+    // Consider conditions that legitimately explain why charging might be
+    // paused or stopped even when a request is present. When any of these are
+    // true we suppress ReqChgMismatch so more specific faults can surface.
+    let mut has_valid_pause_reason = false;
+    if full_flag || pause_eoc_full {
+        has_valid_pause_reason = true;
+    }
+    if pause_temp_related || state.temp_pause_active || temp_low || temp_hot_chg {
+        has_valid_pause_reason = true;
+    }
+    if pause_ovuv_oc || pause_imbalance || pause_adapter_miss {
+        has_valid_pause_reason = true;
+    }
+    if chg_paused {
+        has_valid_pause_reason = true;
+    }
+    if !state.ac_present || !state.ac_stable {
+        has_valid_pause_reason = true;
+    }
+
+    if charge_requested && !charging_active && !has_valid_pause_reason {
+        return Some(SbFaultCode::ReqChgMismatch);
+    }
+
+    // ReqStopMismatch: ESP believes charging should be stopped (no manual
+    // request, AC missing or gating) but STM32 still reports CHARGING.
+    let stop_requested = (!state.ac_present || state.temp_pause_active || full_flag)
+        && !matches!(state.charge_mode, ChargeMode::Manual);
+    if stop_requested && charging_active {
+        return Some(SbFaultCode::ReqStopMismatch);
+    }
+
+    // 3. Chip-level faults from STATE_FLAGS.
+    if (flags & SB_STATE_FLAG_FAULT_BQ) != 0 {
+        return Some(SbFaultCode::FaultBq);
+    }
+    if (flags & SB_STATE_FLAG_FAULT_SC) != 0 {
+        return Some(SbFaultCode::FaultSc);
+    }
+
+    // 4. Temperature faults from TEMP_STATUS.
+    if temp_low {
+        return Some(SbFaultCode::TempLow);
+    }
+    if temp_hot_chg {
+        return Some(SbFaultCode::TempHotChg);
+    }
+    if temp_hot_dsg {
+        return Some(SbFaultCode::TempHotDsg);
+    }
+
+    // 5. Voltage/current/adapter/imbalance-related pause causes.
+    if pause_imbalance {
+        return Some(SbFaultCode::Imbalance);
+    }
+    if pause_ovuv_oc {
+        return Some(SbFaultCode::OvUvOc);
+    }
+    if pause_adapter_miss {
+        return Some(SbFaultCode::AdapterMiss);
+    }
+    if pause_hold_off {
+        return Some(SbFaultCode::HoldOff);
+    }
+
+    None
+}
 
 static POWER_STATE: StaticCell<PowerStateMutex> = StaticCell::new();
 
@@ -309,6 +453,9 @@ pub async fn power_task(
     let mut sb_last_state_poll_ms = 0u64;
     let mut last_state_flags: Option<u16> = None;
     let mut last_cells_mv: [Option<u16>; 5] = [None; 5];
+    let mut last_chg_pause_cause: Option<u8> = None;
+    let mut sb_comm_error: bool = false;
+    let mut sb_comm_error_streak: u8 = 0;
 
     {
         let mut sb_i2c = I2cDevice::new(i2c_bus);
@@ -549,6 +696,7 @@ pub async fn power_task(
         // Periodic state snapshot for logging / UI (every 10s)
         if now_millis.saturating_sub(sb_last_state_poll_ms) >= SB_STATE_POLL_INTERVAL_MS {
             sb_last_state_poll_ms = now_millis;
+            let mut snapshot_ok = true;
             let mut status: Option<u8> = None;
             let mut pause: Option<u8> = None;
             let mut flags: Option<u16> = None;
@@ -559,6 +707,7 @@ pub async fn power_task(
                 status = Some(s);
             } else {
                 warn!("sb:state read CHG_STATUS failed");
+                snapshot_ok = false;
             }
             if let Ok(p) =
                 crate::read_smart_battery_reg_retry(&mut sb_i2c, SB_REG_CHG_PAUSE_CAUSE, 2, 2).await
@@ -566,6 +715,7 @@ pub async fn power_task(
                 pause = Some(p);
             } else {
                 warn!("sb:state read CHG_PAUSE_CAUSE failed");
+                snapshot_ok = false;
             }
             if let Ok(f_lo) =
                 crate::read_smart_battery_reg_retry(&mut sb_i2c, SB_REG_STATE_FLAGS, 2, 2).await
@@ -575,9 +725,12 @@ pub async fn power_task(
                         .await
                 {
                     flags = Some(((f_hi as u16) << 8) | f_lo as u16);
+                } else {
+                    snapshot_ok = false;
                 }
             } else {
                 warn!("sb:state read STATE_FLAGS failed");
+                snapshot_ok = false;
             }
             // Cell voltages (best-effort, non-atomic)
             if let Ok(c) = crate::read_smart_battery_reg_retry(&mut sb_i2c, 0x1F, 2, 2).await {
@@ -600,16 +753,34 @@ pub async fn power_task(
                         }
                         _ => {
                             warn!("sb:state read cell{} failed", i + 1);
+                            snapshot_ok = false;
                         }
                     }
                 }
             } else {
                 warn!("sb:state read CELLS_PRESENT failed");
+                snapshot_ok = false;
             }
 
             // Cache latest state flags and per-cell voltages for the UI battery detail page.
             last_state_flags = flags;
             last_cells_mv = cell_mv;
+            last_chg_pause_cause = pause;
+
+            // Track repeated communication failures so higher layers can surface
+            // a coarse COMM ERR fault when the smart-battery state window is
+            // consistently unavailable.
+            if snapshot_ok {
+                sb_comm_error_streak = 0;
+                sb_comm_error = false;
+            } else {
+                if sb_comm_error_streak < u8::MAX {
+                    sb_comm_error_streak = sb_comm_error_streak.saturating_add(1);
+                }
+                if sb_comm_error_streak >= 2 {
+                    sb_comm_error = true;
+                }
+            }
 
             // Periodic smart-battery state snapshot; keep at debug level to reduce noise.
             debug!(
@@ -1001,6 +1172,7 @@ pub async fn power_task(
             ibat_ma,
             cells_mv: last_cells_mv,
             state_flags: last_state_flags,
+            sb_chg_pause_cause: last_chg_pause_cause,
             sb_temp_status,
             smart_batt_temps: sb_temps,
             adin_temp_c: last_adin_temp_c,
@@ -1009,6 +1181,7 @@ pub async fn power_task(
             out_v_mv,
             out_a_ma,
             out_w_mw,
+            sb_comm_error,
             last_update_ms: now_millis,
         };
     }

@@ -9,6 +9,7 @@ use crate::{
         FrameBuffer, LOGICAL_HEIGHT, LOGICAL_WIDTH, Rgb565, clear_framebuffer, fill_rect_buffer,
         flush_framebuffer, flush_framebuffer_async, put_pixel_buffer, with_framebuffer,
     },
+    power,
 };
 
 // Palette (RGB565)
@@ -596,6 +597,7 @@ pub struct DashboardData {
     pub fan_pct: u8,
     pub uptime_secs: u32,
     pub temp_slot: TempSlot,
+    pub sb_fault: Option<power::SbFaultCode>,
 }
 
 /// Data model for the battery detail page (accessed via Down from dashboard).
@@ -727,6 +729,24 @@ fn fmt_uptime(secs: u32, buf: &mut heapless::String<16>) {
         let h = (secs % 86400) / 3600;
         let m = (secs % 3600) / 60;
         let _ = write!(buf, "{:02}D{:02}:{:02}", d, h, m);
+    }
+}
+
+fn fault_code_text(code: power::SbFaultCode) -> &'static str {
+    match code {
+        power::SbFaultCode::CommErr => "COMM ERR",
+        power::SbFaultCode::StateNA => "STATE N/A",
+        power::SbFaultCode::ReqChgMismatch => "REQ-CHG MISM",
+        power::SbFaultCode::ReqStopMismatch => "REQ-STOP MISM",
+        power::SbFaultCode::TempLow => "TEMP LOW",
+        power::SbFaultCode::TempHotChg => "TEMP HOT CHG",
+        power::SbFaultCode::TempHotDsg => "TEMP HOT DSG",
+        power::SbFaultCode::Imbalance => "IMBALANCE",
+        power::SbFaultCode::OvUvOc => "OV/UV/OC",
+        power::SbFaultCode::AdapterMiss => "ADAPTER MISS",
+        power::SbFaultCode::HoldOff => "HOLD-OFF",
+        power::SbFaultCode::FaultBq => "FAULT BQ",
+        power::SbFaultCode::FaultSc => "FAULT SC",
     }
 }
 
@@ -954,15 +974,22 @@ where
         }
 
         let y3 = MARGIN_TB + 3 * LINE_H;
-        draw_aux_line(
-            fb,
-            y3,
-            model.temp_slot,
-            model.bat_temp_c,
-            model.charger_temp_c,
-            model.ups_temp_c,
-            model.fan_pct,
-        );
+        if let Some(code) = model.sb_fault {
+            let x = cell_to_x(0);
+            let x = draw_text(fb, x, y3, "FAULT:", YELLOW);
+            let code_text = fault_code_text(code);
+            let _ = draw_text(fb, x + CELL_W, y3, code_text, RED);
+        } else {
+            draw_aux_line(
+                fb,
+                y3,
+                model.temp_slot,
+                model.bat_temp_c,
+                model.charger_temp_c,
+                model.ups_temp_c,
+                model.fan_pct,
+            );
+        }
     });
     flush_framebuffer(spi, cs, dc)
 }
@@ -1025,15 +1052,22 @@ where
         }
 
         let y3 = MARGIN_TB + 3 * LINE_H;
-        draw_aux_line(
-            fb,
-            y3,
-            model.temp_slot,
-            model.bat_temp_c,
-            model.charger_temp_c,
-            model.ups_temp_c,
-            model.fan_pct,
-        );
+        if let Some(code) = model.sb_fault {
+            let x = cell_to_x(0);
+            let x = draw_text(fb, x, y3, "FAULT:", YELLOW);
+            let code_text = fault_code_text(code);
+            let _ = draw_text(fb, x + CELL_W, y3, code_text, RED);
+        } else {
+            draw_aux_line(
+                fb,
+                y3,
+                model.temp_slot,
+                model.bat_temp_c,
+                model.charger_temp_c,
+                model.ups_temp_c,
+                model.fan_pct,
+            );
+        }
     });
     flush_framebuffer_async(spi, cs, dc).await
 }
