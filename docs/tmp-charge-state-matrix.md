@@ -9,12 +9,14 @@
 
 - **Host command (ESP32 → STM32)**
   - `CHG_CONFIG` (0x31, on STM32, written by ESP32):
-    - `AUTO` (bit0): always `0` in UPS120; all decisions are host‑driven.
-    - `MANUAL_ENABLE` (bit1): `1` = host *requests* charging, `0` = host *requests stop*.
+    - `AUTO` (bit0): always `0` in UPS120；关闭 STM32 固件内建的自动充电算法。
+    - `MANUAL_ENABLE` (bit1): 作为“由 I2C 主机控制充电通道”的使能位：
+      - `1` = 智能电池不使用 STM32 固件自带的充电逻辑，改由主机通过 I2C 控制是否允许充电；
+      - `0` = 充电通道由 STM32 自身策略控制（在 UPS120 中通常保持禁止）。
   - ESP32 snapshot field: `PowerState.chg_config` (cached last written value).
   - Derived host command bit in UPS main:
     - `host_manual = (chg_config & SB_CFG_BIT_MANUAL) != 0`
-    - `host_req = Charge` if `host_manual == true`; `Stop` otherwise.
+    - 在 UPS120 中，我们**约定** `host_manual == true` 表示“主机当前允许充电通道按 UPS 侧策略开启”，`false` 表示“主机禁止充电通道开启”。该位本身**不代表**“当前正在充电”，实际是否充电仍由 STM32 上报的 `CHARGING/CHG_PAUSED/FULL` 判定。
 
 - **Actual smart‑battery state (STM32 → ESP32)**
   - `STATE_FLAGS` (0x20, 16‑bit, periodic snapshot from STM32):
@@ -76,17 +78,17 @@ Planned UI fields (for later implementation):
 - **Battery short tag** in dashboard third line: `CHG / IDLE / DSG / REQ-CHG / REQ-STOP / ERR`
 - Optional **detail text** (e.g. in batt detail screen or second line) can show reason.
 
-### Group A — Host requests *charging* (`host_manual = 1`)
+### Group A — Host allows *host‑controlled charging* (`host_manual = 1`)
 
 | Case | Host cmd (`MANUAL`) | STM32 `STATE_FLAGS` (AC / CHG / PAUSE / FULL / FAULT*) | Typical CM / temp cause                           | IBAT sign (typical) | State semantics                                         | UI top mode (proposal)       | Battery tag (proposal) | Notes |
 |------|---------------------|---------------------------------------------------------|---------------------------------------------------|---------------------|---------------------------------------------------------|--------------------------------|------------------------|-------|
-| A1   | 1 (request charge)  | `AC=1, CHG=1, PAUSE=0, FULL=0, FAULT=0`                | `CM=0`, TEMP_STATUS clear                         | `IBAT > 0`          | 正常充电会话进行中；充电请求已被 STM32 接受并执行。     | `MODE: CHARGE`                | `CHG`                 | “健康充电”基线状态。 |
+| A1   | 1 (host allows)     | `AC=1, CHG=1, PAUSE=0, FULL=0, FAULT=0`                | `CM=0`, TEMP_STATUS clear                         | `IBAT > 0`          | 正常充电会话进行中；主机允许充电，STM32 报告正在充电。 | `MODE: CHARGE`                | `CHG`                 | “健康充电”基线状态。 |
 | A2   | 1                   | `AC=1, CHG=1, PAUSE=1, FULL=0, FAULT=0`                | `CM.PACK_TEMP / CHG_TEMP / IMBALANCE / OVUV_OC`   | ≈0 / 小电流         | 适配器在，主机请求充电，**会话存在但处于暂停**。        | `MODE: CHARGE (PAUSE)` or `MODE: CHARGE` + pause icon | `CHG` or `CHG*`       | 不算“请求/实际不匹配”，STM32 报告仍处于充电状态机中。 |
 | A3   | 1                   | `AC=1, CHG=1, PAUSE=0 or 1, FULL=1, FAULT=0`           | 通常 `CM.EOC_FULL=1`                              | `IBAT` 小正值或≈0    | 已达到 FULL，仍处于 CV/均衡阶段，充电通道逻辑上打开。   | `MODE: CHARGE (FULL)`         | `CHG`                 | FULL 但 CHG=1：优先当作“充电中但已满/维护阶段”。 |
-| A4   | 1                   | `AC=1, CHG=0, PAUSE=0, FULL=1, FAULT=0`                | 常见：`CM.EOC_FULL=1`                              | `IBAT` ≈0           | 主机仍保持 MANUAL=1，但 STM32 报告“已满且不再充电”。   | `MODE: REQUEST CHARGE (FULL)` | `REQ-CHG`             | **请求≠实际**（请求充电但不再流动）；UI 强调“已满”。 |
-| A5   | 1                   | `AC=0, CHG=0, PAUSE=0, FULL=0, FAULT=0`                | `CM.ADAPTER_MISS=1`                               | `IBAT` ≤0           | 主机请求充电，但 STM32 报告“适配器缺失/离线”。         | `MODE: REQUEST CHARGE (NO AC)`| `REQ-CHG`             | **请求≠实际**，典型：AC 拔掉但 ESP32 尚未撤销请求。 |
-| A6   | 1                   | `AC=1, CHG=0, PAUSE=0, FULL=0, FAULT≠0`                | `CM.OVUV_OC` 或 FAULT_BQ/FAULT_SC 置位            | `IBAT` ≤0 或≈0      | 主机请求充电，但 STM32 因故障/保护而完全停止充电。     | `MODE: REQUEST CHARGE (FAULT)`| `REQ-CHG` or `ERR`    | **请求≠实际**，UI 应突出安全故障，而非简单“未充电”。 |
-| A7   | 1                   | `AC=1, CHG=0, PAUSE=0, FULL=0, FAULT=0`                | `CM=0`，无 FULL，可能为短暂过渡/实现缺陷           | `IBAT` 任意         | 主机请求充电，但 STM32 既不充电也不报告 FULL/暂停。    | `MODE: REQUEST CHARGE (?)`    | `REQ-CHG` + `!`       | 视为异常/调试态，应在日志中重点关注。 |
+| A4   | 1                   | `AC=1, CHG=0, PAUSE=0, FULL=1, FAULT=0`                | 常见：`CM.EOC_FULL=1`                              | `IBAT` ≈0           | 主机仍保持 MANUAL=1（允许充电通道），但 STM32 报告“已满且不再充电”。   | `MODE: REQUEST CHARGE (FULL)` | `REQ-CHG`             | **允许≠实际**（主机仍允许，但电池侧已满）；UI 强调“已满”。 |
+| A5   | 1                   | `AC=0, CHG=0, PAUSE=0, FULL=0, FAULT=0`                | `CM.ADAPTER_MISS=1`                               | `IBAT` ≤0           | 主机允许充电，但 STM32 报告“适配器缺失/离线”。         | `MODE: REQUEST CHARGE (NO AC)`| `REQ-CHG`             | **允许≠实际**，典型：AC 拔掉但 ESP32 尚未撤销允许位。 |
+| A6   | 1                   | `AC=1, CHG=0, PAUSE=0, FULL=0, FAULT≠0`                | `CM.OVUV_OC` 或 FAULT_BQ/FAULT_SC 置位            | `IBAT` ≤0 或≈0      | 主机允许充电，但 STM32 因故障/保护而完全停止充电。     | `MODE: REQUEST CHARGE (FAULT)`| `REQ-CHG` or `ERR`    | **允许≠实际**，UI 应突出安全故障，而非简单“未充电”。 |
+| A7   | 1                   | `AC=1, CHG=0, PAUSE=0, FULL=0, FAULT=0`                | `CM=0`，无 FULL，可能为短暂过渡/实现缺陷           | `IBAT` 任意         | 主机允许充电，但 STM32 既不充电也不报告 FULL/暂停。    | `MODE: REQUEST CHARGE (?)`    | `REQ-CHG` + `!`       | 视为异常/调试态，应在日志中重点关注。 |
 
 > **“请求充电状态”定义**：所有 `host_manual = 1` 且 `CHG = 0` 的组合（A4/A5/A6/A7）。  
 > UI 顶部可统一采用 `MODE: REQUEST CHARGE`，第三行用 `REQ-CHG`，并在细节中根据 FULL / AC / FAULT / CM 原因区分。
@@ -120,10 +122,10 @@ Planned UI fields (for later implementation):
 1. “是否在充电” 的判定：
    - 首选 STM32 `STATE_FLAGS.CHARGING` / `CHG_PAUSED` / `FULL`，**不再使用 IBAT 阈值**。
 2. “请求状态” 的判定：
-   - 使用 ESP32 已写入的 `CHG_CONFIG.MANUAL_ENABLE` 位（`host_manual`）：
-     - `1` → “请求充电”
-     - `0` → “请求停止充电”
-3. **正常状态**：
+   - 使用 ESP32 已写入的 `CHG_CONFIG.MANUAL_ENABLE` 位（`host_manual`）作为“是否允许充电通道开启”的主机侧布尔信号（UPS120 约定）：
+     - `1` → “主机允许手动充电通道开启”（若 AC/温度等条件满足，策略可打开充电）；
+     - `0` → “主机禁止手动充电通道开启”。
+3. **正常状态**（主机允许/禁止 与 STM32 实际状态一致）：
    - `host_manual == 1 && CHG == 1` → “充电中”（A1/A2/A3）。
    - `host_manual == 0 && CHG == 0` → “未充电”（B1/B2/B3）。
 4. **请求 / 实际不匹配状态**：
@@ -133,4 +135,3 @@ Planned UI fields (for later implementation):
    - `state_flags == None` → “未知实际状态”，UI 只显示“请求 + 通信错误”，禁止任何基于电流的推断。
 
 这一矩阵可以作为后续修改 `PowerState`、UI 层模式枚举与文案的基础，实现完全“由 STM32 报告真实状态 + 由 ESP32 报告请求状态”的 UI。
-

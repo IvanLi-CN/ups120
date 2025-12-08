@@ -175,9 +175,9 @@
 - `LowBatt` 触发规则：
   1. 先按上述规则判定基础模式为 `Ready`；
   2. 若此时任意一节电芯电压 `< 3.2V`，进入“电量低流程”；
-  3. 在电量低流程中：
-     - 若 `ac_present` / `vin_present = true`：ESP32 不进入 `LowBatt`，而是直接切换到 `Charge` 并按充电策略尝试启动充电；
-     - 若 `ac_present` / `vin_present = false`：ESP32 才将 MODE 切换为 `LowBatt`，表示“电池很想充但没有 AC 可用”，UI 以 `MODE: LOWBATT` + SoC 变红提示。
+  3. 在电量低流程中（`ac_present` 由 TPS2490 PG + INA226 VIN 判定，详见 `charging_policy.md`）：
+     - 若 `ac_present = true`：ESP32 不进入 `LowBatt`，而是直接切换到 `Charge` 并按充电策略尝试启动充电；
+     - 若 `ac_present = false`：ESP32 才将 MODE 切换为 `LowBatt`，表示“电池很想充但没有 AC 可用”，UI 以 `MODE: LOWBATT` + SoC 变红提示。
 
 ### 6.2 四行布局（示意）
 
@@ -281,8 +281,8 @@
   - `COMM ERR`：连续读取 `STATE_FLAGS` / `CHG_PAUSE_CAUSE` / 温度或电压窗口失败，或 STM32 不响应。
   - `STATE N/A`：能通信但始终读不到有效 `STATE_FLAGS`，视为状态快照不可用。
 - 请求 / 实际不匹配（视为智能电池故障）
-  - `REQ-CHG MISM`：ESP32 将 `MANUAL_ENABLE` 置 1（请求充电），STM32 却长期报告 `CHARGING=0` 且既非 `FULL`、也无暂停/故障原因可解释。
-  - `REQ-STOP MISM`：ESP32 将 `MANUAL_ENABLE` 清 0（请求停止充电），STM32 仍报告 `CHARGING=1`。
+  - `REQ-CHG MISM`：ESP32 将 `MANUAL_ENABLE` 置 1（启用“由主机控制的充电通道”，UPS120 中表示主机当前允许充电），STM32 却长期报告 `CHARGING=0` 且既非 `FULL`、也无暂停/故障原因可解释。
+  - `REQ-STOP MISM`：ESP32 将 `MANUAL_ENABLE` 清 0（禁止主机侧充电通道开启），STM32 仍报告 `CHARGING=1`。
 - 温度相关故障（来自 `TEMP_STATUS` 与 CHG_PAUSE_CAUSE）
   - `TEMP LOW`：电池温度过低，`TEMP_STATUS.temp_low = 1`。
   - `TEMP HOT CHG`：充电路径过热，`TEMP_STATUS.temp_high_chg = 1`。

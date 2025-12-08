@@ -21,8 +21,17 @@
 UPS 放电 / 输出稳压策略仅依赖下列信号与状态：
 
 1. **适配器与输入电源**
-   - `IN_PG`：由 TPS2490 `PG` 汇入 TCA6408A `P0`，经 `firmware/ups-main/src/io_expander.rs` 读取为布尔量。  
-   - 在 `power_task` 中映射为 `vin_present` 和时间戳 `vin_state_last_change_ms`，与 `charging_policy.md` 共用。
+   - `IN_PG`：由 TPS2490 `PG` 汇入 TCA6408A `P0`，经 `firmware/ups-main/src/io_expander.rs` 读取为布尔量 `in_pg_raw`（**高电平 = Power Good，有效**）。  
+   - INA226：与 TCA6408A 共享 I²C 总线，测量 UPS 外部输入电压 `vin_meas_mv`（mV）。  
+   - 在 `power_task` 中组合 `in_pg_raw` 与 `vin_meas_mv` 推导出 AC GOOD：  
+
+     ```rust
+     let pg_good = in_pg_raw && !in_pg_read_failed;
+     let vin_ok = vin_meas_mv.map(|v| v > 11_500).unwrap_or(false);
+     let ac_present = pg_good && vin_ok;
+     ```
+
+     同时维护 `ac_state_last_change_ms` 与 `ac_stable`（10 s 窗口），与 `charging_policy.md` 共用。
 
 2. **电池状态（经 STM32 智能电池板）**
    - 包电压、电流：`PowerState.vbat_mv`、`PowerState.ibat_ma`（由 `read_smart_battery_vbat_mv` / `read_smart_battery_ibat_ma` 得到）。  
@@ -162,7 +171,7 @@ UPS 主控只有在下列条件全部满足时，才可以从 **OUT_DISABLED** �
 放电 / 输出策略与充电策略的关系如下：
 
 1. **AC 掉电**
-   - 充电策略：一旦 `vin_present=false`，必须立即清除 `CHG_CONFIG.MANUAL_ENABLE`，停止充电（见 `charging_policy.md`）。  
+   - 充电策略：一旦 `ac_present=false`，必须立即清除 `CHG_CONFIG.MANUAL_ENABLE`，停止充电（见 `charging_policy.md`）。  
    - 放电策略：若电池与温度条件允许，OUT **应继续维持由电池供电的稳压输出**，不因 AC 掉电自动关闭；只有当电池/温度/故障命中第 4 节关闭条件时才允许关断 OUT。特定异常场景下是否需要额外切断 OUT，由后续“系统能量流策略”进一步定义。
 
 2. **AC 恢复与抖动**
@@ -175,7 +184,7 @@ UPS 主控只有在下列条件全部满足时，才可以从 **OUT_DISABLED** �
 ## 7. 实现位置与建议
 
 - 实现主体：`firmware/ups-main/src/power.rs::power_task`。  
-  - 在现有 `vin_present`、`vbat_mv`、`smart_batt_temps`、`adin_temp_c` 刷新逻辑基础上增加：  
+  - 在现有 `ac_present/ac_stable`、`vbat_mv`、`smart_batt_temps`、`adin_temp_c` 刷新逻辑基础上增加：  
     - 状态机变量（例如 `out_enabled: bool`）；  
     - 对第 4/5 节条件的检查与转移；  
     - 与 `io_expander::Tca6408a` 和 `sc8815::SC8815` 的控制调用。
