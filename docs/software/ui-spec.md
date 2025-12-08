@@ -164,6 +164,7 @@
 #### 模式语义与判定规则
 
 - 所有 `MODE` 状态均由 UPS 主控 ESP32 决策；STM32 智能电池板只提供测量数据（分节电压/电流/温度、`STATE_FLAGS`、`CHG_PAUSE_CAUSE` 等）和一致性校验，不直接驱动 UI 模式切换。
+- AC 状态来源固定为 `PowerState.ac_present / ac_stable / vin_meas_mv`（由 TPS2490 PG + INA226 组合，见 `charging_policy.md`），UI 不使用 STM32 `STATE_FLAGS.AC_PRESENT`。
 - ESP32 在电源任务中基于自身维护的 `PowerState`（AC/OUT 状态、单体/包电压、温度等）以及内部 `out_enabled`、充放电策略状态裁决 `mode` 字段，并将该字段作为唯一权威的仪表盘模式喂给 UI。
 
 - 四种工作模式语义：

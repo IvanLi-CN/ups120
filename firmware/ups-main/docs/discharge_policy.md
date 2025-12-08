@@ -21,17 +21,9 @@
 UPS 放电 / 输出稳压策略仅依赖下列信号与状态：
 
 1. **适配器与输入电源**
-   - `IN_PG`：由 TPS2490 `PG` 汇入 TCA6408A `P0`，经 `firmware/ups-main/src/io_expander.rs` 读取为布尔量 `in_pg_raw`（**高电平 = Power Good，有效**）。  
-   - INA226：与 TCA6408A 共享 I²C 总线，测量 UPS 外部输入电压 `vin_meas_mv`（mV）。  
-   - 在 `power_task` 中组合 `in_pg_raw` 与 `vin_meas_mv` 推导出 AC GOOD：  
-
-     ```rust
-     let pg_good = in_pg_raw && !in_pg_read_failed;
-     let vin_ok = vin_meas_mv.map(|v| v > 11_500).unwrap_or(false);
-     let ac_present = pg_good && vin_ok;
-     ```
-
-     同时维护 `ac_state_last_change_ms` 与 `ac_stable`（10 s 窗口），与 `charging_policy.md` 共用。
+   - PG 原始层：TPS2490 `PG`（开漏，依据 MOSFET `VDS` / 状态机判定功率路径是否良好）→ `IN_PG` 网络 → TCA6408A `P0` → `in_pg_raw`。它只表示“输入功率路径良好/未受保护”，**不直接等价于“AC 存在”**。  
+   - 电压在线层：INA226 与 TCA6408A 共享 I²C，测得 `vin_meas_mv`（mV）；推荐布尔 `vin_online = vin_meas_mv > 11.5 V`（`UPS_VBUS_AC_ONLINE_MV`）。  
+   - 综合 AC GOOD：`power_task` 将 `pg_asserted`（对 `in_pg_raw` 语义化后的布尔）与 `vin_online` 组合出 `ac_present`，并施加 10 s 窗口得到 `ac_stable`。**放电策略只消费 `PowerState.ac_present / ac_stable / vin_meas_mv`，不直接使用原始 IN_PG。** 详细定义见 `charging_policy.md`。
 
 2. **电池状态（经 STM32 智能电池板）**
    - 包电压、电流：`PowerState.vbat_mv`、`PowerState.ibat_ma`（由 `read_smart_battery_vbat_mv` / `read_smart_battery_ibat_ma` 得到）。  

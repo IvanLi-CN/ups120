@@ -16,33 +16,41 @@
 
 ## 2. AC 状态检测来源（唯一可信输入）
 
-AC GOOD 由 **TPS2490 PG + INA226 外部输入电压** 组合判定：
+AC GOOD = **TPS2490 PG（功率路径良好） + INA226 VIN（电压在线）** 的组合，分为三层抽象：
 
-- 硬件连接：
-  - TPS2490 `PG` → TCA6408A `P0` → `IN_PG` 网络（开漏，**高电平 = Power Good**）；
-  - INA226 挂在与 TCA6408A 相同的 I²C 总线上，测量 UPS 外部输入总线电压。
-- 固件中的中间量定义：
-  - `in_pg_raw: bool`：由 `read_in_pg()` 读取的原始 PG 电平；
-    - `in_pg_raw = true`  → 线为高电平（PG 开路被上拉） = **PG Good**（输入路径导通、MOSFET VDS 足够小且无故障，未处于限流/保护）；  
-    - `in_pg_raw = false` → 线被拉低 = **Not Good**（启动中 / 关断 / UVLO / 过流/过功率限流等）。
-  - `pg_good = in_pg_raw && !in_pg_read_failed`：TPS2490 视角下输入路径良好；
-  - `vin_meas_mv: Option<u32>`：INA226 测得的 UPS 外部输入电压（以 mV 表示）；
-  - `ac_present` / `AC GOOD` 定义：
+1) **PG 原始信号层（开漏，只表示功率路径好坏）**
 
-    ```rust
-    let pg_good = in_pg_raw && !in_pg_read_failed;
-    let vin_ok = vin_meas_mv.map(|v| v > 11_500).unwrap_or(false);
-    let ac_present = pg_good && vin_ok;
-    ```
+- 连接：TPS2490 `PG` → `IN_PG` 网络 → TCA6408A `P0` → `read_in_pg()`。
+- 物理语义：PG 由 TPS2490 根据外部功率 MOSFET 的 `VDS`、启动状态机和保护状态决定；导通且无故障时释放为高，被上拉后读到高电平；启动/UVLO/限流/保护/EN 关闭时拉低。
+- 变量：`in_pg_raw: bool`（原始电平），建议语义化布尔命名为 `pg_asserted`（保留板级极性后的“输入路径良好”）。
 
-    其中 11.5 V 阈值由 `UPS_VBUS_AC_ONLINE_MV` 常量给出。
+2) **电压在线层（仅看母线电压是否达标）**
 
-- 刷新策略：
-  - `power::power_task` 每 500 ms：
-    - 读取 `IN_PG`，更新 `in_pg_raw`；  
-    - 通过 INA226 读取总线电压，更新 `vin_meas_mv`；  
-    - 组合出新的 `ac_present`，并在 AC GOOD 边沿上更新 `ac_stable` 窗口（见下一节）。
-  - 风扇控制器与 UI 只消费 `PowerState.ac_present / ac_stable`，不直接使用原始 PG。
+- 连接：INA226 与 TCA6408A 共享 I²C，总线电压读到 `vin_meas_mv: Option<u32>`。
+- 变量：推荐布尔 `vin_online = vin_meas_mv.is_some() && vin_meas_mv > UPS_VBUS_AC_ONLINE_MV (11.5 V)`。
+- 语义：只说明输入母线电压超过在线阈值，不保证 PG 已经拉高或功率路径完全导通。
+
+3) **综合 AC GOOD 层（策略唯一入口）**
+
+- 组合：`ac_present = pg_asserted && vin_online`；时间过滤：`ac_stable = ac_present` 连续为 true 达到 `AC_STABLE_MS = 10_000 ms`。
+- 刷新：`power::power_task` 每 500 ms 采样 PG + VIN，维护 `ac_present` / `ac_stable`，其结果写入 `PowerState`，供 UI、充电/放电/风扇策略统一消费。
+
+### 信号语义对齐表（命名建议）
+
+| Name | Source | True 含义 | False 含义 | Usage |
+| --- | --- | --- | --- | --- |
+| `in_pg_raw` | TCA6408A `P0` 读取的 `IN_PG` 原始电平 | 线上拉为高：TPS2490 认为输入功率路径良好、MOSFET `VDS` 足够小、未处于限流/保护/UVLO | 线被拉低：启动中、EN 关闭、UVLO、过流/过功率限流或保护，**不直接表示 AC 电压缺失** | 诊断与组合中间量 |
+| `pg_asserted`（建议） | 对 `in_pg_raw` 结合板级极性后的语义化布尔 | 输入功率路径良好（Power Path Good） | 输入路径不良好或受保护 | 参与 AC GOOD 组合 |
+| `vin_meas_mv` / `vin_online`（建议） | INA226 读数 / `vin_meas_mv > 11.5 V` | 输入母线电压在线且达标 | 电压低于阈值或测量缺失 | 参与 AC GOOD 组合、日志 |
+| `ac_present` | `pg_asserted && vin_online` | PG 断言且 VIN 超过阈值 | 任一条件不满足 | 充/放电策略、UI、日志唯一 AC 状态 |
+| `ac_stable` | `ac_present` 连续 true ≥ `AC_STABLE_MS` | AC GOOD 且已稳定 | AC 缺失或仍在稳定窗口内 | 充电策略 10 s 过滤、UI 状态 |
+
+中文推荐用词：  
+- PG 层：**“PG 断言 / 输入路径良好 (Power Path Good)”**；  
+- 电压层：**“输入母线电压在线 / VIN 超过在线阈值”**；  
+- 综合层：**“AC GOOD / 适配器存在 (ac_present)”**，稳定后称 **“AC 稳定 (ac_stable)”**。  
+
+> 约束：风扇控制器、UI、温控等 **只消费 `PowerState.ac_present / ac_stable / vin_meas_mv`**，不得直接把 `IN_PG` 电平当作“AC 是否存在”的判据。
 
 > 约束：**UPS 充电策略不得以任何形式使用 STM32 智能电池的 `AC_PRESENT` 位或其它 AC 相关状态位作为判据。**  
 > 这些位只允许作为诊断日志字段（例如打印 `stm_ac` 供对比），不参与任何决策。

@@ -146,9 +146,9 @@ I2C0 通过 `I2cBusMutex = Mutex<NoopRawMutex, I2c<'static, Async>>` 暴露为�
   - 频率：500 ms 级别（随 `power_task` 循环和温度采样调用）。
 
 - `io_expander::Tca6408a::read_in_pg` / `read_alert`  
-  - 用途：读取适配器 PG 状态与告警引脚。  
+  - 用途：读取适配器 PG 原始电平（开漏，表示功率路径是否良好）与告警引脚。  
   - 调用者：  
-    - `power::power_task` 每轮 500 ms 读取 IN_PG，作为 TPS2490 Power Good 原始电平（高=良好）参与 AC GOOD 判定与稳定窗口计算。  
+    - `power::power_task` 每轮 500 ms 采样 `in_pg_raw`（原始 PG 电平），再与 INA226 的 `vin_meas_mv` 组合，集中在任务内部生成 `PowerState.ac_present / ac_stable / vin_meas_mv`；其它任务只读这些聚合字段，不直接使用原始 PG。  
     - `read_alert` 当前仅作辅助 / 预留（在部分路径中调用）。
 
 ### SC8815 升压 / 充电器（`log_sc8815_temperature` + `sc8815` crate）

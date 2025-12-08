@@ -30,6 +30,7 @@
     - `ACTIVE_SC`   (bit8)
     - `ACTIVE_BQ`   (bit9)
   - UPS main snapshot field: `PowerState.state_flags : Option<u16>`.
+  - 说明：`STATE_FLAGS.AC_PRESENT` 仅作诊断对比；UPS 对“AC GOOD”的唯一裁决来自 ESP32 的 `ac_present / ac_stable`（TPS2490 PG + INA226），详见 `firmware/ups-main/docs/charging_policy.md`。
 
 - **Pause / cause / temperature**
   - `CHG_PAUSE_CAUSE` (0x32, RO, STM32):
