@@ -66,6 +66,12 @@ pub const SB_REG_STATE_FLAGS: u8 = 0x20;
 /// See `TempFaultFlags` / `decode_temp_status` for the decoded view.
 pub const SB_REG_TEMP_STATUS: u8 = 0x23;
 pub const SB_STATE_FLAG_AC_PRESENT: u16 = 0x0001;
+// Mirrors of STM32 smart-battery charging/session bits used for UI mode
+// derivation and fault decoding (UI only; AC/charge policy由 ESP32 侧
+// 的 INA226+TPS2490 PG 组合判定，详见 charging_policy.md)。
+pub const SB_STATE_FLAG_CHARGING: u16 = 1 << 1;
+pub const SB_STATE_FLAG_CHG_PAUSED: u16 = 1 << 2;
+pub const SB_STATE_FLAG_FULL: u16 = 1 << 4;
 // Mirror of STM32 smart-battery state_bits::BALANCING; used for UI overlay.
 pub const SB_STATE_FLAG_BALANCING: u16 = 1 << 5;
 // Mirrors of smart-battery state_bits::FAULT_BQ / FAULT_SC; used for UPS discharge gating.
@@ -159,6 +165,10 @@ fn compute_dashboard_modes(state: &power::PowerState) -> (ui::DashboardMode, ui:
     }
 
     // Step 1: derive a base mode (Charge / Ready / Discharge).
+    //
+    // 顶部 MODE 由 ESP32 单侧视角决定：是否请求充电、是否认为 AC 存在、是否处于
+    // 温度暂停等。STM32 的 STATE_FLAGS 仅用于第四行故障/提示，不再回退或延迟
+    // 顶部 MODE 的切换。
     let discharge_active = is_discharge_active(state);
     let charge_requested = matches!(state.charge_mode, power::ChargeMode::Manual);
     let charge_current = matches!(state.ibat_ma, Some(i) if i > 50);
@@ -556,7 +566,7 @@ async fn ui_task(
                 } else {
                     ui::SocDisplay::Percent
                 },
-                in_v_mv: 0,
+                in_v_mv: power_snapshot.vin_meas_mv.unwrap_or(0),
                 in_a_ma: 0,
                 in_w_mw: 0,
                 chg_w_mw: 0,
