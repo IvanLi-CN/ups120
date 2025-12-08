@@ -490,6 +490,51 @@ def draw_dashboard(mode: str, temp_slot: str) -> Image.Image:
     return img
 
 
+def draw_dashboard_fault() -> Image.Image:
+    """Dashboard mock with smart-battery fault on row 4."""
+    img, draw, pixels = new_canvas()
+
+    # Row baselines
+    row_y = [TM + i * LINE_H for i in range(4)]
+
+    # Use Discharge layout as base: MODE, IN, OUT all正常，只是第 4 行改为故障视图。
+    mode = 'Discharge'
+    mode_color = {'Charge': CYAN, 'Discharge': WHITE, 'Standby': GRAY}[mode]
+    draw_text(pixels, LM, row_y[0], f'MODE: {mode.upper()}', mode_color)
+    soc = fmt_soc(85)
+    right_text(pixels, soc, row_y[0], WHITE)
+
+    # Row 2: IN V/A/W
+    draw_trio_line(
+        pixels,
+        row_y[1],
+        'IN',
+        fmt_voltage(48_000),
+        fmt_current(2_500),
+        fmt_power(120_000),
+    )
+
+    # Row 3: OUT V/A/W
+    draw_trio_line(
+        pixels,
+        row_y[2],
+        'OUT',
+        fmt_voltage(48_000),
+        fmt_current(2_000),
+        fmt_power(100_000),
+    )
+
+    # Row 4: fault view – FAULT: <code>
+    y = row_y[3]
+    x = cell_to_x(0)
+    # FAULT label
+    x = draw_text(pixels, x, y, 'FAULT:', YELLOW)
+    # example fault code (request/actual mismatch)
+    draw_text(pixels, x + CELL_W, y, 'SB REQ-CHG MISM', RED)
+
+    return img
+
+
 def draw_batt_detail(view: str, balancing: bool) -> Image.Image:
     """Battery detail mock (4-row layout, lines 2–3 alternate between voltage / temperature).
 
@@ -576,6 +621,10 @@ def main():
     ):
         img = draw_dashboard(mode, temp_slot)
         save_scaled(img, name)
+
+    # Dashboard fault mock (row 4 fault view)
+    fault_img = draw_dashboard_fault()
+    save_scaled(fault_img, 'dashboard-fault.png')
 
     # Battery detail (new spec: voltage / temperature frames on rows 2–3)
     # 1) Normal voltage frame（无均衡高亮）
