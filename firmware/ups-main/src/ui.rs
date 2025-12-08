@@ -373,6 +373,14 @@ where
 }
 
 // ---------------- Dashboard -----------------
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum DashboardMode {
+    Charge,
+    Ready,
+    Discharge,
+    LowBatt,
+}
+
 #[derive(Clone, Copy)]
 pub enum Mode {
     Standby,
@@ -567,7 +575,11 @@ pub enum CellsFrame {
 }
 
 pub struct DashboardData {
-    pub mode: Mode,
+    /// High-level four-state dashboard mode used for the top line.
+    pub dashboard_mode: DashboardMode,
+    /// Battery flow mode used to drive third-line layout (CHG/IDLE/OUT) and
+    /// battery detail short text (CHG/DSG/IDLE).
+    pub batt_mode: Mode,
     pub soc_pct: u8,
     pub vbat_mv: Option<u32>,
     pub soc_display: SocDisplay,
@@ -718,11 +730,12 @@ fn fmt_uptime(secs: u32, buf: &mut heapless::String<16>) {
     }
 }
 
-fn mode_text_and_color(mode: Mode) -> (&'static str, Rgb565) {
+fn dashboard_mode_text_and_color(mode: DashboardMode) -> (&'static str, Rgb565) {
     match mode {
-        Mode::Standby => ("MODE: STANDBY", GRAY),
-        Mode::Charge => ("MODE: CHARGE", CYAN),
-        Mode::Discharge => ("MODE: DISCHARGE", WHITE),
+        DashboardMode::Charge => ("MODE: CHARGE", CYAN),
+        DashboardMode::Ready => ("MODE: READY", GRAY),
+        DashboardMode::Discharge => ("MODE: DISCHARGE", WHITE),
+        DashboardMode::LowBatt => ("MODE: LOWBATT", YELLOW),
     }
 }
 
@@ -907,7 +920,7 @@ where
         let _ = draw_text(fb, soc_x, y0, &soc_text, soc_color);
 
         // Draw mode left, clipped to avoid overlap with right area
-        let (mode_text, mode_color) = mode_text_and_color(model.mode);
+        let (mode_text, mode_color) = dashboard_mode_text_and_color(model.dashboard_mode);
         let max_mode_width = soc_x.saturating_sub(MARGIN_LR);
         let _ = draw_text_clipped(fb, MARGIN_LR, y0, mode_text, mode_color, max_mode_width);
 
@@ -918,7 +931,7 @@ where
         draw_trio_line(fb, y1, "IN", &vs, &as_, &ws);
 
         let y2 = MARGIN_TB + 2 * LINE_H;
-        match model.mode {
+        match model.batt_mode {
             Mode::Charge => {
                 ws.clear();
                 fmt_power(model.chg_w_mw, &mut ws);
@@ -927,7 +940,7 @@ where
             Mode::Standby => {
                 let mut uptime: heapless::String<16> = heapless::String::new();
                 fmt_uptime(model.uptime_secs, &mut uptime);
-                draw_trio_line(fb, y2, "RUN ", &uptime, PLACEHOLDER, PLACEHOLDER);
+                draw_trio_line(fb, y2, "IDLE", &uptime, PLACEHOLDER, PLACEHOLDER);
             }
             Mode::Discharge => {
                 vs.clear();
@@ -978,7 +991,7 @@ where
         let soc_x = LOGICAL_WIDTH - MARGIN_LR - soc_w;
         let _ = draw_text(fb, soc_x, y0, &soc_text, soc_color);
 
-        let (mode_text, mode_color) = mode_text_and_color(model.mode);
+        let (mode_text, mode_color) = dashboard_mode_text_and_color(model.dashboard_mode);
         let max_mode_width = soc_x.saturating_sub(MARGIN_LR);
         let _ = draw_text_clipped(fb, MARGIN_LR, y0, mode_text, mode_color, max_mode_width);
 
@@ -989,7 +1002,7 @@ where
         draw_trio_line(fb, y1, "IN", &vs, &as_, &ws);
 
         let y2 = MARGIN_TB + 2 * LINE_H;
-        match model.mode {
+        match model.batt_mode {
             Mode::Charge => {
                 ws.clear();
                 fmt_power(model.chg_w_mw, &mut ws);
@@ -998,7 +1011,7 @@ where
             Mode::Standby => {
                 let mut uptime: heapless::String<16> = heapless::String::new();
                 fmt_uptime(model.uptime_secs, &mut uptime);
-                draw_trio_line(fb, y2, "RUN ", &uptime, PLACEHOLDER, PLACEHOLDER);
+                draw_trio_line(fb, y2, "IDLE", &uptime, PLACEHOLDER, PLACEHOLDER);
             }
             Mode::Discharge => {
                 vs.clear();
