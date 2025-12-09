@@ -12,7 +12,7 @@
 - 在 AC 存在或掉电时，尽量保持 OUT 总线电压稳定在硬件设定的目标附近（由 SC8815 外部分压与芯片内部调节共同决定，详见 `docs/SC8815_External_Resistor_Configuration.md`），避免对后级负载产生不必要的跌落和毛刺；**目标电压应略低于正常输入电压**，以保证在线模式下不会反向推高输入侧。
 - 在电池电压过低、温度越限或出现故障时，快速且可预测地关闭 SC8815 功率级，保证电池与功率器件安全优先。
 - 将放电 / 输出控制集中在 ESP32 的 `power_task` 内实现，与 `charging_policy.md` 中的充电策略风格一致，避免 STM32 侧逻辑“反客为主”。
-- 为 UI 与日志提供稳定的数据来源：`Mode::Discharge` 时的 `OUT` 三元组（`out_v_mv/out_a_ma/out_w_mw`）与 `UPS` 温度（来自 SC8815 ADIN）。
+- 为 UI 与日志提供稳定的数据来源：放电模式（`Discharge`）时的 `OUT` 三元组（`out_v_mv/out_a_ma/out_w_mw`）与 `UPS` 温度（来自 SC8815 ADIN）。
 
 ---
 
@@ -21,8 +21,9 @@
 UPS 放电 / 输出稳压策略仅依赖下列信号与状态：
 
 1. **适配器与输入电源**
-   - `IN_PG`：由 TPS2490 `PG` 汇入 TCA6408A `P0`，经 `firmware/ups-main/src/io_expander.rs` 读取为布尔量。  
-   - 在 `power_task` 中映射为 `vin_present` 和时间戳 `vin_state_last_change_ms`，与 `charging_policy.md` 共用。
+   - PG 原始层：TPS2490 `PG`（开漏，依据 MOSFET `VDS` / 状态机判定功率路径是否良好）→ `IN_PG` 网络 → TCA6408A `P0` → `in_pg_raw`。它只表示“输入功率路径良好/未受保护”，**不直接等价于“AC 存在”**。  
+   - 电压在线层：INA226 与 TCA6408A 共享 I²C，测得 `vin_meas_mv`（mV）；推荐布尔 `vin_online = vin_meas_mv > 11.5 V`（`UPS_VBUS_AC_ONLINE_MV`）。  
+   - 综合 AC GOOD：`power_task` 将 `pg_asserted`（对 `in_pg_raw` 语义化后的布尔）与 `vin_online` 组合出 `ac_present`，并施加 10 s 窗口得到 `ac_stable`。**放电策略只消费 `PowerState.ac_present / ac_stable / vin_meas_mv`，不直接使用原始 IN_PG。** 详细定义见 `charging_policy.md`。
 
 2. **电池状态（经 STM32 智能电池板）**
    - 包电压、电流：`PowerState.vbat_mv`、`PowerState.ibat_ma`（由 `read_smart_battery_vbat_mv` / `read_smart_battery_ibat_ma` 得到）。  
@@ -59,7 +60,9 @@ UPS 放电 / 输出稳压策略仅依赖下列信号与状态：
      - 调用 `tca.set_sc_pstop(true)` 请求停机；  
      - 视功耗需要，可在停机后调用 `tca.set_sc_ce(false)` 将芯片进入低功耗。  
    - OTG / 放电模式应被关闭或保持在不会向 OUT 提供持续功率的状态（如不置 EN_OTG 或将功率级限流到 0）。  
-   - UI `Mode::Standby` / `Mode::Charge` 下，`OUT` 三元组可以显示为 `--` 或历史快照，但不得误导为“当前仍在放电”。
+   - UI 处于“就绪”（`Ready`）、“充电”（`Charge`）或叠加 `LowBatt` 提示但未放电时，屏幕第三行**不得伪装成仍在放电**：
+     - 第三行应分别按照 `ui-spec.md` 使用 `IDLE <时长>` 或 `CHG <功率>` 布局，`OUT` 三元组可以显示为 `--` 或完全不显示；
+     - 历史 OUT 数值只用于日志或离线诊断，不应在这些模式下误导为“当前仍在放电”。
 
 2. **OUT_ENABLED（输出开启）**
    - 在 UPS 功能启用且无第 4 节所列关闭条件时，这是**默认期望状态**：  
@@ -68,7 +71,7 @@ UPS 放电 / 输出稳压策略仅依赖下列信号与状态：
      - `tca.set_sc_pstop(false)` 允许功率级工作；  
      - 使能 OTG / 放电模式：`sc.set_otg_mode(true)`。  
    - 周期性读取 SC8815 ADC，将 OUT 三元组与 UPS 温度写入 `PowerState`，供 UI 与日志使用。  
-   - UI `Mode::Discharge` 下，第三行 `OUT <V/A/W>` 的数值来自该状态。
+   - UI 处于“放电”（`Discharge`）模式时，第三行 `OUT <V/A/W>` 的数值来自该状态；在 `LowBatt` 但仍在放电的场景下，底层仍视为 OUT_ENABLED，UI 第三行布局与 `Discharge` 相同，仅第一行 MODE 显示为 `LOWBATT`。
 
 > 说明：CE/PSTOP 的具体电平极性与板级反相关系以 `io_expander.rs` 与实际硬件为准；本策略只约束 `set_sc_ce(enable)` / `set_sc_pstop(stop)` 的 **语义**。
 
@@ -139,7 +142,7 @@ UPS 主控只有在下列条件全部满足时，才可以从 **OUT_DISABLED** �
 
 4. **策略允许 UPS 供电**
    - 更上层的模式逻辑认为当前应该由 UPS 输出供电（在线式 UPS 语义下，**只要 UPS 功能启用且系统健康，就认为应由 UPS 输出稳压**）：  
-     - 该逻辑映射为 UI 的 `Mode::Discharge` 或更高层的“UPS 启用”开关；  
+     - 该逻辑最终反映为 UI 处于“放电”（`Discharge`）模式，或在叠加 `LowBatt` 提示但仍在放电时，第一行显示 `MODE: LOWBATT`、第三行仍为 `OUT <V/A/W>`；  
      - 本文件不约束该模式切换的细节，只要求：当判定需要 UPS 稳压输出时，上述安全条件需已满足，才能真正打开 SC8815。
 
 当所有条件满足时，建议按照如下顺序启用输出：
@@ -160,7 +163,7 @@ UPS 主控只有在下列条件全部满足时，才可以从 **OUT_DISABLED** �
 放电 / 输出策略与充电策略的关系如下：
 
 1. **AC 掉电**
-   - 充电策略：一旦 `vin_present=false`，必须立即清除 `CHG_CONFIG.MANUAL_ENABLE`，停止充电（见 `charging_policy.md`）。  
+   - 充电策略：一旦 `ac_present=false`，必须立即清除 `CHG_CONFIG.MANUAL_ENABLE`，停止充电（见 `charging_policy.md`）。  
    - 放电策略：若电池与温度条件允许，OUT **应继续维持由电池供电的稳压输出**，不因 AC 掉电自动关闭；只有当电池/温度/故障命中第 4 节关闭条件时才允许关断 OUT。特定异常场景下是否需要额外切断 OUT，由后续“系统能量流策略”进一步定义。
 
 2. **AC 恢复与抖动**
@@ -173,12 +176,12 @@ UPS 主控只有在下列条件全部满足时，才可以从 **OUT_DISABLED** �
 ## 7. 实现位置与建议
 
 - 实现主体：`firmware/ups-main/src/power.rs::power_task`。  
-  - 在现有 `vin_present`、`vbat_mv`、`smart_batt_temps`、`adin_temp_c` 刷新逻辑基础上增加：  
+  - 在现有 `ac_present/ac_stable`、`vbat_mv`、`smart_batt_temps`、`adin_temp_c` 刷新逻辑基础上增加：  
     - 状态机变量（例如 `out_enabled: bool`）；  
     - 对第 4/5 节条件的检查与转移；  
     - 与 `io_expander::Tca6408a` 和 `sc8815::SC8815` 的控制调用。
 - UI 对接：  
-  - `Mode::Discharge` 的判定应基于 `out_enabled` 和功率流向，以确保屏幕第三行 `OUT` 三元组仅在实际放电时显示；  
+  - 放电模式（`Discharge`）的判定应基于 `out_enabled` 和功率流向，以确保屏幕第三行 `OUT` 三元组仅在实际放电（包括叠加 `LowBatt` 的放电场景）时显示；  
   - `PowerState` 中的 `adin_temp_c` 与未来的 OUT 测量字段作为 UI 的唯一数据来源。
 
 ---

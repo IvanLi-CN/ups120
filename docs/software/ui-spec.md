@@ -139,13 +139,17 @@
   
   ![Dashboard Charge](./assets/dashboard-charge.png)
 
-- 待机（第三行显示自上次放电结束的时长）：
+- 就绪（第三行显示自上次放电结束的时长）：
   
-  ![Dashboard Standby](./assets/dashboard-standby.png)
+  ![Dashboard Ready](./assets/dashboard-standby.png)
+
+- 智能电池故障（第四行切换为故障视图，显示 `FAULT: <code>`）：
+  
+  ![Dashboard Fault](./assets/dashboard-fault.png)
 
 ### 6.1 显示内容（必选）
 
-- 工作模式（文本）：`Standby` / `Charge` / `Discharge`。
+- 工作模式（文本）：`Charge` / `Ready` / `Discharge` / `LowBatt`。
 - 输入电压（V）。
 - 输入电流（A）。
 - 输入功率（W）。
@@ -157,6 +161,25 @@
 - UPS 温度（℃，来自 SC8815 的 ADIN，显示为 `UPS xx℃`）。
 - 风扇转速（%，按逻辑占空比换算）。
 
+#### 模式语义与判定规则
+
+- 所有 `MODE` 状态均由 UPS 主控 ESP32 决策；STM32 智能电池板只提供测量数据（分节电压/电流/温度、`STATE_FLAGS`、`CHG_PAUSE_CAUSE` 等）和一致性校验，不直接驱动 UI 模式切换。
+- AC 状态来源固定为 `PowerState.ac_present / ac_stable / vin_meas_mv`（由 TPS2490 PG + INA226 组合，见 `charging_policy.md`），UI 不使用 STM32 `STATE_FLAGS.AC_PRESENT`。
+- ESP32 在电源任务中基于自身维护的 `PowerState`（AC/OUT 状态、单体/包电压、温度等）以及内部 `out_enabled`、充放电策略状态裁决 `mode` 字段，并将该字段作为唯一权威的仪表盘模式喂给 UI。
+
+- 四种工作模式语义：
+  - `Charge`：检测到 AC 存在且充电策略允许时（`vin_ok_for_charge=true` 且电池/温度安全），进入充电模式；第三行采用 `CHG <功率>` 布局。
+  - `Discharge`：`out_enabled=true` 且功率实际流向负载时（由 UPS 侧 SC8815 的 OUT 测量确认），进入放电模式；第三行采用 `OUT <V/A/W>` 布局。
+  - `Ready`：不充不放（既未处于 Charge 也未处于 Discharge），OUT 功率级可随时开启，电池与系统健康且未触发 LowBatt；第三行采用 `IDLE <时长>` 布局，时长统计自上次放电结束起。
+  - `LowBatt`：在基础模式为 Ready 的前提下，仅用于表示“电量偏低但当前没有 AC 可用”的状态；第三行继续沿用 Ready 或 Discharge 的布局，仅通过第一行 `MODE: LOWBATT` 与 SoC 颜色强调电量低。
+
+- `LowBatt` 触发规则：
+  1. 先按上述规则判定基础模式为 `Ready`；
+  2. 若此时任意一节电芯电压 `< 3.2V`，进入“电量低流程”；
+  3. 在电量低流程中（`ac_present` 由 TPS2490 PG + INA226 VIN 判定，详见 `charging_policy.md`）：
+     - 若 `ac_present = true`：ESP32 不进入 `LowBatt`，而是直接切换到 `Charge` 并按充电策略尝试启动充电；
+     - 若 `ac_present = false`：ESP32 才将 MODE 切换为 `LowBatt`，表示“电池很想充但没有 AC 可用”，UI 以 `MODE: LOWBATT` + SoC 变红提示。
+
 ### 6.2 四行布局（示意）
 
 ```
@@ -165,19 +188,23 @@
 ├──────────────────────────────────────────────────────────────┤
 │ IN  48.0V 2.5A 120W                                        │  ← 行2（输入三元组：标签 4 单元 + 5/4/4 列）
 │ OUT 48.0V 2.0A 100W                                        │  ← 行3（放电：输出三元组同列宽）
-│ BAT    32C   FAN  45%                                      │  ← 行4（温度槽位轮播 + FAN，列宽 4/4/3/4）
+│ BAT    32C   FAN  45%                                      │  ← 行4（温度槽位轮播 + FAN，列宽 4/4/3/4；无故障时）
 └──────────────────────────────────────────────────────────────┘
 ```
 
 说明：
 
-- 行1：左侧 `MODE: <Standby|Charge|Discharge>`；右上角电量区轮播显示 `SoC %` 与电池电压 `xx.xV`。`SoC` 按阈值变色（≤30% `YELLOW`，≤15% `RED`）；显示电压时使用电压专色 `ORANGE`。
+- 行1：左侧 `MODE: <Charge|Ready|Discharge|LowBatt>`；右上角电量区轮播显示 `SoC %` 与电池电压 `xx.xV`。`SoC` 按阈值变色（≤30% `YELLOW`，≤15% `RED`）；显示电压时使用电压专色 `ORANGE`。
 - 行2：输入三元组（V/A/W，专色显示，见 6.4）。
-- 行3：按模式动态显示：
-  - 充电时：显示 `CHG <功率W>`（功率数字用 `GREEN`），其余两列以 `--` 灰显。
-  - 待机时：显示 `IDLE <时长>`，时长格式 `DDdHH:MM`（例如 `01d02:03`），未使用列显示 `--`。
-  - 放电时：显示 `OUT <V/A/W>`，数值来自 SC8815 的测量。
-- 行4：温度/风扇信息：`BAT`（电池）、`UPS`（UPS/SC8815 ADIN）、`FAN`（百分比）。
+- 行3：按模式动态显示（**由 ESP32 主控单向裁决**；STM32 智能电池仅作为测量与一致性校验来源，不参与模式判定）：
+  - 充电（`Charge`）时：显示 `CHG <功率W>`（功率数字用 `GREEN`），其余两列以 `--` 灰显。
+  - 就绪（`Ready`）时：显示 `IDLE <时长>`，时长格式 `DDdHH:MM`（例如 `01d02:03`），未使用列显示 `--`。
+  - 放电（`Discharge`）时：显示 `OUT <V/A/W>`，数值来自 SC8815 的测量。
+  - 电量低（`LowBatt`）时：第三行布局**不因电量低而改变**：
+    - 若当前仍在放电（`out_enabled=true` 且有实际功率输出），第三行继续使用 `OUT <V/A/W>`；
+    - 若当前处于就绪（未放电），第三行继续使用 `IDLE <时长>`。
+    `LowBatt` 仅通过第一行 `MODE: LOWBATT` 和 SoC 变红提示电量低，避免第三行再引入额外文案变化。
+- 行4：温度/风扇信息：`BAT`（电池）、`UPS`（UPS/SC8815 ADIN）、`FAN`（百分比）。当检测到智能电池或充电链路故障时，行4整体切换为“故障视图”，不再显示温度/FAN。
 - 各行基线为 `y = 1 + 行号×12`（0-index），字符上边缘对齐，行间保持 2px 呼吸空间。
 - 行4温度轮播：每帧在 `BAT` 与 `UPS` 之间切换，仅展示一个温度槽位，右侧固定 `FAN` 列；示例固件以 2 秒刷新一次，可按需求缩短至 1 秒；当任一温度不可用时显示 `--` 并继续轮播。
 
@@ -209,22 +236,87 @@
 
 ### 6.4 着色规则（含元素专色）
 
-- `MODE`：`Charge` 用 `CYAN`，`Discharge` 用 `WHITE`，`Standby` 用 `GRAY`。
+- `MODE`：`Charge` 用 `CYAN`，`Discharge` 用 `WHITE`，`Ready` 用 `GRAY`，`LowBatt` 用 `RED`。
 - 元素专色：电压 `ORANGE`、电流 `RED`、功率 `GREEN`（数字部分用专色，单位可留 `WHITE`）。
 - `SoC` 电量：默认 `WHITE`；`≤30%` 用 `YELLOW`，`≤15%` 用 `RED`。
 - 温度：
   - `≥ 45C` 着 `YELLOW`；
   - `≥ 55C` 着 `RED`。
 - 风扇：`≥ 90%` 用 `YELLOW` 提醒高负载。
+- 故障行：前导警告图标与 `FAULT:` 标签使用 `YELLOW`，严重故障（例如 BQ/SC 硬故障或通信错误）对应的故障代码文本使用 `RED`。
 
 ### 6.5 更新频率与去抖
+
+### 6.6 智能电池故障视图（Dashboard 第 4 行）
+
+当存在智能电池相关故障时，仪表盘第 4 行从常规温度/FAN 行切换为“故障视图”，整体布局调整为：
+
+```text
+┌──────────────────────────────────────────────────────────────┐
+│ MODE: DISCHARGE                                  85%        │
+├──────────────────────────────────────────────────────────────┤
+│ IN  48.0V 2.5A 120W                                        │
+│ OUT 48.0V 2.0A 100W                                        │
+│ FAULT: REQ-CHG MISM                                        │  ← 行4 故障视图（故障标签 + 故障代码）
+└──────────────────────────────────────────────────────────────┘
+```
+
+#### 6.6.1 警告图标示意
+
+- 为简化字库要求与实现，故障行前不额外绘制独立图标；
+- 第 4 行从第 0 列直接输出 `FAULT:` 标签和故障代码，通过颜色区分严重程度。
+
+渲染示意（字符级）：
+
+```text
+│ FAULT: COMM ERR                                            │
+   ↑
+   └─ 固定标签
+```
+
+#### 6.6.2 故障代码取值与含义
+
+`FAULT:` 之后显示一个短代码（最长约 12 字符），用来归一化各种智能电池/充电异常。建议集合如下（为避免越界，不再加 `SB ` 前缀，所有代码均默认为“智能电池相关”）：
+
+- 通信 / 状态基础故障
+  - `COMM ERR`：连续读取 `STATE_FLAGS` / `CHG_PAUSE_CAUSE` / 温度或电压窗口失败，或 STM32 不响应。
+  - `STATE N/A`：能通信但始终读不到有效 `STATE_FLAGS`，视为状态快照不可用。
+- 请求 / 实际不匹配（视为智能电池故障）
+  - `REQ-CHG MISM`：ESP32 将 `MANUAL_ENABLE` 置 1（启用“由主机控制的充电通道”，UPS120 中表示主机当前允许充电），STM32 却长期报告 `CHARGING=0` 且既非 `FULL`、也无暂停/故障原因可解释。
+  - `REQ-STOP MISM`：ESP32 将 `MANUAL_ENABLE` 清 0（禁止主机侧充电通道开启），STM32 仍报告 `CHARGING=1`。
+- 温度相关故障（来自 `TEMP_STATUS` 与 CHG_PAUSE_CAUSE）
+  - `TEMP LOW`：电池温度过低，`TEMP_STATUS.temp_low = 1`。
+  - `TEMP HOT CHG`：充电路径过热，`TEMP_STATUS.temp_high_chg = 1`。
+  - `TEMP HOT DSG`：放电路径过热，`TEMP_STATUS.temp_high_dsg = 1`。
+- 电压/电流 / 适配器 / 失衡相关故障（来自 `CHG_PAUSE_CAUSE`）
+  - `IMBALANCE`：`CHG_PAUSE_CAUSE.IMBALANCE = 1`，单体压差超过阈值，进入“短充+长均衡”策略。
+  - `OV/UV/OC`：`CHG_PAUSE_CAUSE.OVUV_OC = 1`，存在过压/欠压/过流保护。
+  - `ADAPTER MISS`：`CHG_PAUSE_CAUSE.ADAPTER_MISS = 1`，尤其在主控请求充电时应优先显示。
+  - `HOLD-OFF`：`CHG_PAUSE_CAUSE.HOLD_OFF = 1`，当前处于重试冷却窗口。
+- 芯片级故障（来自 `STATE_FLAGS` FAULT 位）
+  - `FAULT BQ`：`STATE_FLAGS.FAULT_BQ = 1`，BQ76920 报告致命保护故障。
+  - `FAULT SC`：`STATE_FLAGS.FAULT_SC = 1`，SC8815 报告致命故障或被 STM32 标记为不可用。
+
+#### 6.6.3 故障优先级与回退
+
+- 同一时刻可能存在多个故障源；仪表盘第 4 行只显示优先级最高的一条：
+  1. 通信/状态故障：`COMM ERR`、`STATE N/A`
+  2. 请求/实际不匹配：`REQ-CHG MISM`、`REQ-STOP MISM`
+  3. 芯片级故障：`FAULT BQ`、`FAULT SC`
+  4. 温度故障：`TEMP LOW / HOT CHG / HOT DSG`
+  5. 电压/电流/适配器/失衡：`OV/UV/OC`、`ADAPTER MISS`、`IMBALANCE`、`HOLD-OFF`
+- 故障行的出现与第一行 `MODE` 独立：无论当前处于 `Charge` / `Ready` / `Discharge` / `LowBatt` 中的哪一种，只要存在智能电池/充电相关故障，第四行就切换为 `FAULT: <code>`；MODE 始终由 ESP32 按前文规则裁决。
+- 未检测到任何故障时：
+  - 第 4 行恢复为常规温度/FAN 行：`BAT …C  UPS …C  FAN …%`；
+  - 警告图标和 `FAULT:` 标签不渲染。
+
 
 - 刷新周期：`5–10 Hz` UI 帧（避免 1 像素闪烁）。
 - 数值更新：
   - 电压/功率使用 2–4 样本滑动平均；
   - 温度/风扇可直接刷新；
   - 当模式切换发生时，立即生效且清零相关缓存，避免“阴影值”。
-- `CHG` 的判定：处于放电或待机则显示 `--`；处于充电才显示数值。
+- `CHG` 的判定：仅在 MODE=`Charge` 时显示充电功率；在 `Ready` / `Discharge` / `LowBatt` 模式下，第三行不使用 `CHG` 三元组，该字段可以为 `null` / `0` 或在 UI 层统一显示为 `--`。
 
 ## 7. 智能电池详情页（方向键向下）
 
@@ -258,7 +350,7 @@
 
 ```json
 {
-  "mode": "Standby|Charge|Discharge",
+  "mode": "Charge|Ready|Discharge|LowBatt",   // 仪表盘模式，由 ESP32 按本节规则裁决
   "soc_pct": 85,                          // 电池电量 0–100
   "input_voltage_mv": 48000,
   "input_current_ma": 2500,
@@ -271,7 +363,7 @@
   "charger_temp_c": 34,                    // 智能电池充电器模块温度
   "ups_temp_c": 36,                        // SC8815 ADIN 转换后的摄氏度
   "fan_duty_pct": 45,
-  "idle_since_last_discharge_s": 93780,    // 待机：用于格式化为 01d02:03
+  "idle_since_last_discharge_s": 93780,    // 就绪（Ready）模式下用于格式化为 01d02:03
   "faults": ["SC8815", "INA226"],
   "boot": {                                // 仅启动阶段
     "step_id": 3,

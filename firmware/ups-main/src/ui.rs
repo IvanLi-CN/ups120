@@ -9,6 +9,7 @@ use crate::{
         FrameBuffer, LOGICAL_HEIGHT, LOGICAL_WIDTH, Rgb565, clear_framebuffer, fill_rect_buffer,
         flush_framebuffer, flush_framebuffer_async, put_pixel_buffer, with_framebuffer,
     },
+    power,
 };
 
 // Palette (RGB565)
@@ -373,6 +374,14 @@ where
 }
 
 // ---------------- Dashboard -----------------
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum DashboardMode {
+    Charge,
+    Ready,
+    Discharge,
+    LowBatt,
+}
+
 #[derive(Clone, Copy)]
 pub enum Mode {
     Standby,
@@ -567,7 +576,11 @@ pub enum CellsFrame {
 }
 
 pub struct DashboardData {
-    pub mode: Mode,
+    /// High-level four-state dashboard mode used for the top line.
+    pub dashboard_mode: DashboardMode,
+    /// Battery flow mode used to drive third-line layout (CHG/IDLE/OUT) and
+    /// battery detail short text (CHG/DSG/IDLE).
+    pub batt_mode: Mode,
     pub soc_pct: u8,
     pub vbat_mv: Option<u32>,
     pub soc_display: SocDisplay,
@@ -584,6 +597,7 @@ pub struct DashboardData {
     pub fan_pct: u8,
     pub uptime_secs: u32,
     pub temp_slot: TempSlot,
+    pub sb_fault: Option<power::SbFaultCode>,
 }
 
 /// Data model for the battery detail page (accessed via Down from dashboard).
@@ -718,11 +732,30 @@ fn fmt_uptime(secs: u32, buf: &mut heapless::String<16>) {
     }
 }
 
-fn mode_text_and_color(mode: Mode) -> (&'static str, Rgb565) {
+fn fault_code_text(code: power::SbFaultCode) -> &'static str {
+    match code {
+        power::SbFaultCode::CommErr => "COMM ERR",
+        power::SbFaultCode::StateNA => "STATE N/A",
+        power::SbFaultCode::ReqChgMismatch => "REQ-CHG MISM",
+        power::SbFaultCode::ReqStopMismatch => "REQ-STOP MISM",
+        power::SbFaultCode::TempLow => "TEMP LOW",
+        power::SbFaultCode::TempHotChg => "TEMP HOT CHG",
+        power::SbFaultCode::TempHotDsg => "TEMP HOT DSG",
+        power::SbFaultCode::Imbalance => "IMBALANCE",
+        power::SbFaultCode::OvUvOc => "OV/UV/OC",
+        power::SbFaultCode::AdapterMiss => "ADAPTER MISS",
+        power::SbFaultCode::HoldOff => "HOLD-OFF",
+        power::SbFaultCode::FaultBq => "FAULT BQ",
+        power::SbFaultCode::FaultSc => "FAULT SC",
+    }
+}
+
+fn dashboard_mode_text_and_color(mode: DashboardMode) -> (&'static str, Rgb565) {
     match mode {
-        Mode::Standby => ("MODE: STANDBY", GRAY),
-        Mode::Charge => ("MODE: CHARGE", CYAN),
-        Mode::Discharge => ("MODE: DISCHARGE", WHITE),
+        DashboardMode::Charge => ("MODE: CHARGE", CYAN),
+        DashboardMode::Ready => ("MODE: READY", GRAY),
+        DashboardMode::Discharge => ("MODE: DISCHARGE", WHITE),
+        DashboardMode::LowBatt => ("MODE: LOWBATT", YELLOW),
     }
 }
 
@@ -907,7 +940,7 @@ where
         let _ = draw_text(fb, soc_x, y0, &soc_text, soc_color);
 
         // Draw mode left, clipped to avoid overlap with right area
-        let (mode_text, mode_color) = mode_text_and_color(model.mode);
+        let (mode_text, mode_color) = dashboard_mode_text_and_color(model.dashboard_mode);
         let max_mode_width = soc_x.saturating_sub(MARGIN_LR);
         let _ = draw_text_clipped(fb, MARGIN_LR, y0, mode_text, mode_color, max_mode_width);
 
@@ -918,7 +951,7 @@ where
         draw_trio_line(fb, y1, "IN", &vs, &as_, &ws);
 
         let y2 = MARGIN_TB + 2 * LINE_H;
-        match model.mode {
+        match model.batt_mode {
             Mode::Charge => {
                 ws.clear();
                 fmt_power(model.chg_w_mw, &mut ws);
@@ -927,7 +960,7 @@ where
             Mode::Standby => {
                 let mut uptime: heapless::String<16> = heapless::String::new();
                 fmt_uptime(model.uptime_secs, &mut uptime);
-                draw_trio_line(fb, y2, "RUN ", &uptime, PLACEHOLDER, PLACEHOLDER);
+                draw_trio_line(fb, y2, "IDLE", &uptime, PLACEHOLDER, PLACEHOLDER);
             }
             Mode::Discharge => {
                 vs.clear();
@@ -941,15 +974,22 @@ where
         }
 
         let y3 = MARGIN_TB + 3 * LINE_H;
-        draw_aux_line(
-            fb,
-            y3,
-            model.temp_slot,
-            model.bat_temp_c,
-            model.charger_temp_c,
-            model.ups_temp_c,
-            model.fan_pct,
-        );
+        if let Some(code) = model.sb_fault {
+            let x = cell_to_x(0);
+            let x = draw_text(fb, x, y3, "FAULT:", YELLOW);
+            let code_text = fault_code_text(code);
+            let _ = draw_text(fb, x + CELL_W, y3, code_text, RED);
+        } else {
+            draw_aux_line(
+                fb,
+                y3,
+                model.temp_slot,
+                model.bat_temp_c,
+                model.charger_temp_c,
+                model.ups_temp_c,
+                model.fan_pct,
+            );
+        }
     });
     flush_framebuffer(spi, cs, dc)
 }
@@ -978,7 +1018,7 @@ where
         let soc_x = LOGICAL_WIDTH - MARGIN_LR - soc_w;
         let _ = draw_text(fb, soc_x, y0, &soc_text, soc_color);
 
-        let (mode_text, mode_color) = mode_text_and_color(model.mode);
+        let (mode_text, mode_color) = dashboard_mode_text_and_color(model.dashboard_mode);
         let max_mode_width = soc_x.saturating_sub(MARGIN_LR);
         let _ = draw_text_clipped(fb, MARGIN_LR, y0, mode_text, mode_color, max_mode_width);
 
@@ -989,7 +1029,7 @@ where
         draw_trio_line(fb, y1, "IN", &vs, &as_, &ws);
 
         let y2 = MARGIN_TB + 2 * LINE_H;
-        match model.mode {
+        match model.batt_mode {
             Mode::Charge => {
                 ws.clear();
                 fmt_power(model.chg_w_mw, &mut ws);
@@ -998,7 +1038,7 @@ where
             Mode::Standby => {
                 let mut uptime: heapless::String<16> = heapless::String::new();
                 fmt_uptime(model.uptime_secs, &mut uptime);
-                draw_trio_line(fb, y2, "RUN ", &uptime, PLACEHOLDER, PLACEHOLDER);
+                draw_trio_line(fb, y2, "IDLE", &uptime, PLACEHOLDER, PLACEHOLDER);
             }
             Mode::Discharge => {
                 vs.clear();
@@ -1012,15 +1052,22 @@ where
         }
 
         let y3 = MARGIN_TB + 3 * LINE_H;
-        draw_aux_line(
-            fb,
-            y3,
-            model.temp_slot,
-            model.bat_temp_c,
-            model.charger_temp_c,
-            model.ups_temp_c,
-            model.fan_pct,
-        );
+        if let Some(code) = model.sb_fault {
+            let x = cell_to_x(0);
+            let x = draw_text(fb, x, y3, "FAULT:", YELLOW);
+            let code_text = fault_code_text(code);
+            let _ = draw_text(fb, x + CELL_W, y3, code_text, RED);
+        } else {
+            draw_aux_line(
+                fb,
+                y3,
+                model.temp_slot,
+                model.bat_temp_c,
+                model.charger_temp_c,
+                model.ups_temp_c,
+                model.fan_pct,
+            );
+        }
     });
     flush_framebuffer_async(spi, cs, dc).await
 }

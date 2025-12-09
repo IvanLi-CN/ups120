@@ -13,7 +13,7 @@ mod tsens;
 mod ui;
 
 use button_input::{ButtonConfig, ButtonState};
-use defmt::{debug, info, warn};
+use defmt::{Debug2Format, debug, info, warn};
 use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
 use embassy_executor::Spawner;
 use embassy_sync::{
@@ -66,6 +66,12 @@ pub const SB_REG_STATE_FLAGS: u8 = 0x20;
 /// See `TempFaultFlags` / `decode_temp_status` for the decoded view.
 pub const SB_REG_TEMP_STATUS: u8 = 0x23;
 pub const SB_STATE_FLAG_AC_PRESENT: u16 = 0x0001;
+// Mirrors of STM32 smart-battery charging/session bits used for UI mode
+// derivation and fault decoding (UI only; AC/charge policy由 ESP32 侧
+// 的 INA226+TPS2490 PG 组合判定，详见 charging_policy.md)。
+pub const SB_STATE_FLAG_CHARGING: u16 = 1 << 1;
+pub const SB_STATE_FLAG_CHG_PAUSED: u16 = 1 << 2;
+pub const SB_STATE_FLAG_FULL: u16 = 1 << 4;
 // Mirror of STM32 smart-battery state_bits::BALANCING; used for UI overlay.
 pub const SB_STATE_FLAG_BALANCING: u16 = 1 << 5;
 // Mirrors of smart-battery state_bits::FAULT_BQ / FAULT_SC; used for UPS discharge gating.
@@ -94,6 +100,124 @@ pub const SB_CFG_BIT_AUTO: u8 = 1 << 0;
 pub const SB_CFG_BIT_MANUAL: u8 = 1 << 1;
 pub const SB_CFG_SPEED_SHIFT: u8 = 2;
 
+fn dashboard_mode_str(mode: ui::DashboardMode) -> &'static str {
+    match mode {
+        ui::DashboardMode::Charge => "Charge",
+        ui::DashboardMode::Ready => "Ready",
+        ui::DashboardMode::Discharge => "Discharge",
+        ui::DashboardMode::LowBatt => "LowBatt",
+    }
+}
+
+fn batt_mode_str(mode: ui::Mode) -> &'static str {
+    match mode {
+        ui::Mode::Standby => "Standby",
+        ui::Mode::Charge => "Charge",
+        ui::Mode::Discharge => "Discharge",
+    }
+}
+
+fn compute_min_cell_mv(cells_mv: &[Option<u16>; 5]) -> Option<u16> {
+    let mut min_mv: Option<u16> = None;
+    for cell in cells_mv.iter().copied() {
+        if let Some(v) = cell {
+            min_mv = Some(match min_mv {
+                Some(current) => core::cmp::min(current, v),
+                None => v,
+            });
+        }
+    }
+    min_mv
+}
+
+fn is_discharge_active(state: &power::PowerState) -> bool {
+    if !state.out_enabled {
+        return false;
+    }
+
+    const DISCH_CURR_THRESHOLD_MA: i32 = 50;
+    const DISCH_POWER_THRESHOLD_MW: u32 = 1_000;
+
+    if let Some(out_a) = state.out_a_ma {
+        if out_a >= DISCH_CURR_THRESHOLD_MA {
+            return true;
+        }
+    }
+    if let Some(out_w) = state.out_w_mw {
+        if out_w >= DISCH_POWER_THRESHOLD_MW {
+            return true;
+        }
+    }
+    if let Some(ibat) = state.ibat_ma {
+        if ibat <= -DISCH_CURR_THRESHOLD_MA {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn compute_dashboard_modes(state: &power::PowerState) -> (ui::DashboardMode, ui::Mode) {
+    enum BaseMode {
+        Charge,
+        Ready,
+        Discharge,
+    }
+
+    // Step 1: derive a base mode (Charge / Ready / Discharge).
+    //
+    // 顶部 MODE 由 ESP32 单侧视角决定：是否请求充电、是否认为 AC 存在、是否处于
+    // 温度暂停等。STM32 的 STATE_FLAGS 仅用于第四行故障/提示，不再回退或延迟
+    // 顶部 MODE 的切换。
+    let discharge_active = is_discharge_active(state);
+    let charge_requested = matches!(state.charge_mode, power::ChargeMode::Manual);
+    let charge_current = matches!(state.ibat_ma, Some(i) if i > 50);
+
+    let base_mode = if discharge_active {
+        BaseMode::Discharge
+    } else if state.ac_present && (charge_requested || charge_current) && !state.temp_pause_active {
+        BaseMode::Charge
+    } else {
+        BaseMode::Ready
+    };
+
+    // Step 2: overlay LowBatt on top of Ready when appropriate.
+    let mut dashboard_mode = match base_mode {
+        BaseMode::Charge => ui::DashboardMode::Charge,
+        BaseMode::Ready => ui::DashboardMode::Ready,
+        BaseMode::Discharge => ui::DashboardMode::Discharge,
+    };
+
+    if let BaseMode::Ready = base_mode {
+        if let Some(min_cell_mv) = compute_min_cell_mv(&state.cells_mv) {
+            if min_cell_mv < 3_200 {
+                if state.ac_present {
+                    // With AC present, prefer Charge over LowBatt.
+                    dashboard_mode = ui::DashboardMode::Charge;
+                } else {
+                    dashboard_mode = ui::DashboardMode::LowBatt;
+                }
+            }
+        }
+    }
+
+    // Step 3: derive batt_mode used for third line (CHG/IDLE/OUT) and batt detail.
+    let batt_mode = match dashboard_mode {
+        ui::DashboardMode::Charge => ui::Mode::Charge,
+        ui::DashboardMode::Ready => ui::Mode::Standby,
+        ui::DashboardMode::Discharge => ui::Mode::Discharge,
+        ui::DashboardMode::LowBatt => {
+            if discharge_active {
+                ui::Mode::Discharge
+            } else {
+                ui::Mode::Standby
+            }
+        }
+    };
+
+    (dashboard_mode, batt_mode)
+}
+
 // Battery pack configuration (per project spec; do not probe at runtime)
 pub const PACK_CELLS_S: u8 = 5; // 5S Li-ion (BQ76920 max 5S)
 pub const SOC_EMPTY_VBAT_MV: u32 = 12_500; // Cutoff threshold (pack)
@@ -106,7 +230,7 @@ pub const DISCH_STOP_VBAT_MV: u32 = 13_500;
 /// UPS discharge resume threshold with hysteresis (pack).
 /// match discharge_policy.md §4.3; 5S * 3.2V ≈ 16.0V.
 pub const DISCH_RESUME_VBAT_MV: u32 = 16_000;
-/// AC 适配器恢复后，IN_PG 连续为 High 至少 10 s 才允许重新开始充电。
+/// AC 适配器恢复后，AC GOOD（PG 断言 + VIN 在线）连续为真至少 10 s 才允许重新开始充电。
 pub const AC_STABLE_MS: u64 = 10_000;
 pub const TEMP_PAUSE_C: f32 = 40.0;
 pub const TEMP_RESUME_C: f32 = 35.0;
@@ -278,6 +402,7 @@ async fn ui_task(
     // UI: batt-detail cells frame (voltages vs temperatures) alternation (~2 seconds).
     let mut cells_frame = ui::CellsFrame::Voltage;
     let mut cells_alt_counter: u8 = 0;
+    let mut last_dashboard_mode: Option<ui::DashboardMode> = None;
 
     loop {
         // Process UI events produced by the button task.
@@ -372,32 +497,25 @@ async fn ui_task(
             // Use latest VBAT / IBAT / OUT measurements from power_task.
             let vbat_mv = power_snapshot.vbat_mv;
             let ibat_ma = power_snapshot.ibat_ma;
-            let out_enabled = power_snapshot.out_enabled;
 
             let now_millis = esp_hal::time::Instant::now()
                 .duration_since_epoch()
                 .as_millis() as u64;
 
-            // Derive UI mode and pack current magnitude from IBAT.
-            let (mut ui_mode, pack_i_ma_abs) = match ibat_ma {
-                Some(i) => {
-                    let abs_ma: u32 = if i < 0 { (-i) as u32 } else { i as u32 };
-                    let mode = if abs_ma < 50 {
-                        ui::Mode::Standby
-                    } else if i > 0 {
-                        ui::Mode::Charge
-                    } else {
-                        ui::Mode::Discharge
-                    };
-                    (mode, Some(abs_ma))
-                }
-                None => (ui::Mode::Standby, None),
-            };
+            // Derive dashboard (four-state) mode and battery flow mode from the
+            // power snapshot, plus pack current magnitude for detail view.
+            let pack_i_ma_abs = ibat_ma.map(|i| if i < 0 { (-i) as u32 } else { i as u32 });
+            let (dashboard_mode, batt_mode) = compute_dashboard_modes(&power_snapshot);
+            let sb_fault = power::compute_sb_fault(&power_snapshot);
 
-            // Ensure Mode::Discharge is only shown when OUT is actually enabled
-            // (match discharge_policy.md §7 UI wiring note).
-            if matches!(ui_mode, ui::Mode::Discharge) && !out_enabled {
-                ui_mode = ui::Mode::Standby;
+            if last_dashboard_mode != Some(dashboard_mode) {
+                info!(
+                    "ui: dashboard_mode={} batt_mode={} sb_fault={:?}",
+                    dashboard_mode_str(dashboard_mode),
+                    batt_mode_str(batt_mode),
+                    Debug2Format(&sb_fault),
+                );
+                last_dashboard_mode = Some(dashboard_mode);
             }
 
             // Best-effort balancing cell index: when the smart-battery reports
@@ -437,9 +555,10 @@ async fn ui_task(
                 .unwrap_or(0);
             let out_w_mw = power_snapshot.out_w_mw.unwrap_or(0);
 
-            // Build a minimal dashboard model (real temps + SoC; other fields placeholder).
+            // Build a dashboard model (real temps + SoC; other fields placeholder).
             let model = ui::DashboardData {
-                mode: ui_mode,
+                dashboard_mode,
+                batt_mode,
                 soc_pct,
                 vbat_mv,
                 soc_display: if soc_alt_voltage {
@@ -447,7 +566,7 @@ async fn ui_task(
                 } else {
                     ui::SocDisplay::Percent
                 },
-                in_v_mv: 0,
+                in_v_mv: power_snapshot.vin_meas_mv.unwrap_or(0),
                 in_a_ma: 0,
                 in_w_mw: 0,
                 chg_w_mw: 0,
@@ -460,6 +579,7 @@ async fn ui_task(
                 fan_pct: thermal_snapshot.fan.duty_pct,
                 uptime_secs,
                 temp_slot: display_slot,
+                sb_fault,
             };
 
             // Battery detail view model (reuses most of the same raw inputs).
@@ -477,7 +597,7 @@ async fn ui_task(
             });
 
             let batt_detail = ui::BattDetailData {
-                mode: ui_mode,
+                mode: batt_mode,
                 pack_v_mv: pack_v_detail,
                 pack_i_ma: pack_i_ma_abs,
                 cells_mv: last_cells_mv,

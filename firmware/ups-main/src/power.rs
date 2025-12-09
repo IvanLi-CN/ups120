@@ -3,6 +3,7 @@ use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
 use embassy_sync::{blocking_mutex::raw::NoopRawMutex, mutex::Mutex};
 use embassy_time::{Duration, Timer};
 use esp_hal::time::Instant;
+use ina226::INA226;
 use sc8815::registers::constants::DEFAULT_ADDRESS as SC8815_ADDR;
 use static_cell::StaticCell;
 
@@ -16,11 +17,31 @@ use crate::{
     io_expander::Tca6408a,
 };
 
+/// INA226 I²C address on the UPS power board (A0=A1=GND).
+const INA226_ADDR: u8 = 0x40;
+
 /// Charging mode exposed to other tasks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ChargeMode {
     Auto,
     Manual,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum SbFaultCode {
+    CommErr,
+    StateNA,
+    ReqChgMismatch,
+    ReqStopMismatch,
+    TempLow,
+    TempHotChg,
+    TempHotDsg,
+    Imbalance,
+    OvUvOc,
+    AdapterMiss,
+    HoldOff,
+    FaultBq,
+    FaultSc,
 }
 
 /// Snapshot of the current power / smart-battery state.
@@ -30,10 +51,15 @@ pub enum ChargeMode {
 /// longer than necessary.
 #[derive(Clone, Copy)]
 pub struct PowerState {
-    /// Raw IN_PG-derived adapter presence (last read).
+    /// AC présent / good flag as seen by the ESP32, derived from TPS2490 PG
+    /// assertion (input path good) + INA226 VIN online check.
     pub ac_present: bool,
     /// Whether VIN has been stable for at least `AC_STABLE_MS`.
     pub ac_stable: bool,
+    /// Latest INA226-measured external input voltage in mV, if available.
+    pub vin_meas_mv: Option<u32>,
+    /// Whether INA226 measurements are considered faulty/unavailable.
+    pub ina226_fault: bool,
     /// Current smart-battery charging mode.
     pub charge_mode: ChargeMode,
     /// Last written CHG_CONFIG register value.
@@ -46,6 +72,8 @@ pub struct PowerState {
     pub cells_mv: [Option<u16>; 5],
     /// Cached STATE_FLAGS from the periodic 10s snapshot.
     pub state_flags: Option<u16>,
+    /// Cached CHG_PAUSE_CAUSE from the periodic 10s snapshot.
+    pub sb_chg_pause_cause: Option<u8>,
     /// Latest smart-battery TEMP_STATUS bitmap (if available).
     pub sb_temp_status: Option<u8>,
     /// Latest smart-battery temperature set (pack + charger).
@@ -62,6 +90,8 @@ pub struct PowerState {
     pub out_a_ma: Option<i32>,
     /// OUT power in mW, derived from voltage/current, if available.
     pub out_w_mw: Option<u32>,
+    /// Whether smart-battery I2C/state reads are currently considered faulty.
+    pub sb_comm_error: bool,
     /// Millisecond timestamp (since boot) of the last successful update.
     pub last_update_ms: u64,
 }
@@ -71,12 +101,15 @@ impl core::fmt::Debug for PowerState {
         f.debug_struct("PowerState")
             .field("ac_present", &self.ac_present)
             .field("ac_stable", &self.ac_stable)
+            .field("vin_meas_mv", &self.vin_meas_mv)
+            .field("ina226_fault", &self.ina226_fault)
             .field("charge_mode", &self.charge_mode)
             .field("chg_config", &self.chg_config)
             .field("vbat_mv", &self.vbat_mv)
             .field("ibat_ma", &self.ibat_ma)
             .field("cells_mv", &self.cells_mv)
             .field("state_flags", &self.state_flags)
+            .field("sb_chg_pause_cause", &self.sb_chg_pause_cause)
             .field("sb_temp_status", &self.sb_temp_status)
             .field("smart_batt_temps", &Debug2Format(&self.smart_batt_temps))
             .field("adin_temp_c", &self.adin_temp_c)
@@ -85,6 +118,7 @@ impl core::fmt::Debug for PowerState {
             .field("out_v_mv", &self.out_v_mv)
             .field("out_a_ma", &self.out_a_ma)
             .field("out_w_mw", &self.out_w_mw)
+            .field("sb_comm_error", &self.sb_comm_error)
             .field("last_update_ms", &self.last_update_ms)
             .finish()
     }
@@ -95,12 +129,15 @@ impl Default for PowerState {
         Self {
             ac_present: false,
             ac_stable: false,
+            vin_meas_mv: None,
+            ina226_fault: false,
             charge_mode: ChargeMode::Auto,
             chg_config: 0,
             vbat_mv: None,
             ibat_ma: None,
             cells_mv: [None; 5],
             state_flags: None,
+            sb_chg_pause_cause: None,
             sb_temp_status: None,
             smart_batt_temps: None,
             adin_temp_c: None,
@@ -109,12 +146,132 @@ impl Default for PowerState {
             out_v_mv: None,
             out_a_ma: None,
             out_w_mw: None,
+            sb_comm_error: false,
             last_update_ms: 0,
         }
     }
 }
 
 pub type PowerStateMutex = Mutex<NoopRawMutex, PowerState>;
+
+pub fn compute_sb_fault(state: &PowerState) -> Option<SbFaultCode> {
+    // 1. Communication / state availability.
+    if state.sb_comm_error {
+        return Some(SbFaultCode::CommErr);
+    }
+
+    let flags = match state.state_flags {
+        Some(f) => f,
+        None => return Some(SbFaultCode::StateNA),
+    };
+
+    // Local mirrors of STM32 STATE_FLAGS bits used for fault derivation.
+    const SB_STATE_FLAG_CHARGING: u16 = 1 << 1;
+    const SB_STATE_FLAG_CHG_PAUSED: u16 = 1 << 2;
+    const SB_STATE_FLAG_FULL: u16 = 1 << 4;
+
+    // Local mirrors of CHG_PAUSE_CAUSE bits.
+    const SB_PAUSE_IMBALANCE: u8 = 1 << 0;
+    const SB_PAUSE_PACK_TEMP: u8 = 1 << 1;
+    const SB_PAUSE_CHG_TEMP: u8 = 1 << 2;
+    const SB_PAUSE_OVUV_OC: u8 = 1 << 3;
+    const SB_PAUSE_HOLD_OFF: u8 = 1 << 4;
+    const SB_PAUSE_ADAPTER_MISS: u8 = 1 << 5;
+    const SB_PAUSE_EOC_FULL: u8 = 1 << 6;
+
+    let charging_active = (flags & SB_STATE_FLAG_CHARGING) != 0;
+    let chg_paused = (flags & SB_STATE_FLAG_CHG_PAUSED) != 0;
+    let full_flag = (flags & SB_STATE_FLAG_FULL) != 0;
+
+    let pause = state.sb_chg_pause_cause.unwrap_or(0);
+    let pause_imbalance = (pause & SB_PAUSE_IMBALANCE) != 0;
+    let pause_ovuv_oc = (pause & SB_PAUSE_OVUV_OC) != 0;
+    let pause_hold_off = (pause & SB_PAUSE_HOLD_OFF) != 0;
+    let pause_adapter_miss = (pause & SB_PAUSE_ADAPTER_MISS) != 0;
+    let pause_eoc_full = (pause & SB_PAUSE_EOC_FULL) != 0;
+    let pause_temp_related = (pause & (SB_PAUSE_PACK_TEMP | SB_PAUSE_CHG_TEMP)) != 0;
+
+    // Decode TEMP_STATUS once for temperature-related codes and gating.
+    let temp_flags = state.sb_temp_status.map(crate::decode_temp_status);
+    let temp_low = matches!(temp_flags, Some(f) if f.temp_low);
+    let temp_hot_chg = matches!(temp_flags, Some(f) if f.temp_high_chg);
+    let temp_hot_dsg = matches!(temp_flags, Some(f) if f.temp_high_dsg);
+
+    // 2. Request/actual mismatch between ESP intent and STM32 CHARGING bit.
+    //
+    // Treat Manual mode with AC present as an explicit charge request. We also
+    // require VIN to be stable to avoid transient mismatches around adapter
+    // plug/unplug.
+    let charge_requested =
+        state.ac_present && state.ac_stable && matches!(state.charge_mode, ChargeMode::Manual);
+
+    // Consider conditions that legitimately explain why charging might be
+    // paused or stopped even when a request is present. When any of these are
+    // true we suppress ReqChgMismatch so more specific faults can surface.
+    let mut has_valid_pause_reason = false;
+    if full_flag || pause_eoc_full {
+        has_valid_pause_reason = true;
+    }
+    if pause_temp_related || state.temp_pause_active || temp_low || temp_hot_chg {
+        has_valid_pause_reason = true;
+    }
+    if pause_ovuv_oc || pause_imbalance || pause_adapter_miss {
+        has_valid_pause_reason = true;
+    }
+    if chg_paused {
+        has_valid_pause_reason = true;
+    }
+    if !state.ac_present || !state.ac_stable {
+        has_valid_pause_reason = true;
+    }
+
+    if charge_requested && !charging_active && !has_valid_pause_reason {
+        return Some(SbFaultCode::ReqChgMismatch);
+    }
+
+    // ReqStopMismatch: ESP believes charging should be stopped (no manual
+    // request, AC missing or gating) but STM32 still reports CHARGING.
+    let stop_requested = (!state.ac_present || state.temp_pause_active || full_flag)
+        && !matches!(state.charge_mode, ChargeMode::Manual);
+    if stop_requested && charging_active {
+        return Some(SbFaultCode::ReqStopMismatch);
+    }
+
+    // 3. Chip-level faults from STATE_FLAGS.
+    if (flags & SB_STATE_FLAG_FAULT_BQ) != 0 {
+        return Some(SbFaultCode::FaultBq);
+    }
+    if (flags & SB_STATE_FLAG_FAULT_SC) != 0 {
+        return Some(SbFaultCode::FaultSc);
+    }
+
+    // 4. Temperature faults from TEMP_STATUS.
+    if temp_low {
+        return Some(SbFaultCode::TempLow);
+    }
+    if temp_hot_chg {
+        return Some(SbFaultCode::TempHotChg);
+    }
+    if temp_hot_dsg {
+        return Some(SbFaultCode::TempHotDsg);
+    }
+
+    // 5. Voltage/current/adapter/imbalance-related pause causes.
+    if pause_imbalance {
+        return Some(SbFaultCode::Imbalance);
+    }
+    if pause_ovuv_oc {
+        return Some(SbFaultCode::OvUvOc);
+    }
+    if pause_adapter_miss {
+        return Some(SbFaultCode::AdapterMiss);
+    }
+    if pause_hold_off {
+        return Some(SbFaultCode::HoldOff);
+    }
+
+    None
+}
 
 static POWER_STATE: StaticCell<PowerStateMutex> = StaticCell::new();
 
@@ -309,6 +466,9 @@ pub async fn power_task(
     let mut sb_last_state_poll_ms = 0u64;
     let mut last_state_flags: Option<u16> = None;
     let mut last_cells_mv: [Option<u16>; 5] = [None; 5];
+    let mut last_chg_pause_cause: Option<u8> = None;
+    let mut sb_comm_error: bool = false;
+    let mut sb_comm_error_streak: u8 = 0;
 
     {
         let mut sb_i2c = I2cDevice::new(i2c_bus);
@@ -323,13 +483,23 @@ pub async fn power_task(
     // Global single-instance drivers (async I2C devices on the shared bus)
     let mut tca: Option<Tca6408a<SharedI2cDevice<'static>>> =
         Some(Tca6408a::new(I2cDevice::new(i2c_bus)));
-    let mut vin_present = true;
-    // Track last time IN_PG changed so we can derive a “stable for AC_STABLE_MS” window.
-    let mut vin_state_last_change_ms: u64 =
-        Instant::now().duration_since_epoch().as_millis() as u64;
+    // Raw TPS2490 PG level sampled via TCA6408A IN_PG (true = PG asserted = input path good).
+    let mut in_pg_raw: Option<bool> = None;
     let mut last_in_pg_logged: Option<bool> = None;
     let mut in_pg_read_failed = false;
+    // AC GOOD state derived from TPS2490 PG + INA226 VIN.
+    let mut ac_present = false;
+    // Track last time AC GOOD changed so we can derive a “stable for AC_STABLE_MS” window.
+    let mut ac_state_last_change_ms: u64 =
+        Instant::now().duration_since_epoch().as_millis() as u64;
     let mut charge_skip_adapter_logged = false;
+
+    // Global single-instance INA226 driver on the shared I2C bus.
+    let mut ina: Option<INA226<SharedI2cDevice<'static>>> = None;
+    let mut ina226_fault: bool = false;
+    let mut ina226_fault_logged: bool = false;
+    let mut last_ac_diag_log_ms: u64 = 0;
+
     if let Some(t) = tca.as_mut() {
         match t.init().await {
             Ok(()) => info!("tca6408a: init ok (CE=high, PSTOP=high)"),
@@ -337,10 +507,18 @@ pub async fn power_task(
         }
         match t.read_in_pg().await {
             Ok(pg) => {
-                vin_present = pg;
-                vin_state_last_change_ms = Instant::now().duration_since_epoch().as_millis() as u64;
+                in_pg_raw = Some(pg);
                 last_in_pg_logged = Some(pg);
-                info!("tca6408a: IN_PG={}", if pg { "high" } else { "low" });
+                in_pg_read_failed = false;
+                info!(
+                    "tca6408a: IN_PG={} ({})",
+                    if pg { "high" } else { "low" },
+                    if pg {
+                        "pg asserted, input path good"
+                    } else {
+                        "pg deasserted: startup/uvlo/limit/protect"
+                    }
+                );
             }
             Err(_) => {
                 warn!("tca6408a: read IN_PG failed");
@@ -449,41 +627,26 @@ pub async fn power_task(
 
         let now_millis = Instant::now().duration_since_epoch().as_millis() as u64;
 
-        // Refresh adapter presence via IN_PG.
+        // Refresh TPS2490 PG level via IN_PG (raw, before combining with INA226 VIN).
         if let Some(t) = tca.as_mut() {
             match t.read_in_pg().await {
-                Ok(state) => {
+                Ok(level) => {
                     if in_pg_read_failed {
                         info!("power: IN_PG read recovered");
                         in_pg_read_failed = false;
                     }
-                    if vin_present != state {
-                        vin_present = state;
-                        // Record the moment of the edge so that charging logic can
-                        // enforce a “VIN stable for AC_STABLE_MS” window on resume.
-                        vin_state_last_change_ms = now_millis;
-                        if state {
-                            charge_skip_adapter_logged = false;
-                        }
-                    }
-                    if last_in_pg_logged != Some(state) {
-                        let mut sb_i2c = I2cDevice::new(i2c_bus);
-                        match crate::read_smart_battery_state_flags(&mut sb_i2c).await {
-                            Some(flags) => {
-                                let stm_ac = (flags & SB_STATE_FLAG_AC_PRESENT) != 0;
-                                info!(
-                                    "power: adapter {} (stm_ac={} flags=0x{:04x})",
-                                    if state { "present" } else { "missing" },
-                                    stm_ac,
-                                    flags
-                                );
+                    in_pg_raw = Some(level);
+                    if last_in_pg_logged != Some(level) {
+                        info!(
+                            "tca6408a: IN_PG={} ({})",
+                            if level { "high" } else { "low" },
+                            if level {
+                                "pg asserted, input path good"
+                            } else {
+                                "pg deasserted: startup/uvlo/limit/protect"
                             }
-                            None => info!(
-                                "power: adapter {} (stm_ac=? read_fail)",
-                                if state { "present" } else { "missing" }
-                            ),
-                        }
-                        last_in_pg_logged = Some(state);
+                        );
+                        last_in_pg_logged = Some(level);
                     }
                 }
                 Err(_) => {
@@ -491,8 +654,97 @@ pub async fn power_task(
                         warn!("tca6408a: read IN_PG failed");
                         in_pg_read_failed = true;
                     }
+                    in_pg_raw = None;
                 }
             }
+        }
+
+        // Refresh INA226 VIN measurement (external adapter voltage).
+        let mut vin_meas_mv: Option<u32> = None;
+        if ina.is_none() {
+            let i2c_dev = I2cDevice::new(i2c_bus);
+            ina = Some(INA226::new(i2c_dev, INA226_ADDR));
+            info!("ina226: init ok");
+            ina226_fault = false;
+            ina226_fault_logged = false;
+        }
+
+        if let Some(dev) = ina.as_mut() {
+            match dev.bus_voltage_millivolts().await {
+                Ok(v_mv) => {
+                    let v_mv_u32 = if v_mv <= 0.0 {
+                        0
+                    } else {
+                        v_mv as u32
+                    };
+                    vin_meas_mv = Some(v_mv_u32);
+                    if ina226_fault {
+                        info!("ina226: measurement recovered (vin={}mV)", v_mv_u32);
+                        ina226_fault = false;
+                        ina226_fault_logged = false;
+                    }
+                }
+                Err(_) => {
+                    ina226_fault = true;
+                    vin_meas_mv = None;
+                    if !ina226_fault_logged {
+                        warn!("ina226: bus voltage read failed; marking INA226 fault");
+                        ina226_fault_logged = true;
+                    }
+                }
+            }
+        }
+
+        // Derive AC GOOD from TPS2490 PG assertion (input path good) + VIN online threshold + INA226 health.
+        let pg_asserted = matches!(in_pg_raw, Some(level) if level) && !in_pg_read_failed;
+        let vin_online = vin_meas_mv
+            .map(|v| v > UPS_VBUS_AC_ONLINE_MV as u32)
+            .unwrap_or(false);
+        let ac_present_now = pg_asserted && vin_online && !ina226_fault;
+
+        if ac_present != ac_present_now {
+            ac_present = ac_present_now;
+            ac_state_last_change_ms = now_millis;
+            charge_skip_adapter_logged = false;
+
+            // Log combined AC state along with STM32's perspective.
+            let mut sb_i2c = I2cDevice::new(i2c_bus);
+            match crate::read_smart_battery_state_flags(&mut sb_i2c).await {
+                Some(flags) => {
+                    let stm_ac = (flags & SB_STATE_FLAG_AC_PRESENT) != 0;
+                    info!(
+                        "power: ac {} (stm_ac={} flags=0x{:04x} pg_asserted={} vin_online={} vin_meas_mv={:?} ina226_fault={})",
+                        if ac_present { "good" } else { "not-good" },
+                        stm_ac,
+                        flags,
+                        pg_asserted,
+                        vin_online,
+                        vin_meas_mv,
+                        ina226_fault,
+                    );
+                }
+                None => {
+                    info!(
+                        "power: ac {} (stm_ac=? read_fail pg_asserted={} vin_online={} vin_meas_mv={:?} ina226_fault={})",
+                        if ac_present { "good" } else { "not-good" },
+                        pg_asserted,
+                        vin_online,
+                        vin_meas_mv,
+                        ina226_fault,
+                    );
+                }
+            }
+        } else if now_millis.saturating_sub(last_ac_diag_log_ms) >= 5_000 {
+            // Periodic AC/INA226 diagnostic at INFO level for field debugging.
+            last_ac_diag_log_ms = now_millis;
+            info!(
+                "power: ac_diag ac_present={} pg_asserted={} vin_online={} vin_meas_mv={:?} ina226_fault={}",
+                ac_present,
+                pg_asserted,
+                vin_online,
+                vin_meas_mv,
+                ina226_fault,
+            );
         }
 
         // Temperature pause/resume gating.
@@ -549,6 +801,7 @@ pub async fn power_task(
         // Periodic state snapshot for logging / UI (every 10s)
         if now_millis.saturating_sub(sb_last_state_poll_ms) >= SB_STATE_POLL_INTERVAL_MS {
             sb_last_state_poll_ms = now_millis;
+            let mut snapshot_ok = true;
             let mut status: Option<u8> = None;
             let mut pause: Option<u8> = None;
             let mut flags: Option<u16> = None;
@@ -559,6 +812,7 @@ pub async fn power_task(
                 status = Some(s);
             } else {
                 warn!("sb:state read CHG_STATUS failed");
+                snapshot_ok = false;
             }
             if let Ok(p) =
                 crate::read_smart_battery_reg_retry(&mut sb_i2c, SB_REG_CHG_PAUSE_CAUSE, 2, 2).await
@@ -566,6 +820,7 @@ pub async fn power_task(
                 pause = Some(p);
             } else {
                 warn!("sb:state read CHG_PAUSE_CAUSE failed");
+                snapshot_ok = false;
             }
             if let Ok(f_lo) =
                 crate::read_smart_battery_reg_retry(&mut sb_i2c, SB_REG_STATE_FLAGS, 2, 2).await
@@ -575,9 +830,12 @@ pub async fn power_task(
                         .await
                 {
                     flags = Some(((f_hi as u16) << 8) | f_lo as u16);
+                } else {
+                    snapshot_ok = false;
                 }
             } else {
                 warn!("sb:state read STATE_FLAGS failed");
+                snapshot_ok = false;
             }
             // Cell voltages (best-effort, non-atomic)
             if let Ok(c) = crate::read_smart_battery_reg_retry(&mut sb_i2c, 0x1F, 2, 2).await {
@@ -600,16 +858,34 @@ pub async fn power_task(
                         }
                         _ => {
                             warn!("sb:state read cell{} failed", i + 1);
+                            snapshot_ok = false;
                         }
                     }
                 }
             } else {
                 warn!("sb:state read CELLS_PRESENT failed");
+                snapshot_ok = false;
             }
 
             // Cache latest state flags and per-cell voltages for the UI battery detail page.
             last_state_flags = flags;
             last_cells_mv = cell_mv;
+            last_chg_pause_cause = pause;
+
+            // Track repeated communication failures so higher layers can surface
+            // a coarse COMM ERR fault when the smart-battery state window is
+            // consistently unavailable.
+            if snapshot_ok {
+                sb_comm_error_streak = 0;
+                sb_comm_error = false;
+            } else {
+                if sb_comm_error_streak < u8::MAX {
+                    sb_comm_error_streak = sb_comm_error_streak.saturating_add(1);
+                }
+                if sb_comm_error_streak >= 2 {
+                    sb_comm_error = true;
+                }
+            }
 
             // Periodic smart-battery state snapshot; keep at debug level to reduce noise.
             debug!(
@@ -801,7 +1077,7 @@ pub async fn power_task(
                     if sc_otg_configured {
                         // Step 2: 12V 模式下，根据 AC 是否存在选择 11.5V / 12V，
                         // 并通过外部分压 VBUSREF_E 设定输出电压。
-                        let ac_mode = vin_present;
+                        let ac_mode = ac_present;
                         let target_vbus_mv: u16 = if ac_mode {
                             UPS_VBUS_AC_ONLINE_MV
                         } else {
@@ -829,7 +1105,7 @@ pub async fn power_task(
             // AC presence flips between online/offline 时，重新根据 12V 策略
             // 更新外部 VBUS 目标电压。
             if sc_otg_configured {
-                let ac_mode_now = vin_present;
+                let ac_mode_now = ac_present;
                 if Some(ac_mode_now) != last_vbus_ac_mode {
                     let target_vbus_mv: u16 = if ac_mode_now {
                         UPS_VBUS_AC_ONLINE_MV
@@ -873,6 +1149,10 @@ pub async fn power_task(
         // Temperature-based pause: force manual charging off while any
         // high-temperature condition is active (local pack temp or
         // smart-battery TEMP_STATUS).
+        // AC stability window derived from AC GOOD edges.
+        let ac_stable_now =
+            ac_present && now_millis.saturating_sub(ac_state_last_change_ms) >= AC_STABLE_MS;
+
         if temp_pause_effective {
             if sb_manual_enable {
                 let desired_config =
@@ -896,14 +1176,17 @@ pub async fn power_task(
                 }
             }
         } else if let Some(vbat) = vbat_mv.or(sb_last_vbat_mv) {
-            // Derive adapter stability window for charge decisions.
-            let vin_ok_for_charge =
-                vin_present && now_millis.saturating_sub(vin_state_last_change_ms) >= AC_STABLE_MS;
+            // Derive adapter stability window for charge decisions from AC GOOD.
             info!(
-                "charge: decision vin_present={} vin_ok_for_charge={} vbat={}mV manual={} temp_pause={}",
-                vin_present, vin_ok_for_charge, vbat, sb_manual_enable, temp_pause_effective
+                "charge: decision ac_present={} ac_stable={} vin_meas_mv={:?} vbat={}mV manual={} temp_pause={}",
+                ac_present,
+                ac_stable_now,
+                vin_meas_mv,
+                vbat,
+                sb_manual_enable,
+                temp_pause_effective
             );
-            if !vin_present {
+            if !ac_present {
                 if sb_manual_enable {
                     let desired_config =
                         crate::compose_sb_charge_config(SB_AUTO_ENABLED, false, sb_speed_tier);
@@ -925,7 +1208,7 @@ pub async fn power_task(
                     info!("charge: skip enable (adapter missing, vbat={=u32}mV)", vbat);
                     charge_skip_adapter_logged = true;
                 }
-            } else if !vin_ok_for_charge {
+            } else if !ac_stable_now {
                 // Adapter just recovered or is unstable: keep charging disabled within the
                 // stability window and only log once.
                 if vbat <= CHARGE_START_VBAT_MV && !charge_skip_adapter_logged {
@@ -983,8 +1266,7 @@ pub async fn power_task(
         }
 
         // Finally, publish the latest power state snapshot for other tasks.
-        let ac_stable =
-            vin_present && now_millis.saturating_sub(vin_state_last_change_ms) >= AC_STABLE_MS;
+        let ac_stable = ac_stable_now;
         let charge_mode = if sb_manual_enable {
             ChargeMode::Manual
         } else {
@@ -993,14 +1275,17 @@ pub async fn power_task(
 
         let mut state = power_state.lock().await;
         *state = PowerState {
-            ac_present: vin_present,
+            ac_present,
             ac_stable,
+            vin_meas_mv,
+            ina226_fault,
             charge_mode,
             chg_config: sb_config_value,
             vbat_mv,
             ibat_ma,
             cells_mv: last_cells_mv,
             state_flags: last_state_flags,
+            sb_chg_pause_cause: last_chg_pause_cause,
             sb_temp_status,
             smart_batt_temps: sb_temps,
             adin_temp_c: last_adin_temp_c,
@@ -1009,6 +1294,7 @@ pub async fn power_task(
             out_v_mv,
             out_a_ma,
             out_w_mw,
+            sb_comm_error,
             last_update_ms: now_millis,
         };
     }

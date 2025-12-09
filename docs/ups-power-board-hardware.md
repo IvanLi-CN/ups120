@@ -35,7 +35,8 @@
 
 - **TPS2490 热插拔控制器**
   - `EN` 接 `IN_EN` 网络；低电平时切断 UPS 外部输入。
-  - `PG` 并入 `IN_PG` 网络，向 ESP32 与 TCA6408A 反馈输入电源状态。
+  - `PG` 为开漏 Power Good 指示脚，由 TPS2490 根据外部功率 MOSFET 的 `VDS` / 启动状态机 / 保护状态综合判定；导通良好时释放为高（上拉后读到高电平），启动中、UVLO、限流或保护时拉低。
+  - `PG` 直接并入 `IN_PG` 网络，送至 TCA6408A `P0` 与 ESP32，仅表达“输入功率路径是否被判定为良好”，并不等同于“适配器电压存在”。
 
 - **INA226 功率监测**
   - 与 ESP32 共享 I²C 总线，实时报告 UPS 外部输入电压、电流与功率。
@@ -48,6 +49,12 @@
 ## 信号网络简述
 
 - `IN_EN`：由 ESP32 控制，使 TPS2490 允许或切断外部输入。
-- `IN_PG`：TPS2490 `PG` 输出的上电良好指示，馈入 TCA6408A `P0` 与 ESP32。
+- `IN_PG`：TPS2490 `PG` 开漏指示，馈入 TCA6408A `P0` 与 ESP32，表示“功率 MOSFET 路径良好/未处于保护”，不直接代表外部母线电压是否超过某阈值。
 - `ALERT`：智能电池（BQ76920）故障或保护触发时输出高电平，通过 TCA6408A `P3` 传回 ESP32。
 - `ADIN`：SC8815 热补偿输入，结合 NTC 与 43 kΩ 上拉监控温度。
+
+## AC GOOD 信号路径概览
+
+- **PG 原始层**：TPS2490 `PG`（开漏，良好时被上拉为高）→ `IN_PG` 网络 → TCA6408A `P0` → `in_pg_raw`（固件中读取的布尔，保留原始电平含义）。
+- **电压在线层**：INA226 通过同一 I²C 总线测量输入母线电压，固件字段 `vin_meas_mv`；布尔 `vin_online`（推荐命名）= `vin_meas_mv > UPS_VBUS_AC_ONLINE_MV = 11.5 V`。
+- **综合 AC GOOD 层**：`power::power_task` 将 `PG` 语义化布尔（建议名 `pg_asserted`）与 `vin_online` 组合得到 `ac_present`，并施加 10 s 稳定窗口得到 `ac_stable`。UI、充电/放电策略均消费 `ac_present` / `ac_stable`，不直接使用 `IN_PG`。
