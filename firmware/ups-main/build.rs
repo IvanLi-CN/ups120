@@ -1,6 +1,8 @@
-use std::env;
-use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    env,
+    process::Command,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 fn ci_short_hash() -> Option<String> {
     let sha = env::var("GITHUB_SHA").ok()?;
@@ -35,17 +37,17 @@ fn resolve_git_hash() -> String {
         .unwrap_or_else(|| "unknown".to_owned())
 }
 
-fn main() {
-    // Embed a monotonically increasing build timestamp into the binary
-    // so we can verify that the flashed ELF is the one just built.
-    let ts = SystemTime::now()
+fn build_timestamp() -> String {
+    SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    println!("cargo:rustc-env=SB_BUILD_TS={}", ts);
+        .map(|d| d.as_secs().to_string())
+        .unwrap_or_else(|_| "unknown".to_owned())
+}
 
-    // Embed a git short hash for version logging; fall back to "unknown" on
-    // hosts without git or CI metadata.
+fn main() {
     let git_hash = resolve_git_hash();
-    println!("cargo:rustc-env=SB_GIT_HASH={}", git_hash);
+    println!("cargo:rustc-env=UPS_GIT_HASH={}", git_hash);
+
+    let ts = build_timestamp();
+    println!("cargo:rustc-env=UPS_BUILD_TS={}", ts);
 }

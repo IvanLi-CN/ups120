@@ -35,6 +35,10 @@ mod temp_policy;
 #[cfg(not(feature = "ship-mode"))]
 mod thermal;
 
+pub const SB_VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const SB_GIT_HASH: &str = env!("SB_GIT_HASH");
+pub const SB_BUILD_TS: &str = env!("SB_BUILD_TS");
+
 use bq769x0_async_rs::{BatteryConfig, Bq769x0, Enabled as BqCrcEnabled};
 // no direct info! logs to减小尺寸
 use cortex_m_rt::ExceptionFrame;
