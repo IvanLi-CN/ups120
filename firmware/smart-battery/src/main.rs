@@ -227,6 +227,14 @@ async fn main(_spawner: Spawner) {
     // by the host can be correlated with RCC reset flags.
     log_reset_cause();
 
+    // 固件版本日志（每次上电 / 复位只打印一次）
+    defmt::info!(
+        "smart-battery: version={} commit={} build_ts={}",
+        SB_VERSION,
+        SB_GIT_HASH,
+        SB_BUILD_TS,
+    );
+
     // 使用默认线程模式执行器：WFE 进入轻度 SLEEP（非 STOP）。
     // 启动日志（必须打印，复用与 sleep_task 相同的格式字符串以节省 FLASH）。
     defmt::debug!("sleep: start (mode=SLEEP)");

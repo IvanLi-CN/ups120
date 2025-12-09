@@ -646,6 +646,12 @@ async fn main(spawner: Spawner) -> ! {
         .duration_since_epoch()
         .as_millis() as u64;
 
+    // Firmware version log (once per boot)
+    info!(
+        "ups-main: version={} commit={} build_ts={}",
+        UPS_VERSION, UPS_GIT_HASH, UPS_BUILD_TS,
+    );
+
     // === Restore board bring-up so other subsystems remain functional ===
     // Buttons (internal pull-up, active-low)
     let in_cfg = InputConfig::default().with_pull(Pull::Up);
