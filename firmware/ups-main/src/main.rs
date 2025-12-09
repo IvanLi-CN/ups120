@@ -12,6 +12,10 @@ mod thermal;
 mod tsens;
 mod ui;
 
+pub const UPS_VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const UPS_GIT_HASH: &str = env!("UPS_GIT_HASH");
+pub const UPS_BUILD_TS: &str = env!("UPS_BUILD_TS");
+
 use button_input::{ButtonConfig, ButtonState};
 use defmt::{Debug2Format, debug, info, warn};
 use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
@@ -641,6 +645,12 @@ async fn main(spawner: Spawner) -> ! {
     let boot_millis = esp_hal::time::Instant::now()
         .duration_since_epoch()
         .as_millis() as u64;
+
+    // Firmware version log (once per boot)
+    info!(
+        "ups-main: version={} commit={} build_ts={}",
+        UPS_VERSION, UPS_GIT_HASH, UPS_BUILD_TS,
+    );
 
     // === Restore board bring-up so other subsystems remain functional ===
     // Buttons (internal pull-up, active-low)

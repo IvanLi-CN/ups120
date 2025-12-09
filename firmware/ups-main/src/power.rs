@@ -490,8 +490,7 @@ pub async fn power_task(
     // AC GOOD state derived from TPS2490 PG + INA226 VIN.
     let mut ac_present = false;
     // Track last time AC GOOD changed so we can derive a “stable for AC_STABLE_MS” window.
-    let mut ac_state_last_change_ms: u64 =
-        Instant::now().duration_since_epoch().as_millis() as u64;
+    let mut ac_state_last_change_ms: u64 = Instant::now().duration_since_epoch().as_millis() as u64;
     let mut charge_skip_adapter_logged = false;
 
     // Global single-instance INA226 driver on the shared I2C bus.
@@ -672,11 +671,7 @@ pub async fn power_task(
         if let Some(dev) = ina.as_mut() {
             match dev.bus_voltage_millivolts().await {
                 Ok(v_mv) => {
-                    let v_mv_u32 = if v_mv <= 0.0 {
-                        0
-                    } else {
-                        v_mv as u32
-                    };
+                    let v_mv_u32 = if v_mv <= 0.0 { 0 } else { v_mv as u32 };
                     vin_meas_mv = Some(v_mv_u32);
                     if ina226_fault {
                         info!("ina226: measurement recovered (vin={}mV)", v_mv_u32);
@@ -739,11 +734,7 @@ pub async fn power_task(
             last_ac_diag_log_ms = now_millis;
             info!(
                 "power: ac_diag ac_present={} pg_asserted={} vin_online={} vin_meas_mv={:?} ina226_fault={}",
-                ac_present,
-                pg_asserted,
-                vin_online,
-                vin_meas_mv,
-                ina226_fault,
+                ac_present, pg_asserted, vin_online, vin_meas_mv, ina226_fault,
             );
         }
 
