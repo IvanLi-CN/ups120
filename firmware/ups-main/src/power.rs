@@ -51,8 +51,8 @@ pub enum SbFaultCode {
 /// longer than necessary.
 #[derive(Clone, Copy)]
 pub struct PowerState {
-    /// AC présent / good flag as seen by the ESP32, derived from TPS2490 PG +
-    /// INA226 VIN measurement.
+    /// AC présent / good flag as seen by the ESP32, derived from TPS2490 PG
+    /// assertion (input path good) + INA226 VIN online check.
     pub ac_present: bool,
     /// Whether VIN has been stable for at least `AC_STABLE_MS`.
     pub ac_stable: bool,
@@ -483,7 +483,7 @@ pub async fn power_task(
     // Global single-instance drivers (async I2C devices on the shared bus)
     let mut tca: Option<Tca6408a<SharedI2cDevice<'static>>> =
         Some(Tca6408a::new(I2cDevice::new(i2c_bus)));
-    // Raw TPS2490 PG level sampled via TCA6408A IN_PG (true = high = Power Good).
+    // Raw TPS2490 PG level sampled via TCA6408A IN_PG (true = PG asserted = input path good).
     let mut in_pg_raw: Option<bool> = None;
     let mut last_in_pg_logged: Option<bool> = None;
     let mut in_pg_read_failed = false;
@@ -510,7 +510,15 @@ pub async fn power_task(
                 in_pg_raw = Some(pg);
                 last_in_pg_logged = Some(pg);
                 in_pg_read_failed = false;
-                info!("tca6408a: IN_PG={} (raw PG level, high=good)", if pg { "high" } else { "low" });
+                info!(
+                    "tca6408a: IN_PG={} ({})",
+                    if pg { "high" } else { "low" },
+                    if pg {
+                        "pg asserted, input path good"
+                    } else {
+                        "pg deasserted: startup/uvlo/limit/protect"
+                    }
+                );
             }
             Err(_) => {
                 warn!("tca6408a: read IN_PG failed");
@@ -630,8 +638,13 @@ pub async fn power_task(
                     in_pg_raw = Some(level);
                     if last_in_pg_logged != Some(level) {
                         info!(
-                            "tca6408a: IN_PG={} (raw PG level, high=good)",
-                            if level { "high" } else { "low" }
+                            "tca6408a: IN_PG={} ({})",
+                            if level { "high" } else { "low" },
+                            if level {
+                                "pg asserted, input path good"
+                            } else {
+                                "pg deasserted: startup/uvlo/limit/protect"
+                            }
                         );
                         last_in_pg_logged = Some(level);
                     }
@@ -682,15 +695,15 @@ pub async fn power_task(
             }
         }
 
-        // Derive AC GOOD from TPS2490 PG (high = Power Good) + INA226 VIN measurement.
-        let pg_good = matches!(in_pg_raw, Some(level) if level) && !in_pg_read_failed;
-        let vin_ok = vin_meas_mv
+        // Derive AC GOOD from TPS2490 PG assertion (input path good) + VIN online threshold + INA226 health.
+        let pg_asserted = matches!(in_pg_raw, Some(level) if level) && !in_pg_read_failed;
+        let vin_online = vin_meas_mv
             .map(|v| v > UPS_VBUS_AC_ONLINE_MV as u32)
             .unwrap_or(false);
-        let ac_good_now = pg_good && vin_ok && !ina226_fault;
+        let ac_present_now = pg_asserted && vin_online && !ina226_fault;
 
-        if ac_present != ac_good_now {
-            ac_present = ac_good_now;
+        if ac_present != ac_present_now {
+            ac_present = ac_present_now;
             ac_state_last_change_ms = now_millis;
             charge_skip_adapter_logged = false;
 
@@ -700,20 +713,24 @@ pub async fn power_task(
                 Some(flags) => {
                     let stm_ac = (flags & SB_STATE_FLAG_AC_PRESENT) != 0;
                     info!(
-                        "power: ac {} (stm_ac={} flags=0x{:04x} pg_good={} vin_meas_mv={:?})",
+                        "power: ac {} (stm_ac={} flags=0x{:04x} pg_asserted={} vin_online={} vin_meas_mv={:?} ina226_fault={})",
                         if ac_present { "good" } else { "not-good" },
                         stm_ac,
                         flags,
-                        pg_good,
+                        pg_asserted,
+                        vin_online,
                         vin_meas_mv,
+                        ina226_fault,
                     );
                 }
                 None => {
                     info!(
-                        "power: ac {} (stm_ac=? read_fail pg_good={} vin_meas_mv={:?})",
+                        "power: ac {} (stm_ac=? read_fail pg_asserted={} vin_online={} vin_meas_mv={:?} ina226_fault={})",
                         if ac_present { "good" } else { "not-good" },
-                        pg_good,
+                        pg_asserted,
+                        vin_online,
                         vin_meas_mv,
+                        ina226_fault,
                     );
                 }
             }
@@ -721,10 +738,10 @@ pub async fn power_task(
             // Periodic AC/INA226 diagnostic at INFO level for field debugging.
             last_ac_diag_log_ms = now_millis;
             info!(
-                "power: ac_diag ac_present={} pg_good={} vin_ok={} vin_meas_mv={:?} ina226_fault={}",
+                "power: ac_diag ac_present={} pg_asserted={} vin_online={} vin_meas_mv={:?} ina226_fault={}",
                 ac_present,
-                pg_good,
-                vin_ok,
+                pg_asserted,
+                vin_online,
                 vin_meas_mv,
                 ina226_fault,
             );
@@ -1160,11 +1177,10 @@ pub async fn power_task(
             }
         } else if let Some(vbat) = vbat_mv.or(sb_last_vbat_mv) {
             // Derive adapter stability window for charge decisions from AC GOOD.
-            let vin_ok_for_charge = ac_stable_now;
             info!(
                 "charge: decision ac_present={} ac_stable={} vin_meas_mv={:?} vbat={}mV manual={} temp_pause={}",
                 ac_present,
-                vin_ok_for_charge,
+                ac_stable_now,
                 vin_meas_mv,
                 vbat,
                 sb_manual_enable,
@@ -1192,7 +1208,7 @@ pub async fn power_task(
                     info!("charge: skip enable (adapter missing, vbat={=u32}mV)", vbat);
                     charge_skip_adapter_logged = true;
                 }
-            } else if !vin_ok_for_charge {
+            } else if !ac_stable_now {
                 // Adapter just recovered or is unstable: keep charging disabled within the
                 // stability window and only log once.
                 if vbat <= CHARGE_START_VBAT_MV && !charge_skip_adapter_logged {

@@ -230,7 +230,7 @@ pub const DISCH_STOP_VBAT_MV: u32 = 13_500;
 /// UPS discharge resume threshold with hysteresis (pack).
 /// match discharge_policy.md §4.3; 5S * 3.2V ≈ 16.0V.
 pub const DISCH_RESUME_VBAT_MV: u32 = 16_000;
-/// AC 适配器恢复后，IN_PG 连续为 High 至少 10 s 才允许重新开始充电。
+/// AC 适配器恢复后，AC GOOD（PG 断言 + VIN 在线）连续为真至少 10 s 才允许重新开始充电。
 pub const AC_STABLE_MS: u64 = 10_000;
 pub const TEMP_PAUSE_C: f32 = 40.0;
 pub const TEMP_RESUME_C: f32 = 35.0;
