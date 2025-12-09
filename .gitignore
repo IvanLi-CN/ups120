@@ -2,7 +2,6 @@ debug/
 target/
 target-warn/
 logs/
-Cargo.lock
 
 /.idea
 .serena/
