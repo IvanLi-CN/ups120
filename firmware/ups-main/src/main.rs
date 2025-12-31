@@ -4,10 +4,12 @@
 mod adin_temp;
 mod batt_est;
 mod button_input;
+mod buzzer;
 mod display;
 mod fan_control;
 mod io_expander;
 mod power;
+mod prompt_tone;
 mod thermal;
 mod tsens;
 mod ui;
@@ -665,6 +667,8 @@ async fn main(spawner: Spawner) -> ! {
     let ui_event_tx: UiEventSender = ui_channel.sender();
     let ui_event_rx: UiEventReceiver = ui_channel.receiver();
 
+    let (_tone_tx, tone_rx) = prompt_tone::channel();
+
     // Spawn asynchronous button scanner task.
     let _ = spawner.spawn(button_task(
         btn_center,
@@ -778,11 +782,13 @@ async fn main(spawner: Spawner) -> ! {
     let mut buzzer = ledc.channel(channel::Number::Channel1, peripherals.GPIO38);
     buzzer
         .configure(channel::config::Config {
-            timer: &t_buz,
+            timer: &buzzer::BUZZER_TIMER_PROXY,
             duty_pct: 0,
             drive_mode: esp_hal::gpio::DriveMode::PushPull,
         })
         .unwrap();
+    let buzzer = buzzer::Buzzer::new(t_buz, buzzer);
+    let _ = spawner.spawn(prompt_tone::tone_task(buzzer, tone_rx));
     let _ = ui::boot_update(&mut spi, &mut _cs, &mut _dc, 25, "GPIO/LEDC PWM");
 
     // LCD Backlight on GPIO15 (LowSpeed@20kHz)
@@ -809,8 +815,7 @@ async fn main(spawner: Spawner) -> ! {
     info!("SPI LCD pins: DC=GPIO10, MOSI=GPIO11, SCLK=GPIO12, CS=GPIO13, RST=GPIO14");
     info!("Fan control: EN=GPIO39, PWM=GPIO40; buzzer=GPIO38 (2kHz)");
 
-    // Keep buzzer idle; fan controller will manage enable/duty automatically
-    buzzer.set_duty(0).ok();
+    // Keep fan disabled until thermal task claims it.
     fan_en.set_low();
 
     // Initialize LCD and draw boot UI once (non-blocking afterwards)
