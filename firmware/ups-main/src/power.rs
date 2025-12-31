@@ -15,10 +15,27 @@ use crate::{
     UPS_SC_IBAT_LIMIT_MA, UPS_SC_IBUS_LIMIT_MA, UPS_SC_RS1_MOHM, UPS_SC_RS2_MOHM,
     UPS_VBUS_AC_OFFLINE_MV, UPS_VBUS_AC_ONLINE_MV, UPS_VBUS_MAX_MV, UPS_VBUS_MIN_MV, fan_control,
     io_expander::Tca6408a,
+    prompt_tone::{SoundId, ToneRequest, ToneRequestSender},
 };
 
 /// INA226 I²C address on the UPS power board (A0=A1=GND).
 const INA226_ADDR: u8 = 0x40;
+
+fn cooldown_ok(last_ms: &mut Option<u64>, now_ms: u64, cooldown_ms: u64) -> bool {
+    if let Some(last) = *last_ms {
+        if now_ms.saturating_sub(last) < cooldown_ms {
+            return false;
+        }
+    }
+    *last_ms = Some(now_ms);
+    true
+}
+
+fn try_send_tone(tone_tx: &ToneRequestSender, req: ToneRequest, what: &'static str) {
+    if tone_tx.try_send(req).is_err() {
+        debug!("tone: dropped (channel full) {}", what);
+    }
+}
 
 /// Charging mode exposed to other tasks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -446,6 +463,7 @@ pub async fn power_task(
     i2c_bus: &'static I2cBusMutex,
     power_state: &'static PowerStateMutex,
     _thermal_state: &'static crate::thermal::ThermalStateMutex,
+    tone_tx: ToneRequestSender,
 ) {
     // Before touching other devices on the bus, validate STM32 I2C once
     // (mirrors legacy behaviour from `main.rs`).
@@ -469,6 +487,11 @@ pub async fn power_task(
     let mut last_chg_pause_cause: Option<u8> = None;
     let mut sb_comm_error: bool = false;
     let mut sb_comm_error_streak: u8 = 0;
+    let mut last_temp_pause_effective: bool = false;
+    let mut temp_pause_enter_notice_ms: Option<u64> = None;
+    let mut temp_pause_exit_notice_ms: Option<u64> = None;
+    let mut sb_cfg_drift_notice_ms: Option<u64> = None;
+    let mut sb_cfg_reapply_fail_notice_ms: Option<u64> = None;
 
     {
         let mut sb_i2c = I2cDevice::new(i2c_bus);
@@ -487,8 +510,13 @@ pub async fn power_task(
     let mut in_pg_raw: Option<bool> = None;
     let mut last_in_pg_logged: Option<bool> = None;
     let mut in_pg_read_failed = false;
+    let mut last_in_pg_read_failed = false;
+    let mut in_pg_fail_notice_ms: Option<u64> = None;
+    let mut in_pg_recover_notice_ms: Option<u64> = None;
     // AC GOOD state derived from TPS2490 PG + INA226 VIN.
     let mut ac_present = false;
+    let mut last_ac_present = false;
+    let mut last_ac_stable = false;
     // Track last time AC GOOD changed so we can derive a “stable for AC_STABLE_MS” window.
     let mut ac_state_last_change_ms: u64 = Instant::now().duration_since_epoch().as_millis() as u64;
     let mut charge_skip_adapter_logged = false;
@@ -496,7 +524,10 @@ pub async fn power_task(
     // Global single-instance INA226 driver on the shared I2C bus.
     let mut ina: Option<INA226<SharedI2cDevice<'static>>> = None;
     let mut ina226_fault: bool = false;
+    let mut last_ina226_fault: bool = false;
     let mut ina226_fault_logged: bool = false;
+    let mut ina226_fault_notice_ms: Option<u64> = None;
+    let mut ina226_recover_notice_ms: Option<u64> = None;
     let mut last_ac_diag_log_ms: u64 = 0;
 
     if let Some(t) = tca.as_mut() {
@@ -546,6 +577,9 @@ pub async fn power_task(
     let mut sb_temp_status_error_logged: bool = false;
     // One-shot diagnostic flag for the extended temperature window (0x40..0x47).
     let mut sb_temp_window_logged: bool = false;
+    let mut alarm_latched_active = false;
+    let mut alarm_thermal_active = false;
+    let mut alarm_comm_active = false;
 
     // Periodic loop matching the original 500 ms cadence for power sampling and
     // charger control.
@@ -762,6 +796,13 @@ pub async fn power_task(
                             "smart-battery: cfg drift detected hw=0x{:02x} expected=0x{:02x}",
                             actual, sb_config_value
                         );
+                        if cooldown_ok(&mut sb_cfg_drift_notice_ms, now_millis, 20_000) {
+                            try_send_tone(
+                                &tone_tx,
+                                ToneRequest::NoticeOnce(SoundId::NoticeWarnOnce),
+                                "sb_cfg_drift",
+                            );
+                        }
                         let desired = crate::compose_sb_charge_config(
                             SB_AUTO_ENABLED,
                             sb_manual_enable,
@@ -781,6 +822,17 @@ pub async fn power_task(
                             }
                             Err(()) => {
                                 warn!("smart-battery: failed to reapply charge config");
+                                if cooldown_ok(
+                                    &mut sb_cfg_reapply_fail_notice_ms,
+                                    now_millis,
+                                    20_000,
+                                ) {
+                                    try_send_tone(
+                                        &tone_tx,
+                                        ToneRequest::NoticeOnce(SoundId::NoticeErrorOnce),
+                                        "sb_cfg_reapply_failed",
+                                    );
+                                }
                             }
                         }
                     }
@@ -1264,8 +1316,7 @@ pub async fn power_task(
             ChargeMode::Auto
         };
 
-        let mut state = power_state.lock().await;
-        *state = PowerState {
+        let new_state = PowerState {
             ac_present,
             ac_stable,
             vin_meas_mv,
@@ -1288,5 +1339,156 @@ pub async fn power_task(
             sb_comm_error,
             last_update_ms: now_millis,
         };
+
+        // === Prompt tones: edge-triggered events ===
+        //
+        // Notes:
+        // - Use try_send() only; drop on full channel.
+        // - NoticeOnce requests are ignored while alarms are active by the tone manager.
+
+        // AC lost / restored mode melodies.
+        if last_ac_present && !new_state.ac_present {
+            try_send_tone(
+                &tone_tx,
+                ToneRequest::ModeMelody(SoundId::MelodyAcLost),
+                "ac_lost",
+            );
+        }
+        if !last_ac_stable && new_state.ac_stable {
+            try_send_tone(
+                &tone_tx,
+                ToneRequest::ModeMelody(SoundId::MelodyAcRestored),
+                "ac_restored",
+            );
+        }
+        last_ac_present = new_state.ac_present;
+        last_ac_stable = new_state.ac_stable;
+
+        // Temperature pause effective (charging gating): NoticeOnce enter/exit with cooldown.
+        if !last_temp_pause_effective && new_state.temp_pause_active {
+            if cooldown_ok(&mut temp_pause_enter_notice_ms, now_millis, 20_000) {
+                try_send_tone(
+                    &tone_tx,
+                    ToneRequest::NoticeOnce(SoundId::NoticeWarnOnce),
+                    "temp_pause_enter",
+                );
+            }
+        } else if last_temp_pause_effective && !new_state.temp_pause_active {
+            if cooldown_ok(&mut temp_pause_exit_notice_ms, now_millis, 20_000) {
+                try_send_tone(
+                    &tone_tx,
+                    ToneRequest::NoticeOnce(SoundId::NoticeInfoOnce),
+                    "temp_pause_exit",
+                );
+            }
+        }
+        last_temp_pause_effective = new_state.temp_pause_active;
+
+        // INA226 fault / recover: NoticeOnce enter/exit with cooldown.
+        if !last_ina226_fault && new_state.ina226_fault {
+            if cooldown_ok(&mut ina226_fault_notice_ms, now_millis, 20_000) {
+                try_send_tone(
+                    &tone_tx,
+                    ToneRequest::NoticeOnce(SoundId::NoticeWarnOnce),
+                    "ina226_fault",
+                );
+            }
+        } else if last_ina226_fault && !new_state.ina226_fault {
+            if cooldown_ok(&mut ina226_recover_notice_ms, now_millis, 20_000) {
+                try_send_tone(
+                    &tone_tx,
+                    ToneRequest::NoticeOnce(SoundId::NoticeInfoOnce),
+                    "ina226_recover",
+                );
+            }
+        }
+        last_ina226_fault = new_state.ina226_fault;
+
+        // IN_PG read failed / recover: NoticeOnce enter/exit with cooldown.
+        if !last_in_pg_read_failed && in_pg_read_failed {
+            if cooldown_ok(&mut in_pg_fail_notice_ms, now_millis, 20_000) {
+                try_send_tone(
+                    &tone_tx,
+                    ToneRequest::NoticeOnce(SoundId::NoticeWarnOnce),
+                    "in_pg_read_failed",
+                );
+            }
+        } else if last_in_pg_read_failed && !in_pg_read_failed {
+            if cooldown_ok(&mut in_pg_recover_notice_ms, now_millis, 20_000) {
+                try_send_tone(
+                    &tone_tx,
+                    ToneRequest::NoticeOnce(SoundId::NoticeInfoOnce),
+                    "in_pg_read_recover",
+                );
+            }
+        }
+        last_in_pg_read_failed = in_pg_read_failed;
+
+        // AlarmLoop enter/exit (edge-triggered).
+        let sb_fault = compute_sb_fault(&new_state);
+
+        let alarm_latched_now =
+            matches!(sb_fault, Some(SbFaultCode::FaultBq | SbFaultCode::FaultSc))
+                || pack_critical_fault
+                || sc_fault_latched;
+        let alarm_thermal_now = matches!(
+            sb_fault,
+            Some(
+                SbFaultCode::TempLow
+                    | SbFaultCode::TempHotChg
+                    | SbFaultCode::TempHotDsg
+                    | SbFaultCode::OvUvOc
+            )
+        ) || ups_temp_pause_active;
+        let alarm_comm_now =
+            matches!(sb_fault, Some(SbFaultCode::CommErr | SbFaultCode::StateNA)) || sb_comm_error;
+
+        if !alarm_latched_active && alarm_latched_now {
+            try_send_tone(
+                &tone_tx,
+                ToneRequest::AlarmLoopEnter(SoundId::AlarmLatchedLoop),
+                "alarm_latched_enter",
+            );
+        } else if alarm_latched_active && !alarm_latched_now {
+            try_send_tone(
+                &tone_tx,
+                ToneRequest::AlarmLoopExit(SoundId::AlarmLatchedLoop),
+                "alarm_latched_exit",
+            );
+        }
+        alarm_latched_active = alarm_latched_now;
+
+        if !alarm_thermal_active && alarm_thermal_now {
+            try_send_tone(
+                &tone_tx,
+                ToneRequest::AlarmLoopEnter(SoundId::AlarmThermalLoop),
+                "alarm_thermal_enter",
+            );
+        } else if alarm_thermal_active && !alarm_thermal_now {
+            try_send_tone(
+                &tone_tx,
+                ToneRequest::AlarmLoopExit(SoundId::AlarmThermalLoop),
+                "alarm_thermal_exit",
+            );
+        }
+        alarm_thermal_active = alarm_thermal_now;
+
+        if !alarm_comm_active && alarm_comm_now {
+            try_send_tone(
+                &tone_tx,
+                ToneRequest::AlarmLoopEnter(SoundId::AlarmCommLoop),
+                "alarm_comm_enter",
+            );
+        } else if alarm_comm_active && !alarm_comm_now {
+            try_send_tone(
+                &tone_tx,
+                ToneRequest::AlarmLoopExit(SoundId::AlarmCommLoop),
+                "alarm_comm_exit",
+            );
+        }
+        alarm_comm_active = alarm_comm_now;
+
+        let mut state = power_state.lock().await;
+        *state = new_state;
     }
 }

@@ -829,7 +829,12 @@ async fn main(spawner: Spawner) -> ! {
     // Initialise shared power/thermal state and spawn background management tasks.
     let power_state = power::init_power_state();
     let thermal_state = thermal::init_thermal_state();
-    let _ = spawner.spawn(power::power_task(i2c_bus, power_state, thermal_state));
+    let _ = spawner.spawn(power::power_task(
+        i2c_bus,
+        power_state,
+        thermal_state,
+        _tone_tx.clone(),
+    ));
 
     // SPI for LCD (write-only): MOSI=11, SCLK=12, optional CS/DC/RST/BL as GPIO
     let mut _dc = Output::new(peripherals.GPIO10, Level::Low, OutputConfig::default());
