@@ -14,9 +14,8 @@ pub const TONE_REQUEST_CAPACITY: usize = 16;
 pub type ToneRequestSender = Sender<'static, NoopRawMutex, ToneRequest, TONE_REQUEST_CAPACITY>;
 pub type ToneRequestReceiver = Receiver<'static, NoopRawMutex, ToneRequest, TONE_REQUEST_CAPACITY>;
 
-static TONE_REQUEST_CHANNEL: StaticCell<
-    Channel<NoopRawMutex, ToneRequest, TONE_REQUEST_CAPACITY>,
-> = StaticCell::new();
+static TONE_REQUEST_CHANNEL: StaticCell<Channel<NoopRawMutex, ToneRequest, TONE_REQUEST_CAPACITY>> =
+    StaticCell::new();
 
 pub fn channel() -> (ToneRequestSender, ToneRequestReceiver) {
     let ch = TONE_REQUEST_CHANNEL.init(Channel::new());
@@ -1275,7 +1274,10 @@ impl PromptToneManager {
             if current.kind == PlaybackKind::Action {
                 return;
             }
-            if alarm_priority(current.sound).is_some() && current.sound == alarm && !self.alarm_dirty {
+            if alarm_priority(current.sound).is_some()
+                && current.sound == alarm
+                && !self.alarm_dirty
+            {
                 return;
             }
         }
@@ -1305,7 +1307,9 @@ impl PromptToneManager {
                 } else if let Some(current) = self.current {
                     if current.kind == PlaybackKind::Background
                         && alarm_priority(current.sound).is_some()
-                        && self.select_highest_alarm().is_some_and(|a| a != current.sound)
+                        && self
+                            .select_highest_alarm()
+                            .is_some_and(|a| a != current.sound)
                     {
                         self.alarm_dirty = true;
                         if current.is_current_step_silence() {
@@ -1335,7 +1339,9 @@ impl PromptToneManager {
     fn on_step_boundary(&mut self) {
         if self.any_alarm_active() && self.alarm_dirty {
             if let Some(current) = self.current {
-                if current.kind == PlaybackKind::Background && alarm_priority(current.sound).is_some() {
+                if current.kind == PlaybackKind::Background
+                    && alarm_priority(current.sound).is_some()
+                {
                     self.ensure_alarm_playing();
                     return;
                 }
@@ -1395,14 +1401,14 @@ impl PromptToneManager {
 }
 
 #[task]
-pub async fn tone_task(buzzer: Buzzer, mut rx: ToneRequestReceiver) {
+pub async fn tone_task(buzzer: Buzzer, rx: ToneRequestReceiver) {
     let mut mgr = PromptToneManager::new(buzzer);
     mgr.buzzer.stop();
 
     loop {
         if mgr.current.is_none() {
             // Idle: wait for something to do.
-            let req = rx.recv().await;
+            let req = rx.receive().await;
             mgr.handle_request(req);
             if mgr.any_alarm_active() {
                 mgr.ensure_alarm_playing();
@@ -1415,7 +1421,7 @@ pub async fn tone_task(buzzer: Buzzer, mut rx: ToneRequestReceiver) {
         };
         let wait_ms = cur.current_step().duration_ms as u64;
         let wait_fut = Timer::after(Duration::from_millis(wait_ms));
-        match select(rx.recv(), wait_fut).await {
+        match select(rx.receive(), wait_fut).await {
             Either::First(req) => {
                 mgr.handle_request(req);
                 if mgr.any_alarm_active() {

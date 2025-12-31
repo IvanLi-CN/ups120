@@ -1,7 +1,6 @@
-use defmt::warn;
+use defmt::{Debug2Format, warn};
 use esp_hal::{
     ledc::{
-        Error,
         LowSpeed,
         channel::{self, ChannelIFace},
         timer::{self, TimerIFace},
@@ -37,7 +36,7 @@ impl TimerIFace<LowSpeed> for TimerProxy {
     fn configure(
         &mut self,
         _config: timer::config::Config<<LowSpeed as timer::TimerSpeed>::ClockSourceType>,
-    ) -> Result<(), Error> {
+    ) -> Result<(), timer::Error> {
         Ok(())
     }
 
@@ -58,8 +57,11 @@ impl TimerIFace<LowSpeed> for TimerProxy {
     }
 }
 
-pub static BUZZER_TIMER_PROXY: TimerProxy =
-    TimerProxy::new(timer::Number::Timer1, timer::config::Duty::Duty8Bit, DEFAULT_FREQ_HZ);
+pub static BUZZER_TIMER_PROXY: TimerProxy = TimerProxy::new(
+    timer::Number::Timer1,
+    timer::config::Duty::Duty8Bit,
+    DEFAULT_FREQ_HZ,
+);
 
 pub struct Buzzer {
     timer: timer::Timer<'static, LowSpeed>,
@@ -69,7 +71,10 @@ pub struct Buzzer {
 }
 
 impl Buzzer {
-    pub fn new(timer: timer::Timer<'static, LowSpeed>, channel: channel::Channel<'static, LowSpeed>) -> Self {
+    pub fn new(
+        timer: timer::Timer<'static, LowSpeed>,
+        channel: channel::Channel<'static, LowSpeed>,
+    ) -> Self {
         let mut this = Self {
             timer,
             channel,
@@ -94,15 +99,14 @@ impl Buzzer {
             clock_source: timer::LSClockSource::APBClk,
             frequency: Rate::from_hz(freq_hz),
         }) {
-            warn!("buzzer: timer configure failed: {:?}", err);
+            warn!("buzzer: timer configure failed: {}", Debug2Format(&err));
             let _ = self.channel.set_duty(0);
             return;
         }
 
         if let Err(err) = self.channel.set_duty(duty_pct) {
-            warn!("buzzer: set duty failed: {:?}", err);
+            warn!("buzzer: set duty failed: {}", Debug2Format(&err));
             let _ = self.channel.set_duty(0);
         }
     }
 }
-
