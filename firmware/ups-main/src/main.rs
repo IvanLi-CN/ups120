@@ -4,10 +4,12 @@
 mod adin_temp;
 mod batt_est;
 mod button_input;
+mod buzzer;
 mod display;
 mod fan_control;
 mod io_expander;
 mod power;
+mod prompt_tone;
 mod thermal;
 mod tsens;
 mod ui;
@@ -34,7 +36,7 @@ use esp_hal::{
     delay::Delay,
     dma::{DmaRxBuf, DmaTxBuf},
     dma_buffers,
-    gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull},
+    gpio::{DriveStrength, Input, InputConfig, Level, Output, OutputConfig, Pull},
     i2c::master::{Config as I2cConfig, I2c},
     ledc::{
         LSGlobalClkSource, Ledc, LowSpeed, channel, channel::ChannelIFace, timer, timer::TimerIFace,
@@ -270,6 +272,8 @@ static I2C0_BUS: StaticCell<I2cBusMutex> = StaticCell::new();
 static FAN_TIMER: StaticCell<timer::Timer<'static, LowSpeed>> = StaticCell::new();
 
 const UI_EVENT_CAPACITY: usize = 8;
+const MODE_MELODY_STABLE_MS: u64 = 1_800;
+const MODE_MELODY_COOLDOWN_MS: u64 = 30_000;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum UiScreen {
@@ -319,6 +323,7 @@ async fn button_task(
     btn_left: Input<'static>,
     ui_tx: UiEventSender,
     boot_millis: u64,
+    tone_tx: prompt_tone::ToneRequestSender,
 ) {
     // Initialize per-button state machines for debounced/gesture-aware logging.
     let center_initial = btn_center.is_low();
@@ -340,8 +345,11 @@ async fn button_task(
     let mut btn_down_state = ButtonState::new(cfg_down, down_initial, boot_millis);
     let mut btn_left_state = ButtonState::new(cfg_left, left_initial, boot_millis);
 
+    let mut prev_center_pressed = btn_center_state.is_pressed();
     let mut prev_down_pressed = btn_down_state.is_pressed();
+    let mut prev_left_pressed = btn_left_state.is_pressed();
     let mut prev_up_pressed = btn_up_state.is_pressed();
+    let mut prev_right_pressed = btn_right_state.is_pressed();
 
     info!(
         "Initial button state: center={} up={} right={} down={} left={}",
@@ -360,21 +368,72 @@ async fn button_task(
         btn_left_state.update(now_ms, btn_left.is_low());
 
         // Derive simple edge-triggered navigation events from debounced states.
+        let center_pressed = btn_center_state.is_pressed();
         let down_pressed = btn_down_state.is_pressed();
+        let left_pressed = btn_left_state.is_pressed();
         let up_pressed = btn_up_state.is_pressed();
+        let right_pressed = btn_right_state.is_pressed();
 
         if down_pressed && !prev_down_pressed {
-            let _ = ui_tx.try_send(UiEvent::SwitchToBattDetail);
+            if ui_tx.try_send(UiEvent::SwitchToBattDetail).is_err() {
+                let _ = tone_tx.try_send(prompt_tone::ToneRequest::Action(
+                    prompt_tone::SoundId::ActionFault,
+                ));
+            }
         }
         if up_pressed && !prev_up_pressed {
-            let _ = ui_tx.try_send(UiEvent::SwitchToDashboard);
+            if ui_tx.try_send(UiEvent::SwitchToDashboard).is_err() {
+                let _ = tone_tx.try_send(prompt_tone::ToneRequest::Action(
+                    prompt_tone::SoundId::ActionFault,
+                ));
+            }
         }
 
+        // Left/Right/Center currently have no action assigned: treat as a valid no-op action.
+        if center_pressed && !prev_center_pressed {
+            let _ = tone_tx.try_send(prompt_tone::ToneRequest::Action(
+                prompt_tone::SoundId::ActionFail,
+            ));
+        }
+        if left_pressed && !prev_left_pressed {
+            let _ = tone_tx.try_send(prompt_tone::ToneRequest::Action(
+                prompt_tone::SoundId::ActionFail,
+            ));
+        }
+        if right_pressed && !prev_right_pressed {
+            let _ = tone_tx.try_send(prompt_tone::ToneRequest::Action(
+                prompt_tone::SoundId::ActionFail,
+            ));
+        }
+
+        prev_center_pressed = center_pressed;
         prev_down_pressed = down_pressed;
+        prev_left_pressed = left_pressed;
         prev_up_pressed = up_pressed;
+        prev_right_pressed = right_pressed;
 
         Timer::after(Duration::from_millis(fan_control::SAMPLE_PERIOD_MS.into())).await;
     }
+}
+
+fn dashboard_mode_melody_id(mode: ui::DashboardMode) -> Option<prompt_tone::SoundId> {
+    match mode {
+        ui::DashboardMode::Ready => Some(prompt_tone::SoundId::MelodyModeReady),
+        ui::DashboardMode::Charge => Some(prompt_tone::SoundId::MelodyModeCharge),
+        ui::DashboardMode::Discharge => Some(prompt_tone::SoundId::MelodyModeDischarge),
+        ui::DashboardMode::LowBatt => None,
+    }
+}
+
+#[embassy_executor::task]
+async fn boot_melody_task(tone_tx: prompt_tone::ToneRequestSender) {
+    // Play a short, gentle startup jingle once per boot.
+    // Delay slightly so bring-up logs and display init don't feel "busy".
+    Timer::after(Duration::from_millis(900)).await;
+    info!("tone: boot melody");
+    let _ = tone_tx.try_send(prompt_tone::ToneRequest::ModeMelody(
+        prompt_tone::SoundId::MelodyAcRestored,
+    ));
 }
 
 /// Asynchronous UI task responsible for:
@@ -390,6 +449,7 @@ async fn ui_task(
     power_state: &'static power::PowerStateMutex,
     thermal_state: &'static thermal::ThermalStateMutex,
     boot_millis: u64,
+    tone_tx: prompt_tone::ToneRequestSender,
 ) {
     // UI navigation state: dashboard vs battery detail.
     let mut ui_screen = UiScreen::Dashboard;
@@ -407,10 +467,21 @@ async fn ui_task(
     let mut cells_frame = ui::CellsFrame::Voltage;
     let mut cells_alt_counter: u8 = 0;
     let mut last_dashboard_mode: Option<ui::DashboardMode> = None;
+    let mut lowbatt_alarm_active: bool = false;
+
+    let mut pending_dashboard_mode: Option<ui::DashboardMode> = None;
+    let mut pending_dashboard_mode_since_ms: u64 = 0;
+    let mut pending_dashboard_mode_is_transition: bool = false;
+    let mut pending_dashboard_mode_handled: bool = true;
+
+    let mut last_melody_ready_ms: Option<u64> = None;
+    let mut last_melody_charge_ms: Option<u64> = None;
+    let mut last_melody_discharge_ms: Option<u64> = None;
 
     loop {
         // Process UI events produced by the button task.
         while let Ok(event) = ui_event_rx.try_receive() {
+            let prev_screen = ui_screen;
             match event {
                 UiEvent::SwitchToDashboard => {
                     if !matches!(ui_screen, UiScreen::Dashboard) {
@@ -425,6 +496,13 @@ async fn ui_task(
                     }
                 }
             }
+
+            let action_sound = if ui_screen != prev_screen {
+                prompt_tone::SoundId::ActionOk
+            } else {
+                prompt_tone::SoundId::ActionFail
+            };
+            let _ = tone_tx.try_send(prompt_tone::ToneRequest::Action(action_sound));
         }
 
         // UI/采样刷新节奏：约 2 Hz（500 ms 一次）
@@ -513,6 +591,25 @@ async fn ui_task(
             let sb_fault = power::compute_sb_fault(&power_snapshot);
 
             if last_dashboard_mode != Some(dashboard_mode) {
+                if matches!(dashboard_mode, ui::DashboardMode::LowBatt) && !lowbatt_alarm_active {
+                    let _ = tone_tx.try_send(prompt_tone::ToneRequest::AlarmLoopEnter(
+                        prompt_tone::SoundId::AlarmLowbattLoop,
+                    ));
+                    lowbatt_alarm_active = true;
+                } else if !matches!(dashboard_mode, ui::DashboardMode::LowBatt)
+                    && lowbatt_alarm_active
+                {
+                    let _ = tone_tx.try_send(prompt_tone::ToneRequest::AlarmLoopExit(
+                        prompt_tone::SoundId::AlarmLowbattLoop,
+                    ));
+                    lowbatt_alarm_active = false;
+                }
+
+                pending_dashboard_mode = Some(dashboard_mode);
+                pending_dashboard_mode_since_ms = now_millis;
+                pending_dashboard_mode_is_transition = last_dashboard_mode.is_some();
+                pending_dashboard_mode_handled = false;
+
                 info!(
                     "ui: dashboard_mode={} batt_mode={} sb_fault={:?}",
                     dashboard_mode_str(dashboard_mode),
@@ -520,6 +617,43 @@ async fn ui_task(
                     Debug2Format(&sb_fault),
                 );
                 last_dashboard_mode = Some(dashboard_mode);
+            }
+
+            if !pending_dashboard_mode_handled
+                && pending_dashboard_mode == Some(dashboard_mode)
+                && pending_dashboard_mode_is_transition
+                && now_millis.saturating_sub(pending_dashboard_mode_since_ms)
+                    >= MODE_MELODY_STABLE_MS
+            {
+                if let Some(sound_id) = dashboard_mode_melody_id(dashboard_mode) {
+                    let last_played = match sound_id {
+                        prompt_tone::SoundId::MelodyModeReady => last_melody_ready_ms,
+                        prompt_tone::SoundId::MelodyModeCharge => last_melody_charge_ms,
+                        prompt_tone::SoundId::MelodyModeDischarge => last_melody_discharge_ms,
+                        _ => None,
+                    };
+
+                    let cooldown_ok = last_played.map_or(true, |t| {
+                        now_millis.saturating_sub(t) >= MODE_MELODY_COOLDOWN_MS
+                    });
+                    if cooldown_ok {
+                        let _ = tone_tx.try_send(prompt_tone::ToneRequest::ModeMelody(sound_id));
+                        match sound_id {
+                            prompt_tone::SoundId::MelodyModeReady => {
+                                last_melody_ready_ms = Some(now_millis);
+                            }
+                            prompt_tone::SoundId::MelodyModeCharge => {
+                                last_melody_charge_ms = Some(now_millis);
+                            }
+                            prompt_tone::SoundId::MelodyModeDischarge => {
+                                last_melody_discharge_ms = Some(now_millis);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+
+                pending_dashboard_mode_handled = true;
             }
 
             // Best-effort balancing cell index: when the smart-battery reports
@@ -665,6 +799,8 @@ async fn main(spawner: Spawner) -> ! {
     let ui_event_tx: UiEventSender = ui_channel.sender();
     let ui_event_rx: UiEventReceiver = ui_channel.receiver();
 
+    let (_tone_tx, tone_rx) = prompt_tone::channel();
+
     // Spawn asynchronous button scanner task.
     let _ = spawner.spawn(button_task(
         btn_center,
@@ -674,6 +810,7 @@ async fn main(spawner: Spawner) -> ! {
         btn_left,
         ui_event_tx,
         boot_millis,
+        _tone_tx.clone(),
     ));
 
     // RESET# to TCA6408A
@@ -703,7 +840,12 @@ async fn main(spawner: Spawner) -> ! {
     // Initialise shared power/thermal state and spawn background management tasks.
     let power_state = power::init_power_state();
     let thermal_state = thermal::init_thermal_state();
-    let _ = spawner.spawn(power::power_task(i2c_bus, power_state, thermal_state));
+    let _ = spawner.spawn(power::power_task(
+        i2c_bus,
+        power_state,
+        thermal_state,
+        _tone_tx.clone(),
+    ));
 
     // SPI for LCD (write-only): MOSI=11, SCLK=12, optional CS/DC/RST/BL as GPIO
     let mut _dc = Output::new(peripherals.GPIO10, Level::Low, OutputConfig::default());
@@ -743,7 +885,7 @@ async fn main(spawner: Spawner) -> ! {
         InputConfig::default().with_pull(Pull::Up),
     );
 
-    // LEDC PWM: FAN_PWM on GPIO40 (LowSpeed@25kHz), BUZZER on GPIO38 (LowSpeed@2kHz)
+    // LEDC PWM: FAN_PWM on GPIO40 (LowSpeed@25kHz)
     let mut ledc = Ledc::new(peripherals.LEDC);
     ledc.set_global_slow_clock(LSGlobalClkSource::APBClk);
 
@@ -753,15 +895,6 @@ async fn main(spawner: Spawner) -> ! {
             duty: timer::config::Duty::Duty8Bit,
             clock_source: timer::LSClockSource::APBClk,
             frequency: Rate::from_khz(25),
-        })
-        .unwrap();
-
-    let mut t_buz = ledc.timer::<LowSpeed>(timer::Number::Timer1);
-    t_buz
-        .configure(timer::config::Config {
-            duty: timer::config::Duty::Duty8Bit,
-            clock_source: timer::LSClockSource::APBClk,
-            frequency: Rate::from_khz(2),
         })
         .unwrap();
 
@@ -775,14 +908,37 @@ async fn main(spawner: Spawner) -> ! {
         })
         .unwrap();
 
-    let mut buzzer = ledc.channel(channel::Number::Channel1, peripherals.GPIO38);
-    buzzer
+    // BUZZER on GPIO38: LEDC square PWM (audio-rate).
+    //
+    // Keep max GPIO drive strength to help saturate Q1 (see BUZZER datasheet).
+    let buzzer_output = Output::new(
+        peripherals.GPIO38,
+        Level::Low,
+        OutputConfig::default().with_drive_strength(DriveStrength::_40mA),
+    )
+    .into_peripheral_output();
+
+    let mut t_buz = ledc.timer::<LowSpeed>(timer::Number::Timer1);
+    t_buz
+        .configure(timer::config::Config {
+            duty: timer::config::Duty::Duty8Bit,
+            clock_source: timer::LSClockSource::APBClk,
+            frequency: Rate::from_hz(buzzer::DEFAULT_FREQ_HZ),
+        })
+        .unwrap();
+
+    let mut buzzer_ch = ledc.channel::<LowSpeed>(channel::Number::Channel1, buzzer_output);
+    buzzer_ch
         .configure(channel::config::Config {
-            timer: &t_buz,
+            timer: &buzzer::BUZZER_TIMER_PROXY,
             duty_pct: 0,
             drive_mode: esp_hal::gpio::DriveMode::PushPull,
         })
         .unwrap();
+
+    let buzzer = buzzer::Buzzer::new(t_buz, buzzer_ch);
+    let _ = spawner.spawn(prompt_tone::tone_task(buzzer, tone_rx));
+    let _ = spawner.spawn(boot_melody_task(_tone_tx.clone()));
     let _ = ui::boot_update(&mut spi, &mut _cs, &mut _dc, 25, "GPIO/LEDC PWM");
 
     // LCD Backlight on GPIO15 (LowSpeed@20kHz)
@@ -807,10 +963,9 @@ async fn main(spawner: Spawner) -> ! {
     info!("GPIO mappings: buttons center/up/right/down/left = 0/1/2/4/5");
     info!("I2C0 pins: SDA=GPIO8, SCL=GPIO9, INTn=GPIO7, USB2_PG=GPIO21");
     info!("SPI LCD pins: DC=GPIO10, MOSI=GPIO11, SCLK=GPIO12, CS=GPIO13, RST=GPIO14");
-    info!("Fan control: EN=GPIO39, PWM=GPIO40; buzzer=GPIO38 (2kHz)");
+    info!("Fan control: EN=GPIO39, PWM=GPIO40; buzzer=GPIO38 (LEDC PWM)");
 
-    // Keep buzzer idle; fan controller will manage enable/duty automatically
-    buzzer.set_duty(0).ok();
+    // Keep fan disabled until thermal task claims it.
     fan_en.set_low();
 
     // Initialize LCD and draw boot UI once (non-blocking afterwards)
@@ -864,6 +1019,7 @@ async fn main(spawner: Spawner) -> ! {
         power_state,
         thermal_state,
         boot_millis,
+        _tone_tx.clone(),
     ));
 
     // Park the main task; all work is now handled by background Embassy tasks.
