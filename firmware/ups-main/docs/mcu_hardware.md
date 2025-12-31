@@ -44,7 +44,7 @@
 | 40 | GPIO35 | 35 | — | 未连接 |
 | 41 | GPIO36 | 36 | — | 未连接 |
 | 42 | GPIO37 | 37 | — | 未连接 |
-| 43 | GPIO38 | 38 | BUZZER | 蜂鸣器（无源，2 kHz PWM） |
+| 43 | GPIO38 | 38 | BUZZER | 蜂鸣器（无源，2.7 kHz PWM） |
 | 44 | MTCK | 39 | FAN_EN | 风扇使能（由 MTCK 改作 GPIO39 输出；默认 JTAG 脚位） |
 | 45 | MTDO | 40 | FAN_PWM | 风扇 PWM（由 MTDO 改作 GPIO40 PWM 输出；默认 JTAG 脚位） |
 | 46 | VDD3P3_CPU | — | — | CPU 3V3 电源 |

@@ -515,8 +515,10 @@ pub async fn power_task(
     let mut in_pg_recover_notice_ms: Option<u64> = None;
     // AC GOOD state derived from TPS2490 PG + INA226 VIN.
     let mut ac_present = false;
-    let mut last_ac_present = false;
-    let mut last_ac_stable = false;
+    // Edge detectors: keep None on the first iteration to avoid treating the
+    // initial state as a transition (e.g., AC restored on boot).
+    let mut last_ac_present: Option<bool> = None;
+    let mut last_ac_stable: Option<bool> = None;
     // Track last time AC GOOD changed so we can derive a “stable for AC_STABLE_MS” window.
     let mut ac_state_last_change_ms: u64 = Instant::now().duration_since_epoch().as_millis() as u64;
     let mut charge_skip_adapter_logged = false;
@@ -580,6 +582,11 @@ pub async fn power_task(
     let mut alarm_latched_active = false;
     let mut alarm_thermal_active = false;
     let mut alarm_comm_active = false;
+    let mut alarm_comm_pending_since_ms: Option<u64> = None;
+
+    // COMM alarm should not trigger during normal bring-up glitches. Require the
+    // fault condition to persist for a while before entering AlarmLoop.
+    const ALARM_COMM_PERSIST_MS: u64 = 15_000;
 
     // Periodic loop matching the original 500 ms cadence for power sampling and
     // charger control.
@@ -1346,23 +1353,23 @@ pub async fn power_task(
         // - Use try_send() only; drop on full channel.
         // - NoticeOnce requests are ignored while alarms are active by the tone manager.
 
-        // AC lost / restored mode melodies.
-        if last_ac_present && !new_state.ac_present {
+        // AC lost / restored mode melodies (edge-triggered).
+        if last_ac_present.is_some_and(|last| last) && !new_state.ac_present {
             try_send_tone(
                 &tone_tx,
                 ToneRequest::ModeMelody(SoundId::MelodyAcLost),
                 "ac_lost",
             );
         }
-        if !last_ac_stable && new_state.ac_stable {
+        if last_ac_stable.is_some_and(|last| !last) && new_state.ac_stable {
             try_send_tone(
                 &tone_tx,
                 ToneRequest::ModeMelody(SoundId::MelodyAcRestored),
                 "ac_restored",
             );
         }
-        last_ac_present = new_state.ac_present;
-        last_ac_stable = new_state.ac_stable;
+        last_ac_present = Some(new_state.ac_present);
+        last_ac_stable = Some(new_state.ac_stable);
 
         // Temperature pause effective (charging gating): NoticeOnce enter/exit with cooldown.
         if !last_temp_pause_effective && new_state.temp_pause_active {
@@ -1440,7 +1447,7 @@ pub async fn power_task(
                     | SbFaultCode::OvUvOc
             )
         ) || ups_temp_pause_active;
-        let alarm_comm_now =
+        let alarm_comm_condition_now =
             matches!(sb_fault, Some(SbFaultCode::CommErr | SbFaultCode::StateNA)) || sb_comm_error;
 
         if !alarm_latched_active && alarm_latched_now {
@@ -1473,20 +1480,30 @@ pub async fn power_task(
         }
         alarm_thermal_active = alarm_thermal_now;
 
-        if !alarm_comm_active && alarm_comm_now {
-            try_send_tone(
-                &tone_tx,
-                ToneRequest::AlarmLoopEnter(SoundId::AlarmCommLoop),
-                "alarm_comm_enter",
-            );
-        } else if alarm_comm_active && !alarm_comm_now {
-            try_send_tone(
-                &tone_tx,
-                ToneRequest::AlarmLoopExit(SoundId::AlarmCommLoop),
-                "alarm_comm_exit",
-            );
+        if alarm_comm_condition_now {
+            if alarm_comm_pending_since_ms.is_none() {
+                alarm_comm_pending_since_ms = Some(now_millis);
+            }
+            let pending_for_ms = now_millis.saturating_sub(alarm_comm_pending_since_ms.unwrap());
+            if !alarm_comm_active && pending_for_ms >= ALARM_COMM_PERSIST_MS {
+                try_send_tone(
+                    &tone_tx,
+                    ToneRequest::AlarmLoopEnter(SoundId::AlarmCommLoop),
+                    "alarm_comm_enter",
+                );
+                alarm_comm_active = true;
+            }
+        } else {
+            alarm_comm_pending_since_ms = None;
+            if alarm_comm_active {
+                try_send_tone(
+                    &tone_tx,
+                    ToneRequest::AlarmLoopExit(SoundId::AlarmCommLoop),
+                    "alarm_comm_exit",
+                );
+                alarm_comm_active = false;
+            }
         }
-        alarm_comm_active = alarm_comm_now;
 
         let mut state = power_state.lock().await;
         *state = new_state;

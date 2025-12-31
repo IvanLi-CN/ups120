@@ -79,14 +79,20 @@ struct Pattern {
 const DUTY_PCT_DEFAULT: u8 = 8;
 const ACTION_MIN_INTERVAL_MS: u64 = 160;
 
-const FREQ_ACTION_OK_HZ: u32 = 2_400;
-const FREQ_ACTION_FAIL_HZ: u32 = 2_000;
-const FREQ_ACTION_FAULT_HZ: u32 = 1_600;
-const FREQ_ALARM_HZ: u32 = 2_000;
-const FREQ_NOTICE_HZ: u32 = 2_000;
+// On-board passive electromagnetic buzzer rated around 2.7 kHz.
+// Keep tones near resonance for audible SPL.
+const FREQ_MELODY_LOW_HZ: u32 = 2_400;
+const FREQ_MELODY_MID_HZ: u32 = 2_700;
+const FREQ_MELODY_HIGH_HZ: u32 = 3_000;
+
+const FREQ_ACTION_OK_HZ: u32 = 2_900;
+const FREQ_ACTION_FAIL_HZ: u32 = 2_700;
+const FREQ_ACTION_FAULT_HZ: u32 = 2_500;
+const FREQ_ALARM_HZ: u32 = 2_700;
+const FREQ_NOTICE_HZ: u32 = 2_700;
 
 const ACTION_OK: [Step; 1] = [Step {
-    duration_ms: 40,
+    duration_ms: 80,
     tone: Some(Tone {
         freq_hz: FREQ_ACTION_OK_HZ,
         duty_pct: DUTY_PCT_DEFAULT,
@@ -95,18 +101,18 @@ const ACTION_OK: [Step; 1] = [Step {
 
 const ACTION_FAIL: [Step; 3] = [
     Step {
-        duration_ms: 40,
+        duration_ms: 80,
         tone: Some(Tone {
             freq_hz: FREQ_ACTION_FAIL_HZ,
             duty_pct: DUTY_PCT_DEFAULT,
         }),
     },
     Step {
-        duration_ms: 50,
+        duration_ms: 70,
         tone: None,
     },
     Step {
-        duration_ms: 40,
+        duration_ms: 80,
         tone: Some(Tone {
             freq_hz: FREQ_ACTION_FAIL_HZ,
             duty_pct: DUTY_PCT_DEFAULT,
@@ -116,7 +122,7 @@ const ACTION_FAIL: [Step; 3] = [
 
 const ACTION_FAULT: [Step; 6] = [
     Step {
-        duration_ms: 50,
+        duration_ms: 60,
         tone: Some(Tone {
             freq_hz: FREQ_ACTION_FAULT_HZ,
             duty_pct: DUTY_PCT_DEFAULT,
@@ -127,7 +133,7 @@ const ACTION_FAULT: [Step; 6] = [
         tone: None,
     },
     Step {
-        duration_ms: 50,
+        duration_ms: 60,
         tone: Some(Tone {
             freq_hz: FREQ_ACTION_FAULT_HZ,
             duty_pct: DUTY_PCT_DEFAULT,
@@ -138,7 +144,7 @@ const ACTION_FAULT: [Step; 6] = [
         tone: None,
     },
     Step {
-        duration_ms: 50,
+        duration_ms: 60,
         tone: Some(Tone {
             freq_hz: FREQ_ACTION_FAULT_HZ,
             duty_pct: DUTY_PCT_DEFAULT,
@@ -422,7 +428,7 @@ const MELODY_MODE_READY: [Step; 16] = [
     Step {
         duration_ms: 220,
         tone: Some(Tone {
-            freq_hz: 1_800,
+            freq_hz: FREQ_MELODY_HIGH_HZ,
             duty_pct: DUTY_PCT_DEFAULT,
         }),
     },
@@ -433,40 +439,7 @@ const MELODY_MODE_READY: [Step; 16] = [
     Step {
         duration_ms: 220,
         tone: Some(Tone {
-            freq_hz: 1_500,
-            duty_pct: DUTY_PCT_DEFAULT,
-        }),
-    },
-    Step {
-        duration_ms: 220,
-        tone: None,
-    },
-    Step {
-        duration_ms: 300,
-        tone: Some(Tone {
-            freq_hz: 1_200,
-            duty_pct: DUTY_PCT_DEFAULT,
-        }),
-    },
-    Step {
-        duration_ms: 500,
-        tone: None,
-    },
-    Step {
-        duration_ms: 220,
-        tone: Some(Tone {
-            freq_hz: 1_800,
-            duty_pct: DUTY_PCT_DEFAULT,
-        }),
-    },
-    Step {
-        duration_ms: 220,
-        tone: None,
-    },
-    Step {
-        duration_ms: 220,
-        tone: Some(Tone {
-            freq_hz: 1_500,
+            freq_hz: FREQ_MELODY_MID_HZ,
             duty_pct: DUTY_PCT_DEFAULT,
         }),
     },
@@ -477,7 +450,7 @@ const MELODY_MODE_READY: [Step; 16] = [
     Step {
         duration_ms: 300,
         tone: Some(Tone {
-            freq_hz: 1_200,
+            freq_hz: FREQ_MELODY_LOW_HZ,
             duty_pct: DUTY_PCT_DEFAULT,
         }),
     },
@@ -488,7 +461,40 @@ const MELODY_MODE_READY: [Step; 16] = [
     Step {
         duration_ms: 220,
         tone: Some(Tone {
-            freq_hz: 1_500,
+            freq_hz: FREQ_MELODY_HIGH_HZ,
+            duty_pct: DUTY_PCT_DEFAULT,
+        }),
+    },
+    Step {
+        duration_ms: 220,
+        tone: None,
+    },
+    Step {
+        duration_ms: 220,
+        tone: Some(Tone {
+            freq_hz: FREQ_MELODY_MID_HZ,
+            duty_pct: DUTY_PCT_DEFAULT,
+        }),
+    },
+    Step {
+        duration_ms: 220,
+        tone: None,
+    },
+    Step {
+        duration_ms: 300,
+        tone: Some(Tone {
+            freq_hz: FREQ_MELODY_LOW_HZ,
+            duty_pct: DUTY_PCT_DEFAULT,
+        }),
+    },
+    Step {
+        duration_ms: 500,
+        tone: None,
+    },
+    Step {
+        duration_ms: 220,
+        tone: Some(Tone {
+            freq_hz: FREQ_MELODY_MID_HZ,
             duty_pct: DUTY_PCT_DEFAULT,
         }),
     },
@@ -499,7 +505,7 @@ const MELODY_MODE_READY: [Step; 16] = [
     Step {
         duration_ms: 400,
         tone: Some(Tone {
-            freq_hz: 1_200,
+            freq_hz: FREQ_MELODY_LOW_HZ,
             duty_pct: DUTY_PCT_DEFAULT,
         }),
     },
@@ -513,7 +519,7 @@ const MELODY_MODE_CHARGE: [Step; 16] = [
     Step {
         duration_ms: 220,
         tone: Some(Tone {
-            freq_hz: 1_200,
+            freq_hz: FREQ_MELODY_LOW_HZ,
             duty_pct: DUTY_PCT_DEFAULT,
         }),
     },
@@ -524,40 +530,7 @@ const MELODY_MODE_CHARGE: [Step; 16] = [
     Step {
         duration_ms: 220,
         tone: Some(Tone {
-            freq_hz: 1_500,
-            duty_pct: DUTY_PCT_DEFAULT,
-        }),
-    },
-    Step {
-        duration_ms: 220,
-        tone: None,
-    },
-    Step {
-        duration_ms: 280,
-        tone: Some(Tone {
-            freq_hz: 1_800,
-            duty_pct: DUTY_PCT_DEFAULT,
-        }),
-    },
-    Step {
-        duration_ms: 500,
-        tone: None,
-    },
-    Step {
-        duration_ms: 220,
-        tone: Some(Tone {
-            freq_hz: 1_200,
-            duty_pct: DUTY_PCT_DEFAULT,
-        }),
-    },
-    Step {
-        duration_ms: 220,
-        tone: None,
-    },
-    Step {
-        duration_ms: 220,
-        tone: Some(Tone {
-            freq_hz: 1_500,
+            freq_hz: FREQ_MELODY_MID_HZ,
             duty_pct: DUTY_PCT_DEFAULT,
         }),
     },
@@ -568,7 +541,7 @@ const MELODY_MODE_CHARGE: [Step; 16] = [
     Step {
         duration_ms: 280,
         tone: Some(Tone {
-            freq_hz: 1_800,
+            freq_hz: FREQ_MELODY_HIGH_HZ,
             duty_pct: DUTY_PCT_DEFAULT,
         }),
     },
@@ -579,7 +552,40 @@ const MELODY_MODE_CHARGE: [Step; 16] = [
     Step {
         duration_ms: 220,
         tone: Some(Tone {
-            freq_hz: 1_500,
+            freq_hz: FREQ_MELODY_LOW_HZ,
+            duty_pct: DUTY_PCT_DEFAULT,
+        }),
+    },
+    Step {
+        duration_ms: 220,
+        tone: None,
+    },
+    Step {
+        duration_ms: 220,
+        tone: Some(Tone {
+            freq_hz: FREQ_MELODY_MID_HZ,
+            duty_pct: DUTY_PCT_DEFAULT,
+        }),
+    },
+    Step {
+        duration_ms: 220,
+        tone: None,
+    },
+    Step {
+        duration_ms: 280,
+        tone: Some(Tone {
+            freq_hz: FREQ_MELODY_HIGH_HZ,
+            duty_pct: DUTY_PCT_DEFAULT,
+        }),
+    },
+    Step {
+        duration_ms: 500,
+        tone: None,
+    },
+    Step {
+        duration_ms: 220,
+        tone: Some(Tone {
+            freq_hz: FREQ_MELODY_MID_HZ,
             duty_pct: DUTY_PCT_DEFAULT,
         }),
     },
@@ -590,7 +596,7 @@ const MELODY_MODE_CHARGE: [Step; 16] = [
     Step {
         duration_ms: 420,
         tone: Some(Tone {
-            freq_hz: 2_100,
+            freq_hz: FREQ_MELODY_HIGH_HZ,
             duty_pct: DUTY_PCT_DEFAULT,
         }),
     },
@@ -604,7 +610,7 @@ const MELODY_MODE_DISCHARGE: [Step; 14] = [
     Step {
         duration_ms: 220,
         tone: Some(Tone {
-            freq_hz: 2_100,
+            freq_hz: FREQ_MELODY_HIGH_HZ,
             duty_pct: DUTY_PCT_DEFAULT,
         }),
     },
@@ -615,7 +621,7 @@ const MELODY_MODE_DISCHARGE: [Step; 14] = [
     Step {
         duration_ms: 220,
         tone: Some(Tone {
-            freq_hz: 1_700,
+            freq_hz: FREQ_MELODY_MID_HZ,
             duty_pct: DUTY_PCT_DEFAULT,
         }),
     },
@@ -626,7 +632,7 @@ const MELODY_MODE_DISCHARGE: [Step; 14] = [
     Step {
         duration_ms: 280,
         tone: Some(Tone {
-            freq_hz: 1_300,
+            freq_hz: FREQ_MELODY_LOW_HZ,
             duty_pct: DUTY_PCT_DEFAULT,
         }),
     },
@@ -637,7 +643,7 @@ const MELODY_MODE_DISCHARGE: [Step; 14] = [
     Step {
         duration_ms: 220,
         tone: Some(Tone {
-            freq_hz: 2_100,
+            freq_hz: FREQ_MELODY_HIGH_HZ,
             duty_pct: DUTY_PCT_DEFAULT,
         }),
     },
@@ -648,7 +654,7 @@ const MELODY_MODE_DISCHARGE: [Step; 14] = [
     Step {
         duration_ms: 220,
         tone: Some(Tone {
-            freq_hz: 1_700,
+            freq_hz: FREQ_MELODY_MID_HZ,
             duty_pct: DUTY_PCT_DEFAULT,
         }),
     },
@@ -659,7 +665,7 @@ const MELODY_MODE_DISCHARGE: [Step; 14] = [
     Step {
         duration_ms: 280,
         tone: Some(Tone {
-            freq_hz: 1_300,
+            freq_hz: FREQ_MELODY_LOW_HZ,
             duty_pct: DUTY_PCT_DEFAULT,
         }),
     },
@@ -670,7 +676,7 @@ const MELODY_MODE_DISCHARGE: [Step; 14] = [
     Step {
         duration_ms: 500,
         tone: Some(Tone {
-            freq_hz: 1_000,
+            freq_hz: FREQ_MELODY_LOW_HZ,
             duty_pct: DUTY_PCT_DEFAULT,
         }),
     },
@@ -684,7 +690,7 @@ const MELODY_MODE_LOWBATT: [Step; 28] = [
     Step {
         duration_ms: 140,
         tone: Some(Tone {
-            freq_hz: 1_600,
+            freq_hz: FREQ_MELODY_HIGH_HZ,
             duty_pct: DUTY_PCT_DEFAULT,
         }),
     },
@@ -695,7 +701,7 @@ const MELODY_MODE_LOWBATT: [Step; 28] = [
     Step {
         duration_ms: 140,
         tone: Some(Tone {
-            freq_hz: 1_400,
+            freq_hz: FREQ_MELODY_MID_HZ,
             duty_pct: DUTY_PCT_DEFAULT,
         }),
     },
@@ -706,7 +712,7 @@ const MELODY_MODE_LOWBATT: [Step; 28] = [
     Step {
         duration_ms: 140,
         tone: Some(Tone {
-            freq_hz: 1_600,
+            freq_hz: FREQ_MELODY_HIGH_HZ,
             duty_pct: DUTY_PCT_DEFAULT,
         }),
     },
@@ -717,7 +723,7 @@ const MELODY_MODE_LOWBATT: [Step; 28] = [
     Step {
         duration_ms: 140,
         tone: Some(Tone {
-            freq_hz: 1_600,
+            freq_hz: FREQ_MELODY_HIGH_HZ,
             duty_pct: DUTY_PCT_DEFAULT,
         }),
     },
@@ -728,7 +734,7 @@ const MELODY_MODE_LOWBATT: [Step; 28] = [
     Step {
         duration_ms: 140,
         tone: Some(Tone {
-            freq_hz: 1_400,
+            freq_hz: FREQ_MELODY_MID_HZ,
             duty_pct: DUTY_PCT_DEFAULT,
         }),
     },
@@ -739,7 +745,7 @@ const MELODY_MODE_LOWBATT: [Step; 28] = [
     Step {
         duration_ms: 140,
         tone: Some(Tone {
-            freq_hz: 1_600,
+            freq_hz: FREQ_MELODY_HIGH_HZ,
             duty_pct: DUTY_PCT_DEFAULT,
         }),
     },
@@ -750,7 +756,7 @@ const MELODY_MODE_LOWBATT: [Step; 28] = [
     Step {
         duration_ms: 140,
         tone: Some(Tone {
-            freq_hz: 1_600,
+            freq_hz: FREQ_MELODY_HIGH_HZ,
             duty_pct: DUTY_PCT_DEFAULT,
         }),
     },
@@ -761,7 +767,7 @@ const MELODY_MODE_LOWBATT: [Step; 28] = [
     Step {
         duration_ms: 140,
         tone: Some(Tone {
-            freq_hz: 1_400,
+            freq_hz: FREQ_MELODY_MID_HZ,
             duty_pct: DUTY_PCT_DEFAULT,
         }),
     },
@@ -772,7 +778,7 @@ const MELODY_MODE_LOWBATT: [Step; 28] = [
     Step {
         duration_ms: 140,
         tone: Some(Tone {
-            freq_hz: 1_600,
+            freq_hz: FREQ_MELODY_HIGH_HZ,
             duty_pct: DUTY_PCT_DEFAULT,
         }),
     },
@@ -783,7 +789,7 @@ const MELODY_MODE_LOWBATT: [Step; 28] = [
     Step {
         duration_ms: 140,
         tone: Some(Tone {
-            freq_hz: 1_600,
+            freq_hz: FREQ_MELODY_HIGH_HZ,
             duty_pct: DUTY_PCT_DEFAULT,
         }),
     },
@@ -794,7 +800,7 @@ const MELODY_MODE_LOWBATT: [Step; 28] = [
     Step {
         duration_ms: 140,
         tone: Some(Tone {
-            freq_hz: 1_400,
+            freq_hz: FREQ_MELODY_MID_HZ,
             duty_pct: DUTY_PCT_DEFAULT,
         }),
     },
@@ -805,7 +811,7 @@ const MELODY_MODE_LOWBATT: [Step; 28] = [
     Step {
         duration_ms: 140,
         tone: Some(Tone {
-            freq_hz: 1_600,
+            freq_hz: FREQ_MELODY_HIGH_HZ,
             duty_pct: DUTY_PCT_DEFAULT,
         }),
     },
@@ -816,7 +822,7 @@ const MELODY_MODE_LOWBATT: [Step; 28] = [
     Step {
         duration_ms: 240,
         tone: Some(Tone {
-            freq_hz: 1_200,
+            freq_hz: FREQ_MELODY_LOW_HZ,
             duty_pct: DUTY_PCT_DEFAULT,
         }),
     },
@@ -827,7 +833,7 @@ const MELODY_MODE_LOWBATT: [Step; 28] = [
     Step {
         duration_ms: 240,
         tone: Some(Tone {
-            freq_hz: 1_000,
+            freq_hz: FREQ_MELODY_LOW_HZ,
             duty_pct: DUTY_PCT_DEFAULT,
         }),
     },
@@ -863,7 +869,7 @@ const MELODY_AC_LOST: [Step; 18] = [
     Step {
         duration_ms: 220,
         tone: Some(Tone {
-            freq_hz: 2_000,
+            freq_hz: FREQ_MELODY_LOW_HZ,
             duty_pct: DUTY_PCT_DEFAULT,
         }),
     },
@@ -874,7 +880,7 @@ const MELODY_AC_LOST: [Step; 18] = [
     Step {
         duration_ms: 220,
         tone: Some(Tone {
-            freq_hz: 2_300,
+            freq_hz: FREQ_MELODY_MID_HZ,
             duty_pct: DUTY_PCT_DEFAULT,
         }),
     },
@@ -885,7 +891,7 @@ const MELODY_AC_LOST: [Step; 18] = [
     Step {
         duration_ms: 220,
         tone: Some(Tone {
-            freq_hz: 2_600,
+            freq_hz: FREQ_MELODY_HIGH_HZ,
             duty_pct: DUTY_PCT_DEFAULT,
         }),
     },
@@ -918,7 +924,7 @@ const MELODY_AC_LOST: [Step; 18] = [
     Step {
         duration_ms: 450,
         tone: Some(Tone {
-            freq_hz: 1_600,
+            freq_hz: FREQ_MELODY_MID_HZ,
             duty_pct: DUTY_PCT_DEFAULT,
         }),
     },
@@ -929,7 +935,7 @@ const MELODY_AC_LOST: [Step; 18] = [
     Step {
         duration_ms: 450,
         tone: Some(Tone {
-            freq_hz: 1_300,
+            freq_hz: FREQ_MELODY_LOW_HZ,
             duty_pct: DUTY_PCT_DEFAULT,
         }),
     },
@@ -940,92 +946,93 @@ const MELODY_AC_LOST: [Step; 18] = [
 ];
 
 const MELODY_AC_RESTORED: [Step; 16] = [
+    // Gentle "startup" jingle (do-re-mi, cadence to do).
     Step {
-        duration_ms: 300,
+        duration_ms: 360,
         tone: Some(Tone {
-            freq_hz: 1_000,
+            freq_hz: FREQ_MELODY_LOW_HZ,
             duty_pct: DUTY_PCT_DEFAULT,
         }),
+    },
+    Step {
+        duration_ms: 80,
+        tone: None,
+    },
+    Step {
+        duration_ms: 360,
+        tone: Some(Tone {
+            freq_hz: FREQ_MELODY_MID_HZ,
+            duty_pct: DUTY_PCT_DEFAULT,
+        }),
+    },
+    Step {
+        duration_ms: 80,
+        tone: None,
+    },
+    Step {
+        duration_ms: 480,
+        tone: Some(Tone {
+            freq_hz: FREQ_MELODY_HIGH_HZ,
+            duty_pct: DUTY_PCT_DEFAULT,
+        }),
+    },
+    Step {
+        duration_ms: 140,
+        tone: None,
     },
     Step {
         duration_ms: 260,
-        tone: None,
-    },
-    Step {
-        duration_ms: 300,
         tone: Some(Tone {
-            freq_hz: 1_300,
+            freq_hz: FREQ_MELODY_HIGH_HZ,
             duty_pct: DUTY_PCT_DEFAULT,
         }),
+    },
+    Step {
+        duration_ms: 70,
+        tone: None,
     },
     Step {
         duration_ms: 260,
-        tone: None,
-    },
-    Step {
-        duration_ms: 420,
         tone: Some(Tone {
-            freq_hz: 1_600,
+            freq_hz: FREQ_MELODY_MID_HZ,
             duty_pct: DUTY_PCT_DEFAULT,
         }),
     },
     Step {
-        duration_ms: 520,
+        duration_ms: 70,
         tone: None,
     },
     Step {
-        duration_ms: 300,
+        duration_ms: 700,
         tone: Some(Tone {
-            freq_hz: 1_100,
+            freq_hz: FREQ_MELODY_LOW_HZ,
             duty_pct: DUTY_PCT_DEFAULT,
         }),
     },
     Step {
-        duration_ms: 260,
+        duration_ms: 220,
         tone: None,
     },
     Step {
-        duration_ms: 300,
+        duration_ms: 320,
         tone: Some(Tone {
-            freq_hz: 1_400,
+            freq_hz: FREQ_MELODY_MID_HZ,
             duty_pct: DUTY_PCT_DEFAULT,
         }),
     },
     Step {
-        duration_ms: 260,
+        duration_ms: 90,
         tone: None,
     },
     Step {
-        duration_ms: 450,
+        duration_ms: 620,
         tone: Some(Tone {
-            freq_hz: 1_700,
+            freq_hz: FREQ_MELODY_LOW_HZ,
             duty_pct: DUTY_PCT_DEFAULT,
         }),
     },
     Step {
-        duration_ms: 650,
-        tone: None,
-    },
-    Step {
-        duration_ms: 450,
-        tone: Some(Tone {
-            freq_hz: 1_200,
-            duty_pct: DUTY_PCT_DEFAULT,
-        }),
-    },
-    Step {
-        duration_ms: 450,
-        tone: None,
-    },
-    Step {
-        duration_ms: 450,
-        tone: Some(Tone {
-            freq_hz: 1_600,
-            duty_pct: DUTY_PCT_DEFAULT,
-        }),
-    },
-    Step {
-        duration_ms: 1_000,
+        duration_ms: 1_300,
         tone: None,
     },
 ];

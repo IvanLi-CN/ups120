@@ -36,7 +36,7 @@ use esp_hal::{
     delay::Delay,
     dma::{DmaRxBuf, DmaTxBuf},
     dma_buffers,
-    gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull},
+    gpio::{DriveStrength, Input, InputConfig, Level, Output, OutputConfig, Pull},
     i2c::master::{Config as I2cConfig, I2c},
     ledc::{
         LSGlobalClkSource, Ledc, LowSpeed, channel, channel::ChannelIFace, timer, timer::TimerIFace,
@@ -423,6 +423,17 @@ fn dashboard_mode_melody_id(mode: ui::DashboardMode) -> Option<prompt_tone::Soun
         ui::DashboardMode::Discharge => Some(prompt_tone::SoundId::MelodyModeDischarge),
         ui::DashboardMode::LowBatt => None,
     }
+}
+
+#[embassy_executor::task]
+async fn boot_melody_task(tone_tx: prompt_tone::ToneRequestSender) {
+    // Play a short, gentle startup jingle once per boot.
+    // Delay slightly so bring-up logs and display init don't feel "busy".
+    Timer::after(Duration::from_millis(900)).await;
+    info!("tone: boot melody");
+    let _ = tone_tx.try_send(prompt_tone::ToneRequest::ModeMelody(
+        prompt_tone::SoundId::MelodyAcRestored,
+    ));
 }
 
 /// Asynchronous UI task responsible for:
@@ -874,7 +885,7 @@ async fn main(spawner: Spawner) -> ! {
         InputConfig::default().with_pull(Pull::Up),
     );
 
-    // LEDC PWM: FAN_PWM on GPIO40 (LowSpeed@25kHz), BUZZER on GPIO38 (LowSpeed@2kHz)
+    // LEDC PWM: FAN_PWM on GPIO40 (LowSpeed@25kHz)
     let mut ledc = Ledc::new(peripherals.LEDC);
     ledc.set_global_slow_clock(LSGlobalClkSource::APBClk);
 
@@ -884,15 +895,6 @@ async fn main(spawner: Spawner) -> ! {
             duty: timer::config::Duty::Duty8Bit,
             clock_source: timer::LSClockSource::APBClk,
             frequency: Rate::from_khz(25),
-        })
-        .unwrap();
-
-    let mut t_buz = ledc.timer::<LowSpeed>(timer::Number::Timer1);
-    t_buz
-        .configure(timer::config::Config {
-            duty: timer::config::Duty::Duty8Bit,
-            clock_source: timer::LSClockSource::APBClk,
-            frequency: Rate::from_khz(2),
         })
         .unwrap();
 
@@ -906,16 +908,37 @@ async fn main(spawner: Spawner) -> ! {
         })
         .unwrap();
 
-    let mut buzzer = ledc.channel(channel::Number::Channel1, peripherals.GPIO38);
-    buzzer
+    // BUZZER on GPIO38: LEDC square PWM (audio-rate).
+    //
+    // Keep max GPIO drive strength to help saturate Q1 (see BUZZER datasheet).
+    let buzzer_output = Output::new(
+        peripherals.GPIO38,
+        Level::Low,
+        OutputConfig::default().with_drive_strength(DriveStrength::_40mA),
+    )
+    .into_peripheral_output();
+
+    let mut t_buz = ledc.timer::<LowSpeed>(timer::Number::Timer1);
+    t_buz
+        .configure(timer::config::Config {
+            duty: timer::config::Duty::Duty8Bit,
+            clock_source: timer::LSClockSource::APBClk,
+            frequency: Rate::from_hz(buzzer::DEFAULT_FREQ_HZ),
+        })
+        .unwrap();
+
+    let mut buzzer_ch = ledc.channel::<LowSpeed>(channel::Number::Channel1, buzzer_output);
+    buzzer_ch
         .configure(channel::config::Config {
             timer: &buzzer::BUZZER_TIMER_PROXY,
             duty_pct: 0,
             drive_mode: esp_hal::gpio::DriveMode::PushPull,
         })
         .unwrap();
-    let buzzer = buzzer::Buzzer::new(t_buz, buzzer);
+
+    let buzzer = buzzer::Buzzer::new(t_buz, buzzer_ch);
     let _ = spawner.spawn(prompt_tone::tone_task(buzzer, tone_rx));
+    let _ = spawner.spawn(boot_melody_task(_tone_tx.clone()));
     let _ = ui::boot_update(&mut spi, &mut _cs, &mut _dc, 25, "GPIO/LEDC PWM");
 
     // LCD Backlight on GPIO15 (LowSpeed@20kHz)
@@ -940,7 +963,7 @@ async fn main(spawner: Spawner) -> ! {
     info!("GPIO mappings: buttons center/up/right/down/left = 0/1/2/4/5");
     info!("I2C0 pins: SDA=GPIO8, SCL=GPIO9, INTn=GPIO7, USB2_PG=GPIO21");
     info!("SPI LCD pins: DC=GPIO10, MOSI=GPIO11, SCLK=GPIO12, CS=GPIO13, RST=GPIO14");
-    info!("Fan control: EN=GPIO39, PWM=GPIO40; buzzer=GPIO38 (2kHz)");
+    info!("Fan control: EN=GPIO39, PWM=GPIO40; buzzer=GPIO38 (LEDC PWM)");
 
     // Keep fan disabled until thermal task claims it.
     fan_en.set_low();

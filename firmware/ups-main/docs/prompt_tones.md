@@ -56,6 +56,11 @@
 - `MELODY_AC_LOST`
 - `MELODY_AC_RESTORED`
 
+补充：开机旋律
+
+- 每次 ESP32 启动后，延迟约 0.9s 播放一次开机旋律（当前复用 `MELODY_AC_RESTORED` 的 pattern）。
+- 目的：给用户一个“系统已启动且可交互”的听觉确认；不依赖 AC 边沿事件。
+
 ### NoticeOnce（一次性 ≥2s）
 
 - `NOTICE_INFO_ONCE`
@@ -298,4 +303,3 @@
 - 报警期间：
   - `ModeMelody` 与 `NoticeOnce` 不播放、不排队、不补播；
   - 任意按键动作完成仍有 Action 声音反馈，且延迟可控（建议 ≤250ms）。
-

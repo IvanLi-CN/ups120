@@ -8,8 +8,10 @@ use esp_hal::{
     time::Rate,
 };
 
+// Default duty is intentionally conservative to reduce stress and audible
+// harshness. Tune per-board if needed.
 pub const DEFAULT_DUTY_PCT: u8 = 8;
-pub const DEFAULT_FREQ_HZ: u32 = 2_000;
+pub const DEFAULT_FREQ_HZ: u32 = 2_700;
 
 #[derive(Clone, Copy)]
 pub struct TimerProxy {
@@ -90,7 +92,8 @@ impl Buzzer {
     }
 
     pub fn start_tone(&mut self, freq_hz: u32, duty_pct: Option<u8>) {
-        let duty_pct = duty_pct.unwrap_or(self.duty_pct);
+        let freq_hz = freq_hz.max(1);
+        let duty_pct = duty_pct.unwrap_or(self.duty_pct).min(100);
         self.freq_hz = freq_hz;
         self.duty_pct = duty_pct;
 
