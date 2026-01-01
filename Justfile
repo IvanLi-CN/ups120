@@ -1,8 +1,44 @@
 set shell := ["/bin/sh", "-c"]
 
+# List available recipes (default)
+default:
+	@if just --list --unsorted >/dev/null 2>&1; then \
+	  just --list --unsorted; \
+	else \
+	  just --list; \
+	fi
+
+# Alias of `default`
+help: default
+
+# Alias of `default`
+list: default
+
 # Generic agentd passthrough
 agentd +args:
 	mcu-agentd {{args}}
+
+# Install mcu-agentd/mcu-managerd from a local checkout.
+_agentd-install path="":
+	set -eu; \
+	REPO="{{path}}"; \
+	if [ -z "$REPO" ]; then REPO="${MCU_AGENTD_PATH:-../mcu-agentd}"; fi; \
+	if [ ! -d "$REPO" ]; then \
+	  echo "mcu-agentd repo not found at: $REPO"; \
+	  echo "Usage: just agentd-init path=/path/to/mcu-agentd"; \
+	  echo "   or: MCU_AGENTD_PATH=/path/to/mcu-agentd just agentd-init"; \
+	  exit 2; \
+	fi; \
+	cargo install --force --path "$REPO" --bins; \
+	mcu-agentd --version; \
+	mcu-managerd --version
+
+agentd-init path="":
+	@just agentd stop >/dev/null 2>&1 || true
+	@just _agentd-install path="{{path}}"
+	@just agentd-start
+
+agnetd-init: agentd-init
 
 agentd-start:
 	just agentd start
@@ -12,9 +48,6 @@ agentd-status:
 
 agentd-stop:
 	just agentd stop
-
-managerd-project-add:
-	mcu-managerd projects add .
 
 agentd-web:
 	mcu-agentd web
