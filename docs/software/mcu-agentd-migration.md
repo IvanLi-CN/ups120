@@ -2,7 +2,7 @@
 
 ## 背景
 
-`ups120` 仓库历史上维护过一套项目内自研的 `ups120-agentd`（位于 `tools/` 下的 `mcu-agentd` 子项目），用于统一执行 ESP32/STM32 的烧录、复位与日志采集。该实现与外部项目 `/Users/ivan/Projects/Ivan/mcu-agentd` 的能力与维护节奏发生分叉，导致重复维护与行为不一致风险。
+`ups120` 仓库历史上维护过一套项目内自研的 `ups120-agentd`（位于 `tools/` 下的 `mcu-agentd` 子项目），用于统一执行 ESP32/STM32 的烧录、复位与日志采集。该实现与外部项目 `../mcu-agentd` 的能力与维护节奏发生分叉，导致重复维护与行为不一致风险。
 
 本工作项将 `ups120` 的 on-target 工作流切换到外部 `mcu-agentd`/`mcu-managerd`，并移除仓库内的自研实现。
 
@@ -10,7 +10,7 @@
 
 - 统一入口：`ups120` 的 flash/reset/monitor/logs/selector 统一通过外部 `mcu-agentd` 执行。
 - 保留现有端口/探针缓存习惯：ESP32 使用 `.esp32-port`，STM32 使用 `.stm32-port`。
-- 使用 Web UI：通过 `mcu-managerd` 注册项目并提供 Web UI/HTTP API 入口。
+- 使用 Web UI：通过 `mcu-agentd` 启动时自动注册项目并提供 Web UI/HTTP API 入口。
 - 移除遗留实现与垃圾内容：删除 `tools/mcu-agentd/`，并删除旧版 STM32 probe selector 缓存文件（不再生成/读取）。
 
 ## 非目标
@@ -29,9 +29,7 @@
 - 迁移 `just` 包装：
   - 保留 `sb-*` 与 `ups-*` 命令作为主入口。
   - `agentd-*` 命令语义与外部工具对齐（selector/web/config validate 等）。
-- 项目注册与 Web UI 工作流落地：
-  - `mcu-managerd projects add .`
-  - `open "$(mcu-agentd web)"`
+- Web UI 工作流落地：`open "$(mcu-agentd web)"`
 - 清理遗留：
   - 删除 `tools/mcu-agentd/`
   - 删除旧版 STM32 probe selector 缓存文件，并确保脚本/文档不再引用它
@@ -45,12 +43,11 @@
 
 ### 1) 首次使用（一次性）
 
-1. 全局安装外部工具：
-   - `cargo install --path /Users/ivan/Projects/Ivan/mcu-agentd --bins`
+1. 全局安装外部工具并启动 daemon：
+   - `just agentd-init`
 2. 在仓库根创建并校验 `mcu-agentd.toml`：
    - `mcu-agentd config validate`
-3. 注册项目并打开 Web UI：
-   - `mcu-managerd projects add .`
+3. 打开 Web UI：
    - `open "$(mcu-agentd web)"`
 4. 设置 selector（建议显式指定 VALUE，避免交互模式的严格校验门槛）：
    - ESP32：`mcu-agentd selector set esp32 /dev/cu.usbmodemXXXX`
@@ -128,7 +125,7 @@
 
 - 配置与注册：
   - `mcu-agentd config validate` 在仓库根执行成功。
-  - `mcu-managerd projects add .` 注册成功，`open "$(mcu-agentd web)"` 可打开 Web UI 并切换到 `ups120`。
+  - `mcu-agentd start` 启动成功，`open "$(mcu-agentd web)"` 可打开 Web UI 并切换到 `ups120`。
 - 缓存文件：
   - `.esp32-port` / `.stm32-port` 可被 `mcu-agentd selector get` 正确读回。
   - 旧版 STM32 probe selector 缓存文件不存在，且仓库内无脚本/文档再引用它。

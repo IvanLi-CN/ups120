@@ -17,7 +17,15 @@
 - 全局安装（产物在 `$HOME/.cargo/bin`，确保在 `PATH` 中）：
 
   ```bash
-  cargo install --path /Users/ivan/Projects/Ivan/mcu-agentd --bins
+  cargo install --path ../mcu-agentd --bins
+  ```
+
+  或使用本仓库的 `just` 封装（强制安装 + 自动启动）：
+
+  ```bash
+  just agentd-init
+  # or: just agentd-init path=../mcu-agentd
+  # or: MCU_AGENTD_PATH=../mcu-agentd just agentd-init
   ```
 
 校验：
@@ -99,12 +107,6 @@ mcu-agentd selector get stm32
 
 ## 项目注册与 Web UI
 
-首次使用需显式注册项目（支持多项目切换与资源仲裁）：
-
-```bash
-mcu-managerd projects add .
-```
-
 打开 Web UI：
 
 ```bash
@@ -155,6 +157,6 @@ mcu-agentd monitor stm32 --from-start
 ## 验收标准（迁移完成后）
 
 - `mcu-agentd config validate` 在仓库根执行成功。
-- `mcu-managerd projects add .` 注册成功，`mcu-agentd web` 可打开 Web UI，并能切换到 `ups120`。
+- `mcu-agentd start` 启动成功，`mcu-agentd web` 可打开 Web UI，并能切换到 `ups120`。
 - ESP32/STM32 的 selector 可写入 `.esp32-port`/`.stm32-port` 并被 `mcu-agentd selector get` 正确读回。
 - `mcu-agentd flash/reset/monitor/logs` 对 `esp32` 与 `stm32` 均可用，且日志落盘到 `./.mcu-agentd/`。
