@@ -1,8 +1,8 @@
 set shell := ["/bin/sh", "-c"]
 
-# Generic agentd passthrough (release)
+# Generic agentd passthrough
 agentd +args:
-	cd tools/mcu-agentd && cargo run --release -- {{args}}
+	mcu-agentd {{args}}
 
 agentd-start:
 	just agentd start
@@ -13,15 +13,24 @@ agentd-status:
 agentd-stop:
 	just agentd stop
 
+managerd-project-add:
+	mcu-managerd projects add .
+
+agentd-web:
+	mcu-agentd web
+
+agentd-web-open:
+	open "$(mcu-agentd web)"
+
 agentd-set-port mcu path="":
 	if [ -z "{{path}}" ]; then \
-	  cd tools/mcu-agentd && cargo run --release -- set-port {{mcu}}; \
+	  mcu-agentd selector set --auto {{mcu}}; \
 	else \
-	  cd tools/mcu-agentd && cargo run --release -- set-port {{mcu}} {{path}}; \
+	  mcu-agentd selector set {{mcu}} "{{path}}"; \
 	fi
 
 agentd-get-port mcu:
-	cd tools/mcu-agentd && cargo run --release -- get-port {{mcu}}
+	mcu-agentd selector get {{mcu}}
 
 # Smart-battery (STM32)
 sb-build:
@@ -33,7 +42,7 @@ sb-build:
 	CARGO_TARGET_DIR="$TARGET_DIR" PROBE_ADDR="$PROBE_ADDR" DEFMT_LOG="$DEFMT_LOG" cargo build --release --target thumbv6m-none-eabi
 
 sb-flash: sb-build
-	just agentd flash stm32 ../../target/thumbv6m-none-eabi/release/smart-battery
+	just agentd flash stm32
 
 sb-build-ship:
 	set -eu; \
@@ -44,7 +53,7 @@ sb-build-ship:
 	CARGO_TARGET_DIR="$TARGET_DIR" PROBE_ADDR="$PROBE_ADDR" DEFMT_LOG="$DEFMT_LOG" cargo build --release --target thumbv6m-none-eabi --features ship-mode
 
 sb-flash-ship: sb-build-ship
-	just agentd flash stm32 ../../target/thumbv6m-none-eabi/release/smart-battery
+	just agentd flash stm32
 
 sb-run-ship:
 	just sb-flash-ship
@@ -54,22 +63,20 @@ sb-reset:
 	just agentd reset stm32
 
 sb-monitor:
-	just agentd monitor stm32 --duration 30s --lines 200
+	just agentd monitor stm32 --from-start
 
 # UPS main (ESP32-S3)
 ups-build:
 	cd firmware/ups-main && cargo build --release
 
 ups-flash: ups-build
-	# ESP32 ELF is built under firmware/ups-main/target by default
-	# Path is relative to tools/mcu-agentd (see agentd recipe above).
-	just agentd flash esp32 ../../firmware/ups-main/target/xtensa-esp32s3-none-elf/release/ups-main
+	just agentd flash esp32
 
 ups-reset:
 	just agentd reset esp32
 
 ups-monitor:
-	just agentd monitor esp32 --duration 30s --lines 200
+	just agentd monitor esp32 --from-start
 
 # Driver demo (STM32G0)
 driver-demo-build:

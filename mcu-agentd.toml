@@ -1,0 +1,24 @@
+[project]
+id = "ups120"
+
+[mcu.esp32]
+backend = "espflash"
+chip = "esp32s3"
+artifact_elf = "firmware/ups-main/target/xtensa-esp32s3-none-elf/release/ups-main"
+selector_cache_file = ".esp32-port"
+
+[mcu.esp32.espflash]
+log_format = "defmt"
+after_flash = "no-reset"
+skip_update_check = true
+
+[mcu.stm32]
+backend = "probe-rs"
+chip = "STM32L051C8Tx"
+artifact_elf = "target/thumbv6m-none-eabi/release/smart-battery"
+selector_cache_file = ".stm32-port"
+
+[mcu.stm32.probe_rs]
+protocol = "swd"
+speed_khz = 4000
+connect_under_reset = false

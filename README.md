@@ -7,6 +7,8 @@ This repository now hosts two firmware targets under a unified workspace:
 
 Refer to [WORKFLOW.md](WORKFLOW.md) and [DESIGN_MEMORANDUM.md](DESIGN_MEMORANDUM.md) for project context.
 
+Flashing/reset/log capture is routed through `mcu-agentd` (see `docs/mcu-agentd.md`).
+
 ## Repository Layout
 
 - `firmware/smart-battery/`: Rust + Embassy firmware for `STM32L051C8T6`
@@ -36,12 +38,16 @@ GPIO mapping (netlist‑accurate; the `.ioc` file is slightly stale):
 
 ### Build & Run
 
-From `firmware/smart-battery`:
+From the repository root:
 
-1) Ensure Rust targets installed: `rustup target add thumbv6m-none-eabi`
-2) Flash/Run with probe-rs: `cargo run` (uses local `.cargo/config.toml`)
+1) Ensure targets are installed: `rustup target add thumbv6m-none-eabi`
+2) Build: `just sb-build`
+3) Flash: `just sb-flash`
+4) Monitor: `just sb-monitor`
 
-Config uses `probe-rs` runner with chip `STM32L051C8Tx`. Update if your package differs.
+Notes:
+- The on-target workflow is mediated by `mcu-agentd` (do not call `probe-rs` directly).
+- If you use a custom `CARGO_TARGET_DIR`, update `mcu-agentd.toml` accordingly.
 
 ### Notes on Port
 
@@ -52,6 +58,14 @@ Config uses `probe-rs` runner with chip `STM32L051C8Tx`. Update if your package 
 ## UPS Main (ESP32S3FH4R2)
 
 `firmware/ups-main` is an actively developed Rust firmware using `esp-hal` on ESP32-S3. System coordination, fan control, and I2C integrations (e.g., smart‑battery telemetry) are incrementally landing here.
+
+### Build & Run
+
+From the repository root:
+
+1) Build: `just ups-build`
+2) Flash: `just ups-flash`
+3) Monitor: `just ups-monitor`
 
 ## License
 

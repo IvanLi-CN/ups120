@@ -24,18 +24,21 @@
 
 ## Hardware Flashing & Logging (mcu-agentd)
 
-- **Single daemon, `just` wrappers**: All flash/reset/monitor/log actions must use `tools/mcu-agentd`; prefer `just agentd-*`. Do not call `espflash`, raw `probe-rs`, or Make `run/attach/reset` targets.
-- **Daemon control**: `just agentd-start | agentd-status | agentd-stop` (equivalent to `cd tools/mcu-agentd && cargo run --release -- {start|status|stop}`). Socket/lock live under `logs/agentd/`.
+- **Single daemon, `just` wrappers**: All flash/reset/monitor/log actions must use `mcu-agentd` via the `just` wrappers. Do not call `espflash`/`probe-rs` directly.
+- **Project config**: repo root must provide `mcu-agentd.toml` (see `docs/mcu-agentd.md`).
+- **Daemon control**: `just agentd-start | agentd-status | agentd-stop` (equivalent to `mcu-agentd {start|status|stop}`).
 - **Port/probe cache (user approval required)**:
-  - Set: `just agentd set-port esp32 <port>` / `just agentd set-port stm32 <probe-id>` (no dash between set and port). Do not change ports/probes without explicit user consent.
-  - Get: `just agentd-get-port esp32|stm32`.
+  - Cache files: `.esp32-port`, `.stm32-port`.
+  - Set (preferred): `mcu-agentd selector set esp32 <port>` / `mcu-agentd selector set stm32 <probe-id>`.
+  - Get: `mcu-agentd selector get esp32|stm32`.
 - **Flash / reset / monitor**:
-  - Flash: `just agentd flash esp32` / `just agentd flash stm32`; defaults to release ELF. If the default ELF is missing, build it or pass `--elf`. ESP32 supports `--after hard-reset`.
-  - Reset: `just agentd reset esp32|stm32` (reset only).
-  - Monitor: `just agentd monitor esp32|stm32 --duration 30s --lines 200` (optional); returns the session log path and tails it.
-  - Logs: `just agentd logs all --tail 200 --sessions` aggregates meta + recent sessions. Session logs live at `logs/agentd/{esp32,stm32}/YYYYMMDD_HHMMSS.session.log`; meta events at `logs/agentd/{esp32,stm32}.meta.log`.
+  - Flash: `mcu-agentd flash esp32` / `mcu-agentd flash stm32` (ELF comes from `mcu-agentd.toml`; build first if missing).
+  - Reset: `mcu-agentd reset esp32|stm32` (reset only).
+  - Monitor: `mcu-agentd monitor esp32|stm32` (`--from-start` / `--reset` optional; streams until Ctrl+C).
+  - Logs: `mcu-agentd logs all --tail 200 --sessions` aggregates meta + recent sessions.
 - **Default ELF paths**: ESP32 `firmware/ups-main/target/xtensa-esp32s3-none-elf/release/ups-main`; STM32 `target/thumbv6m-none-eabi/release/smart-battery`. Build first if absent.
 - **Version check**: ensure boot logs print firmware version/hash and confirm it matches the locally built image before validating hardware results.
+- **Web UI (optional)**: register the project once via `mcu-managerd projects add .`, then open `open "$(mcu-agentd web)"`.
 - **Bring-up order**: power/flash/run ESP32 (`ups-main`) first, then flash/reset STM32 (smart-battery). STM32 I2C1 is an external slave; if the host is absent or the bus is floating, the STM32 will see repeated NACKs from that bus.
 - **STM32 gating**: keep STM32 held in reset or unpowered until ESP32 has completed its post-boot init (I2C host up, rails configured). STM32 depends on ESP32's initialization to enter controlled mode; if STM32 boots first, it will remain in an uninitialized/NACK loop.
 - **User interaction rule**: agentd uses cached or auto-detected ports first; only ask the user if unresolved. Never switch probes/ports without consent.
