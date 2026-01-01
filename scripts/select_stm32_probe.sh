@@ -35,8 +35,6 @@ SELECTOR=$(echo "$SEL_LINE" | sed -E 's/.*-- ([^ ]+).*/\1/')
 
 REPO_ROOT=$(cd "$(dirname "$0")/.." && pwd)
 echo "$SELECTOR" > "$REPO_ROOT/.stm32-port"
-# keep legacy file for compatibility with older tooling
-echo "$SELECTOR" > "$REPO_ROOT/.stm32-probe"
 
 if [ $# -gt 0 ]; then
   TARGET="$1"; shift || true
