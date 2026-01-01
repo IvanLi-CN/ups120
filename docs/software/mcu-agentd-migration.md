@@ -136,4 +136,3 @@
   - `mcu-agentd flash/reset/monitor/logs` 对 `esp32` 与 `stm32` 均可用，且日志落盘到 `./.mcu-agentd/`。
 - 清理：
   - `tools/mcu-agentd/` 不存在，`Justfile` 不再引用它。
-  - `tools/mcu-agentd/` 不存在，`Justfile` 不再引用它。
