@@ -21,6 +21,7 @@ tmp/
 # Local flashing caches
 .stm32-port
 .esp32-port
+.mcu-agentd/
 
 # Local virtual environments
 .venv/
