@@ -2,7 +2,7 @@
 
 ## 背景
 
-`ups120` 仓库历史上维护过一套项目内自研的 `ups120-agentd`（位于 `tools/mcu-agentd/`），用于统一执行 ESP32/STM32 的烧录、复位与日志采集。该实现与外部项目 `/Users/ivan/Projects/Ivan/mcu-agentd` 的能力与维护节奏发生分叉，导致重复维护与行为不一致风险。
+`ups120` 仓库历史上维护过一套项目内自研的 `ups120-agentd`（位于 `tools/` 下的 `mcu-agentd` 子项目），用于统一执行 ESP32/STM32 的烧录、复位与日志采集。该实现与外部项目 `/Users/ivan/Projects/Ivan/mcu-agentd` 的能力与维护节奏发生分叉，导致重复维护与行为不一致风险。
 
 本工作项将 `ups120` 的 on-target 工作流切换到外部 `mcu-agentd`/`mcu-managerd`，并移除仓库内的自研实现。
 
@@ -135,4 +135,5 @@
 - 日常动作：
   - `mcu-agentd flash/reset/monitor/logs` 对 `esp32` 与 `stm32` 均可用，且日志落盘到 `./.mcu-agentd/`。
 - 清理：
+  - `tools/mcu-agentd/` 不存在，`Justfile` 不再引用它。
   - `tools/mcu-agentd/` 不存在，`Justfile` 不再引用它。
