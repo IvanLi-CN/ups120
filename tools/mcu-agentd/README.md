@@ -9,7 +9,7 @@
   - `agentd.sock` / `agentd.lock`：单实例通信与锁。
   - `esp32.meta.log` / `stm32.meta.log`：事件元数据（NDJSON）。
   - `esp32/`、`stm32/`：会话/监控日志（`*-mon.log`、`*.session.log`）。
-- 端口缓存文件：仓库根 `.esp32-port`、`.stm32-port`（兼容读取 `.stm32-probe`）。
+- 端口缓存文件：仓库根 `.esp32-port`、`.stm32-port`。
 
 ## 核心行为
 

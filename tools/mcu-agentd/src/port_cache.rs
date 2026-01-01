@@ -11,12 +11,6 @@ pub fn read_port(paths: &Paths, mcu: McuKind) -> Result<Option<String>> {
     if p.exists() {
         return Ok(Some(fs::read_to_string(p)?.trim().to_string()));
     }
-    // legacy
-    if mcu == McuKind::Stm32 && paths.stm32_legacy.exists() {
-        return Ok(Some(
-            fs::read_to_string(&paths.stm32_legacy)?.trim().to_string(),
-        ));
-    }
     Ok(None)
 }
 

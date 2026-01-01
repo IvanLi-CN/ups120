@@ -13,7 +13,6 @@ pub struct Paths {
     pub session_stm32: PathBuf,
     pub esp32_port: PathBuf,
     pub stm32_port: PathBuf,
-    pub stm32_legacy: PathBuf,
 }
 
 impl Paths {
@@ -44,7 +43,6 @@ impl Paths {
         let session_stm32 = logs_dir.join("stm32");
         let esp32_port = root.join(".esp32-port");
         let stm32_port = root.join(".stm32-port");
-        let stm32_legacy = root.join(".stm32-probe");
         Ok(Self {
             root,
             sock,
@@ -56,7 +54,6 @@ impl Paths {
             session_stm32,
             esp32_port,
             stm32_port,
-            stm32_legacy,
         })
     }
     pub fn ensure_dirs(&self) -> Result<()> {

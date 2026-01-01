@@ -11,7 +11,7 @@
 - 统一入口：`ups120` 的 flash/reset/monitor/logs/selector 统一通过外部 `mcu-agentd` 执行。
 - 保留现有端口/探针缓存习惯：ESP32 使用 `.esp32-port`，STM32 使用 `.stm32-port`。
 - 使用 Web UI：通过 `mcu-managerd` 注册项目并提供 Web UI/HTTP API 入口。
-- 移除遗留实现与垃圾内容：删除 `tools/mcu-agentd/`，并删除 `.stm32-probe`（不再生成/读取）。
+- 移除遗留实现与垃圾内容：删除 `tools/mcu-agentd/`，并删除旧版 STM32 probe selector 缓存文件（不再生成/读取）。
 
 ## 非目标
 
@@ -34,7 +34,7 @@
   - `open "$(mcu-agentd web)"`
 - 清理遗留：
   - 删除 `tools/mcu-agentd/`
-  - 删除 `.stm32-probe`，并确保脚本/文档不再引用它
+  - 删除旧版 STM32 probe selector 缓存文件，并确保脚本/文档不再引用它
 
 ### out-of-scope
 
@@ -85,7 +85,7 @@
 
 约束：
 
-- `.stm32-probe` 必须删除且不再生成/读取。
+- 旧版 STM32 probe selector 缓存文件必须删除且不再生成/读取。
 
 ## 接口与模块边界（概要设计）
 
@@ -107,7 +107,7 @@
 ### 3) selector 缓存策略
 
 - 以 `.esp32-port` 与 `.stm32-port` 为唯一真相文件。
-- `scripts/*probe*`（若仍保留）必须遵循该策略，禁止生成 `.stm32-probe`。
+- `scripts/*probe*`（若仍保留）必须遵循该策略，禁止生成旧版 STM32 probe selector 缓存文件。
 
 ## 兼容性与迁移
 
@@ -116,7 +116,7 @@
 - 命令语义迁移：
   - `monitor` 不再支持 `--duration/--lines`；由使用者通过 Ctrl+C 或外部 shell 控制。
 - selector 文件迁移：
-  - `.stm32-probe` 不再兼容；仅 `.stm32-port` 生效。
+  - 旧版 STM32 probe selector 缓存文件不再兼容；仅 `.stm32-port` 生效。
 
 ## 风险与缓解
 
@@ -131,9 +131,8 @@
   - `mcu-managerd projects add .` 注册成功，`open "$(mcu-agentd web)"` 可打开 Web UI 并切换到 `ups120`。
 - 缓存文件：
   - `.esp32-port` / `.stm32-port` 可被 `mcu-agentd selector get` 正确读回。
-  - `.stm32-probe` 不存在，且仓库内无脚本/文档再引用它。
+  - 旧版 STM32 probe selector 缓存文件不存在，且仓库内无脚本/文档再引用它。
 - 日常动作：
   - `mcu-agentd flash/reset/monitor/logs` 对 `esp32` 与 `stm32` 均可用，且日志落盘到 `./.mcu-agentd/`。
 - 清理：
   - `tools/mcu-agentd/` 不存在，`Justfile` 不再引用它。
-
